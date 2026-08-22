@@ -3,6 +3,8 @@
 //! Provider-agnostic reverse proxy that scans and redacts egress
 //! toward any LLM. Reuses the detection engine from `cerberus-engine`.
 
+#![allow(unknown_lints)]
+
 pub mod adapters;
 pub mod api;
 pub mod config;
