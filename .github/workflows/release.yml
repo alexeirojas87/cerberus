@@ -102,13 +102,13 @@ jobs:
 
       # ── Firma macOS (solo si la CI tiene credenciales de Apple) ────────────
       - name: codesign + notarize (macOS)
-        if: ${{ runner.os == 'macOS' && secrets.APPLE_ID != '' &&
-              secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        if: ${{ runner.os == 'macOS' && env.HAS_APPLE_CREDS == 'true' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+          HAS_APPLE_CREDS: ${{ (secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '') && 'true' || 'false' }}
         run: |
           ARF="dist/${{ steps.build.outputs.artifact }}"
           echo "firmando $ARF"
@@ -116,12 +116,12 @@ jobs:
 
       # ── Firma Authenticode Windows (solo con credenciales) ─────────────────
       - name: signtool Authenticode
-        if: ${{ matrix.os == 'windows-latest' && secrets.WINDOWS_SIGN_CERT != '' &&
-              secrets.WINDOWS_SIGN_PASSWORD != '' }}
+        if: ${{ matrix.os == 'windows-latest' && env.HAS_WIN_CREDS == 'true' }}
         shell: bash
         env:
           WINDOWS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT }}
           WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+          HAS_WIN_CREDS: ${{ (secrets.WINDOWS_SIGN_CERT != '' && secrets.WINDOWS_SIGN_PASSWORD != '') && 'true' || 'false' }}
         run: |
           # 1) extraer cerberus.exe del .zip
           python - <<'PY'
