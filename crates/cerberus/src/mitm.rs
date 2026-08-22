@@ -361,7 +361,10 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos())
         ));
+        // Create both the unix config dir (.cerberus) and the Windows config
+        // dir (Cerberus) so config_dir() resolves correctly on either platform.
         std::fs::create_dir_all(dir.join(".cerberus")).expect("create home");
+        std::fs::create_dir_all(dir.join("Cerberus")).expect("create home (windows)");
         dir
     }
 
@@ -370,7 +373,9 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = temp_home("off");
         let prev_home = std::env::var("HOME").ok();
+        let prev_appdata = std::env::var("APPDATA").ok();
         std::env::set_var("HOME", &home);
+        std::env::set_var("APPDATA", &home);
         let dir_error = enable_with_daemon_state(&["api.openai.com".to_string()], "127.0.0.1:8788", false)
             .expect_err("missing CA must fail BEFORE touching config");
         assert!(dir_error.contains("CA not ready"), "{dir_error}");
@@ -392,6 +397,10 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
+        match prev_appdata {
+            Some(v) => std::env::set_var("APPDATA", v),
+            None => std::env::remove_var("APPDATA"),
+        }
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -402,7 +411,9 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = temp_home("strict-ca");
         let prev_home = std::env::var("HOME").ok();
+        let prev_appdata = std::env::var("APPDATA").ok();
         std::env::set_var("HOME", &home);
+        std::env::set_var("APPDATA", &home);
         init_ca().expect("init CA");
         std::fs::OpenOptions::new()
             .append(true)
@@ -431,6 +442,10 @@ mod tests {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+        match prev_appdata {
+            Some(v) => std::env::set_var("APPDATA", v),
+            None => std::env::remove_var("APPDATA"),
+        }
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -439,7 +454,9 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = temp_home("on");
         let prev_home = std::env::var("HOME").ok();
+        let prev_appdata = std::env::var("APPDATA").ok();
         std::env::set_var("HOME", &home);
+        std::env::set_var("APPDATA", &home);
         init_ca().expect("init CA");
 
         // "Daemon running": pid file with the current live process.
@@ -470,6 +487,10 @@ mod tests {
         match prev_home {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
+        }
+        match prev_appdata {
+            Some(v) => std::env::set_var("APPDATA", v),
+            None => std::env::remove_var("APPDATA"),
         }
         std::fs::remove_dir_all(&home).ok();
     }

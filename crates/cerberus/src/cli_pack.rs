@@ -332,7 +332,10 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos())
         ));
+        // Create both the unix config dir (.cerberus) and the Windows config
+        // dir (Cerberus) so config_dir() resolves correctly on either platform.
         std::fs::create_dir_all(dir.join(".cerberus")).expect("create home");
+        std::fs::create_dir_all(dir.join("Cerberus")).expect("create home (windows)");
         dir
     }
 
@@ -407,8 +410,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = temp_home("endpoint");
         let prev_home = std::env::var("HOME").ok();
+        let prev_appdata = std::env::var("APPDATA").ok();
         let prev_listen = std::env::var("CERBERUS_LISTEN").ok();
         std::env::set_var("HOME", &home);
+        std::env::set_var("APPDATA", &home);
         std::env::remove_var("CERBERUS_LISTEN");
 
         // 4. default.
@@ -421,7 +426,7 @@ mod tests {
         );
 
         // 3. config.yaml.
-        std::fs::write(home.join(".cerberus").join("config.yaml"), "listen: 0.0.0.0:9001\n").expect("cfg");
+        std::fs::write(config_dir().join("config.yaml"), "listen: 0.0.0.0:9001\n").expect("cfg");
         assert_eq!(
             resolve_endpoint(),
             ResolvedEndpoint {
@@ -473,6 +478,10 @@ mod tests {
         match prev_home {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
+        }
+        match prev_appdata {
+            Some(v) => std::env::set_var("APPDATA", v),
+            None => std::env::remove_var("APPDATA"),
         }
         std::fs::remove_dir_all(&home).ok();
     }
