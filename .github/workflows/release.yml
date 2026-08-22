@@ -89,6 +89,7 @@ jobs:
 
       - name: Build release binary + artifact
         id: build
+        shell: bash
         env:
           CERBERUS_OS: ${{ matrix.os_name }}
           CERBERUS_ARCH: ${{ matrix.arch }}

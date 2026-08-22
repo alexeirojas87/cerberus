@@ -101,7 +101,12 @@ cp "$BIN_PATH" "$STAGE/$EXPECTED_BIN"
 if [ "${CERBERUS_STRIP:-0}" = "1" ]; then
   strip_="$(command -v strip || true)"
   if [ -n "$strip_" ] && [ "$OS" != "windows" ]; then
-    "$strip_" --strip-unneeded "$STAGE/$EXPECTED_BIN"
+    # macOS strip (Apple) does not support --strip-unneeded; use -Sx instead.
+    if [ "$OS" = "macos" ]; then
+      "$strip_" -Sx "$STAGE/$EXPECTED_BIN"
+    else
+      "$strip_" --strip-unneeded "$STAGE/$EXPECTED_BIN"
+    fi
   fi
 fi
 
