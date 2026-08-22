@@ -64,6 +64,13 @@ pub(crate) const fn daemon_binary_name() -> &'static str {
 pub(crate) fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
+        // A PID that does not fit in `pid_t` (i32) cannot correspond to a
+        // real process. u32::MAX reinterprets as -1, which `kill` treats as
+        // "all processes the caller may signal" and would wrongly report as
+        // alive. Reject it up front.
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
         let output = StdCommand::new("kill").arg("-0").arg(pid.to_string()).output();
         matches!(output, Ok(o) if o.status.success())
     }
