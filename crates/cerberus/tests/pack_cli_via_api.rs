@@ -30,6 +30,29 @@ const ADMIN_TOKEN: &str = "cerberus-cli-control-plane-test-token-0123";
 /// Success response from the mock control plane.
 const MOCK_RESPONSE: &str = r#"{"status":"ok","message":"installed via control plane API"}"#;
 
+/// Platform-appropriate config sub-directory: `.cerberus` on Unix,
+/// `Cerberus` on Windows (matching `config_dir()` which reads `%APPDATA%`).
+fn config_subdir(home: &std::path::Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        home.join("Cerberus")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        home.join(".cerberus")
+    }
+}
+
+/// Build a `cerberus` subprocess with HOME (and APPDATA on Windows) set to
+/// `home` so that `config_dir()` resolves to the isolated temp directory.
+fn cerberus_cmd(home: &std::path::Path) -> Command {
+    let mut cmd = Command::new(binary());
+    cmd.env("HOME", home);
+    #[cfg(target_os = "windows")]
+    cmd.env("APPDATA", home);
+    cmd
+}
+
 fn temp_dir(prefix: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
         "cerberus_{prefix}_{}_{}",
@@ -39,6 +62,7 @@ fn temp_dir(prefix: &str) -> PathBuf {
             .map_or(0, |d| d.as_nanos())
     ));
     std::fs::create_dir_all(&d).expect("create tmp dir");
+    std::fs::create_dir_all(config_subdir(&d)).expect("create cfg dir");
     d.canonicalize().unwrap_or(d)
 }
 
@@ -94,8 +118,7 @@ fn cli_pack_uses_control_plane_when_daemon_running() {
     let (addr, handle, hits) = spawn_mock_control_plane();
 
     let dir = temp_dir("pack_cli_api");
-    let cfg_dir = dir.join(".cerberus");
-    std::fs::create_dir_all(&cfg_dir).expect("create .cerberus");
+    let cfg_dir = config_subdir(&dir);
 
     // The control plane points to the mock and the pid to a live process.
     std::fs::write(
@@ -113,11 +136,10 @@ fn cli_pack_uses_control_plane_when_daemon_running() {
     let pack_file = pack_dir.join("wire-demo.json");
     std::fs::write(&pack_file, sample_signed_pack()).expect("write signed pack");
 
-    let out = Command::new(binary())
+    let out = cerberus_cmd(&dir)
         .arg("pack")
         .arg("install")
         .arg(&pack_file)
-        .env("HOME", &dir)
         .env("CERBERUS_ADMIN_TOKEN", ADMIN_TOKEN)
         .output()
         .expect("run cerberus pack install via control plane");
@@ -179,15 +201,12 @@ fn cli_pack_uses_control_plane_when_daemon_running() {
 #[test]
 fn cli_pack_falls_back_to_local_without_daemon() {
     let dir = temp_dir("pack_cli_local");
-    let cfg_dir = dir.join(".cerberus");
-    std::fs::create_dir_all(&cfg_dir).expect("create .cerberus");
     // WITHOUT a pid file → the daemon is NOT running → local mode.
     // The mock must not receive any call (no daemon to query).
 
-    let out = Command::new(binary())
+    let out = cerberus_cmd(&dir)
         .arg("pack")
         .arg("list")
-        .env("HOME", &dir)
         .env_remove("CERBERUS_ADMIN_TOKEN")
         .output()
         .expect("run cerberus pack list (local)");
@@ -220,8 +239,7 @@ fn sample_signed_pack() -> String {
 fn cli_pack_install_rejects_missing_pack_without_calling_api() {
     let (addr, handle, hits) = spawn_mock_control_plane();
     let dir = temp_dir("pack_cli_missing");
-    let cfg_dir = dir.join(".cerberus");
-    std::fs::create_dir_all(&cfg_dir).expect("create .cerberus");
+    let cfg_dir = config_subdir(&dir);
     std::fs::write(
         cfg_dir.join("config.yaml"),
         format!("listen: {addr}\nadmin_token: {ADMIN_TOKEN}\n"),
@@ -229,11 +247,10 @@ fn cli_pack_install_rejects_missing_pack_without_calling_api() {
     .expect("write config.yaml");
     std::fs::write(cfg_dir.join("cerberus.pid"), std::process::id().to_string()).expect("write pid");
 
-    let out = Command::new(binary())
+    let out = cerberus_cmd(&dir)
         .arg("pack")
         .arg("install")
         .arg(dir.join("no-existe.json"))
-        .env("HOME", &dir)
         .env("CERBERUS_ADMIN_TOKEN", ADMIN_TOKEN)
         .output()
         .expect("run cerberus pack install (missing)");
@@ -261,8 +278,7 @@ fn cli_pack_install_rejects_missing_pack_without_calling_api() {
 fn cli_pack_discovers_effective_endpoint_from_descriptor() {
     let (addr, handle, hits) = spawn_mock_control_plane();
     let dir = temp_dir("pack_cli_endpoint");
-    let cfg_dir = dir.join(".cerberus");
-    std::fs::create_dir_all(&cfg_dir).expect("create .cerberus");
+    let cfg_dir = config_subdir(&dir);
     // config.yaml lies about the port (e.g. the daemon bound an ephemeral one).
     std::fs::write(
         cfg_dir.join("config.yaml"),
@@ -278,10 +294,9 @@ fn cli_pack_discovers_effective_endpoint_from_descriptor() {
     )
     .expect("write endpoint.json");
 
-    let out = Command::new(binary())
+    let out = cerberus_cmd(&dir)
         .arg("pack")
         .arg("list")
-        .env("HOME", &dir)
         .env_remove("CERBERUS_LISTEN")
         .env("CERBERUS_ADMIN_TOKEN", ADMIN_TOKEN)
         .output()

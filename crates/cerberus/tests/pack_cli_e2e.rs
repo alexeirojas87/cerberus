@@ -20,6 +20,16 @@ const fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_cerberus")
 }
 
+/// Build a `cerberus` subprocess with HOME (and APPDATA on Windows) set to
+/// `home` so that `config_dir()` resolves to the isolated temp directory.
+fn cerberus_cmd(home: &std::path::Path) -> Command {
+    let mut cmd = Command::new(binary());
+    cmd.env("HOME", home);
+    #[cfg(target_os = "windows")]
+    cmd.env("APPDATA", home);
+    cmd
+}
+
 fn temp_dir(prefix: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
         "cerberus_{prefix}_{}_{}",
@@ -103,11 +113,10 @@ fn pack_cli_install_list_rollback_e2e() {
     let pack_root = write_signed_pack(&pack_file, &marker);
 
     // 2) install: exit 0, the engine grows (N → N+1).
-    let out = Command::new(binary())
+    let out = cerberus_cmd(&dir)
         .arg("pack")
         .arg("install")
         .arg(&pack_file)
-        .env("HOME", &dir)
         .env("CERBERUS_LICENSE_PUBLIC_KEY", &license_root)
         .env("CERBERUS_LICENSE_PATH", dir.join("license.json"))
         .env("CERBERUS_PACK_TRUST_ROOT", &pack_root)
@@ -129,7 +138,12 @@ fn pack_cli_install_list_rollback_e2e() {
         .unwrap()
         .block_on(async {
             let base = cerberus_engine::engine::EngineBuilder::new(&[]).build()?;
-            let mgr = cerberus_packs::updater::PackManager::new(dir.join(".cerberus/packs"), base)?;
+            let packs_dir = if cfg!(target_os = "windows") {
+                dir.join("Cerberus/packs")
+            } else {
+                dir.join(".cerberus/packs")
+            };
+            let mgr = cerberus_packs::updater::PackManager::new(packs_dir, base)?;
             let signed = cerberus_packs::updater::PackManager::load_pack_from_file(&pack_file)?;
             mgr.install_with_root(signed, &pack_root).await?;
             let engine = mgr.engine();
@@ -141,10 +155,9 @@ fn pack_cli_install_list_rollback_e2e() {
     assert!(found, "the installed engine must detect the E2E pack marker");
 
     // 4) list: the pack appears with a valid signature against the trust root.
-    let out = Command::new(binary())
+    let out = cerberus_cmd(&dir)
         .arg("pack")
         .arg("list")
-        .env("HOME", &dir)
         .env("CERBERUS_PACK_TRUST_ROOT", &pack_root)
         .output()
         .expect("run cerberus pack list");
@@ -158,10 +171,9 @@ fn pack_cli_install_list_rollback_e2e() {
 
     // 5) rollback: reverts to the previous engine. (Finding v6: rollback is
     //    Pro-gated in local mode; this e2e runs with a Pro license from step 2.)
-    let out = Command::new(binary())
+    let out = cerberus_cmd(&dir)
         .arg("pack")
         .arg("rollback")
-        .env("HOME", &dir)
         .env("CERBERUS_LICENSE_PUBLIC_KEY", &license_root)
         .env("CERBERUS_LICENSE_PATH", dir.join("license.json"))
         .env("CERBERUS_PACK_TRUST_ROOT", &pack_root)
@@ -183,11 +195,10 @@ fn pack_install_requires_pro_license() {
     let pack_root = write_signed_pack(&pack_file, marker);
 
     // Without a trained license nor license trust root: default → Free tier.
-    let out = Command::new(binary())
+    let out = cerberus_cmd(&dir)
         .arg("pack")
         .arg("install")
         .arg(&pack_file)
-        .env("HOME", &dir)
         .env("CERBERUS_PACK_TRUST_ROOT", &pack_root)
         .env_remove("CERBERUS_LICENSE_PUBLIC_KEY")
         .env_remove("CERBERUS_LICENSE_PATH")
@@ -220,11 +231,10 @@ fn pack_rollback_requires_pro_license() {
 
     // First install with a Pro license to leave manifest/history.
     let license_root = write_pro_license(&dir);
-    let install = Command::new(binary())
+    let install = cerberus_cmd(&dir)
         .arg("pack")
         .arg("install")
         .arg(&pack_file)
-        .env("HOME", &dir)
         .env("CERBERUS_LICENSE_PUBLIC_KEY", &license_root)
         .env("CERBERUS_LICENSE_PATH", dir.join("license.json"))
         .env("CERBERUS_PACK_TRUST_ROOT", &pack_root)
@@ -233,10 +243,9 @@ fn pack_rollback_requires_pro_license() {
     assert_eq!(install.status.code(), Some(0), "install with Pro must pass");
 
     // Now rollback WITHOUT Pro (remove license) → must fail with gating.
-    let out = Command::new(binary())
+    let out = cerberus_cmd(&dir)
         .arg("pack")
         .arg("rollback")
-        .env("HOME", &dir)
         .env("CERBERUS_PACK_TRUST_ROOT", &pack_root)
         .env_remove("CERBERUS_LICENSE_PUBLIC_KEY")
         .env_remove("CERBERUS_LICENSE_PATH")

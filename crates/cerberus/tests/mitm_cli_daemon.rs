@@ -20,6 +20,19 @@ const fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_cerberus")
 }
 
+/// Platform-appropriate config sub-directory: `.cerberus` on Unix,
+/// `Cerberus` on Windows (matching `config_dir()` which reads `%APPDATA%`).
+fn cfg_dir(home: &std::path::Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        home.join("Cerberus")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        home.join(".cerberus")
+    }
+}
+
 fn temp_dir(prefix: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
         "cerberus_mitm_cli_{prefix}_{}_{}",
@@ -29,6 +42,8 @@ fn temp_dir(prefix: &str) -> PathBuf {
             .map_or(0, |d| d.as_nanos())
     ));
     std::fs::create_dir_all(&d).expect("create tmp dir");
+    // Also create the Windows config sub-dir so paths resolve on either platform.
+    std::fs::create_dir_all(cfg_dir(&d)).expect("create cfg dir");
     d
 }
 
@@ -39,11 +54,11 @@ struct Run {
 }
 
 fn run(args: &[&str], home: &std::path::Path) -> Run {
-    let out = Command::new(binary())
-        .args(args)
-        .env("HOME", home)
-        .output()
-        .expect("run cerberus");
+    let mut cmd = Command::new(binary());
+    cmd.args(args).env("HOME", home);
+    #[cfg(target_os = "windows")]
+    cmd.env("APPDATA", home);
+    let out = cmd.output().expect("run cerberus");
     Run {
         status: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -53,12 +68,9 @@ fn run(args: &[&str], home: &std::path::Path) -> Run {
 
 /// Simulate the daemon "running": pid file with the PID of this LIVE process.
 fn fake_running_daemon(home: &std::path::Path) {
-    std::fs::create_dir_all(home.join(".cerberus")).expect("create .cerberus");
-    std::fs::write(
-        home.join(".cerberus").join("cerberus.pid"),
-        std::process::id().to_string(),
-    )
-    .expect("write pid");
+    let dir = cfg_dir(home);
+    std::fs::create_dir_all(&dir).expect("create cfg dir");
+    std::fs::write(dir.join("cerberus.pid"), std::process::id().to_string()).expect("write pid");
 }
 
 #[test]
@@ -86,7 +98,7 @@ fn mitm_init_ca_then_enable_without_daemon() {
     let dir = temp_dir("off");
     assert_eq!(run(&["mitm", "init-ca"], &dir).status, 0, "init-ca fails");
     assert!(
-        dir.join(".cerberus").join("ca").join("cerberus-ca.cert").exists(),
+        cfg_dir(&dir).join("ca").join("cerberus-ca.cert").exists(),
         "init-ca must generate the certificate"
     );
 
@@ -100,14 +112,14 @@ fn mitm_init_ca_then_enable_without_daemon() {
     );
 
     let config: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join(".cerberus").join("mitm.json")).expect("mitm.json"))
+        serde_json::from_str(&std::fs::read_to_string(cfg_dir(&dir).join("mitm.json")).expect("mitm.json"))
             .expect("mitm.json is valid JSON");
     assert_eq!(config["enabled"], true, "config must remain enabled");
 
     let r = run(&["mitm", "disable"], &dir);
     assert_eq!(r.status, 0, "disable: {}", r.stderr);
     let config: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join(".cerberus").join("mitm.json")).expect("mitm.json"))
+        serde_json::from_str(&std::fs::read_to_string(cfg_dir(&dir).join("mitm.json")).expect("mitm.json"))
             .expect("mitm.json");
     assert_eq!(config["enabled"], false, "config must remain disabled");
 
@@ -136,7 +148,7 @@ fn mitm_enable_with_running_daemon_warns_restart() {
 
     // The config is persisted anyway for the next boot.
     let config: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join(".cerberus").join("mitm.json")).expect("mitm.json"))
+        serde_json::from_str(&std::fs::read_to_string(cfg_dir(&dir).join("mitm.json")).expect("mitm.json"))
             .expect("mitm.json");
     assert_eq!(config["enabled"], true);
 
