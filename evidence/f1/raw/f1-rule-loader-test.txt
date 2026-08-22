@@ -1,0 +1,63 @@
+
+running 37 tests
+test engine::tests::extract_prefix_none_for_class ... ok
+test engine::tests::extract_prefix_sk ... ok
+test engine::tests::extract_prefix_ak ... ok
+test engine::hex::tests::encode_empty ... ok
+test engine::hex::tests::encode_ff ... ok
+test engine::hex::tests::encode_known ... ok
+test engine::tests::hash_value_is_sha256 ... ok
+test engine::tests::compile_invalid_regex_returns_error ... ok
+test engine::tests::compile_one_rule ... ok
+test engine::tests::compile_zero_rules ... ok
+test engine::tests::scan_no_secrets ... ok
+test engine::tests::scan_allow_rule_passes_through ... ok
+test engine::tests::scan_output_action_overall_most_severe ... ok
+test loader::tests::defaults_applied_when_loading ... ok
+test loader::tests::load_from_json_array_string ... ok
+test engine::tests::compile_many_rules ... ok
+test loader::tests::load_from_json_object_string ... ok
+test engine::tests::scan_detects_secret ... ok
+test engine::tests::scan_text_with_no_match ... ok
+test loader::tests::malformed_json_returns_error ... ok
+test loader::tests::missing_file_returns_io_error ... ok
+test loader::tests::missing_required_field_returns_error ... ok
+test loader::tests::load_from_json_file_roundtrip ... ok
+test rule::tests::action_defaults_to_warn ... ok
+test rule::tests::action_is_honoured_when_present ... ok
+test rule::tests::enum_display ... ok
+test engine::tests::action_per_rule_honoured ... ok
+test rule::tests::full_rule_deserializes ... ok
+test scan::tests::scan_request_is_generic_no_domain_ids ... ok
+test scan::tests::scan_request_without_metadata ... ok
+test engine::tests::finding_never_contains_raw_value ... ok
+test loader::tests::load_from_yaml_string ... ok
+test loader::tests::load_from_yaml_object_string ... ok
+test engine::tests::scan_multiple_patterns_same_rule ... ok
+test scan::tests::scan_through_convenience_fn ... ok
+test engine::tests::scan_unprefixed_pattern ... ok
+test engine::tests::prefixed_and_unprefixed_mixed ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 11 tests
+test malformed_json_returns_clear_error ... ok
+test yaml_load_matches_json_behavior ... ok
+test test_rules_file_loads_with_expected_count ... ok
+test actions_are_honoured_per_rule ... ok
+test rules_have_all_required_fields ... ok
+test categories_are_present ... ok
+test generic_scan_request_has_no_domain_fields ... ok
+test engine_compiles_from_loaded_rules ... ok
+test allowed_examples_do_not_fire ... ok
+test scan_finds_email_as_pii ... ok
+test scan_finds_openai_key ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

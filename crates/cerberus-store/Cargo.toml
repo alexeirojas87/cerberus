@@ -1,0 +1,28 @@
+[package]
+name = "cerberus-store"
+version = "0.1.0"
+edition = "2021"
+description = "F5: Cerberus persistence, audit and telemetry — SQLite store with zero-leak"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alexeirojas87/cerberus"
+keywords = ["security", "audit", "sqlite", "dlp"]
+categories = ["database", "security"]
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+cerberus-engine = { path = "../cerberus-engine" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+sha2 = "0.10"

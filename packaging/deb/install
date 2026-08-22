@@ -1,0 +1,5 @@
+# dh_install: origen -> destino (ruta relativa al build dir del paquete)
+# Para un binario pre-compilado empaquetado a mano, se usa build_deb.sh
+# en lugar de dh; este .install documenta el layout que espera dh_install
+# si se adopta debhelper para el pipeline.
+usr/bin/cerberus usr/bin

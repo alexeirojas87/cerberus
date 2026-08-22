@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cerberus.fullname" . }}
+  labels:
+    {{- include "cerberus.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cerberus.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cerberus.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "cerberus.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "cerberus.fullname" . }}-config
+        - name: data
+          emptyDir: {}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # El binario escucha en 8080 dentro del pod (puerto canónico del
+          # chart); el Service se encarga de exponer 8787 hacia la flota.
+          args:
+            - start
+            - --port
+            - {{ .Values.service.targetPort | quote }}
+          env:
+            # Fuerza bind a todas las interfaces (necesario en K8s); el listener
+            # no-loopback exige token de admin fuerte (garantizado por el chart).
+            - name: CERBERUS_LISTEN_HOST
+              value: "0.0.0.0"
+            {{- if .Values.config.admin.token }}
+            - name: CERBERUS_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cerberus.fullname" . }}-admin
+                  key: admin-token
+            {{- end }}
+            - name: CERBERUS_TELEMETRY_ENDPOINT
+              value: {{ .Values.config.telemetry.endpoint | quote }}
+            {{- range $key, $value := .Values.environment }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: {{ .Values.probes.port }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: {{ .Values.probes.port }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /root/.cerberus/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: data
+              mountPath: /root/.cerberus

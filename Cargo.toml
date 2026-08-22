@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[package]
+name = "cerberus-hardening"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib_stub.rs"
+
+[dev-dependencies]
+cerberus-engine = { path = "crates/cerberus-engine" }
+cerberus-packs = { path = "crates/cerberus-packs" }
+cerberus-proxy = { path = "crates/cerberus-proxy" }
+bytes = "1"
+regex = "1"
+
+[[test]]
+name = "failsafe"
+path = "tests/failsafe.rs"
+
+[[test]]
+name = "load_test"
+path = "tests/load_test.rs"
+
+[[test]]
+name = "redos_fuzz"
+path = "tests/redos_fuzz.rs"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+cargo = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_truncation = "allow"
+similar_names = "allow"
+cast_lossless = "allow"
+multiple_crate_versions = "allow"
+redundant_pub_crate = "allow"

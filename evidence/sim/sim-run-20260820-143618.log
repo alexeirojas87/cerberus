@@ -1,0 +1,113 @@
+[PASS] daemon arranca en modo enforce y /health ok
+      health={"status":"ok","version":"0.1.0","mode":"enforce","upstream_count":1,"uptime_secs":0} home=/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/cerberus-sim-zxzeh7ws
+
+==============================================================================
+  ENFORCE / block: secreto crítico en .env
+==============================================================================
+[PASS] secreto critical → 401/403 block
+      status=403 body={"error":"blocked","flag":"secret.openai_api_key"}
+[PASS] respuesta block identifica flag secret.openai
+      {"error":"blocked","flag":"secret.openai_api_key"}
+
+==============================================================================
+  ENFORCE / redact: Bearer token (regla action=redact)
+==============================================================================
+[PASS] secret action=redact → 200 y pasa (no bloquea)
+      status=200 body={"mock": true, "echo": {"method": "POST", "path": "/openai/v1/chat/completions", "body": "Authorization: [REDACTED:secre
+[PASS] upstream recibe cuerpo redactado ([REDACTED...])
+      Authorization: [REDACTED:secret.generic_bearer_token] user
+[PASS] raw token NO llega al upstream
+      Authorization: [REDACTED:secret.generic_bearer_token] user
+
+==============================================================================
+  ENFORCE / warn: PII email (action=warn, pasa + audita)
+==============================================================================
+[PASS] email action=warn → 200 y pasa intacto
+      status=200
+[PASS] warn: email llega intacto al upstream
+      {"method": "POST", "path": "/openai/v1/chat/completions", "headers": {"accept-encoding": "identity", "user-agent": "Python-urllib/3.9", "content-type": "application/json", "host": "127.0.0.1:58522", "
+
+==============================================================================
+  ENFORCE / pass-through limpio
+==============================================================================
+[PASS] payload limpio → 200
+      status=200
+[PASS] cuerpo limpio llega intacto al upstream
+      {"method": "POST", "path": "/openai/v1/chat/completions", "headers": {"accept-encoding": "identity", "user-agent": "Python-urllib/3.9", "content-type": "application/json", "host": "127.0.0.1:58522", "
+
+==============================================================================
+  ENFORCE / allowlist (triage de FP)
+==============================================================================
+[PASS] POST /api/allowlist almacena valor
+      200 {"status":"ok","added":"sk-EXAMPLE-do-not-flag"}
+
+==============================================================================
+  ENFORCE / config API
+==============================================================================
+[PASS] GET /api/config → 200 con listen/mode
+      200 {"listen":"127.0.0.1:58524","mode":"enforce","fail_policy":"closed","upstreams":{"default":{"url":"http://127.0.0.1:58522","auth_header":"authorization"}},"log_
+
+==============================================================================
+  ENFORCE / observabilidad: events + stats por proveedor
+==============================================================================
+[PASS] /api/events devuelve lista no vacía
+      count=4
+[PASS] eventos sin secreto crudo (hash-only)
+      {"id": "evt_66ee589177704ddda0011f1b4fcf4801", "ts": "2026-08-20T18:36:17.514668+00:00", "mode": "local", "tool": "proxy", "provider": "local", "flags": [], "counts": {}, "action_taken": "warn", "hash
+[PASS] evento block: action=block + flags
+      {"id": "evt_66ee589177704ddda0011f1b4fcf4801", "ts": "2026-08-20T18:36:17.514668+00:00", "mode": "local", "tool": "proxy", "provider": "local", "flags": [], "counts": {}, "action_taken": "warn", "hash
+[PASS] evento redact registrado (hash, sin raw)
+      {"id": "evt_821005c3caea46f283dc94a025753f1d", "ts": "2026-08-20T18:36:17.509936+00:00", "mode": "local", "tool": "proxy", "provider": "local", "flags": ["secret.generic_bearer_token", "entropy.high_e
+[PASS] /api/stats → 200, agrupa por proveedor, total>0
+      {"total":4,"by_provider":[{"provider":"local","total":3,"by_action":{"warn":2,"redact":1},"top_flags":[["entropy.high_entropy_secret",1],["pii.email_address",1],["secret.generic_bearer_token",1]]},{"p
+[PASS] stats: desglose incluye provider openai
+      [{"provider": "local", "total": 3, "by_action": {"warn": 2, "redact": 1}, "top_flags": [["entropy.high_entropy_secret", 1], ["pii.email_address", 1], ["secret.generic_bearer_token", 1]]}, {"provider":
+
+==============================================================================
+  ENFORCE / dashboard
+==============================================================================
+[PASS] /api/dashboard sirve HTML
+      200 len=4844
+
+==============================================================================
+  ENFORCE / fuga cero (grep raw en disco/logs)
+==============================================================================
+[PASS] sin secreto crudo en disco ni daemon log
+      limpio
+
+==============================================================================
+  ENFORCE / CLI dry-run: doctor / test
+==============================================================================
+[PASS] cerberus doctor reporta reglas cargadas
+      ✦ Cerberus Doctor ✦
+
+Daemon: Cerberus: [32mRUNNING[0m (PID 42287)
+Reglas cargadas: 13
+
+Agentes:
+  Claude Code          ⚠️  no configurado
+  Codex             
+[PASS] cerberus test detecta secreto (dry-run, con context keyword)
+      🔍 Hallazgos de escaneo:
+
+  [block] secret.openai_api_key "sk-abc123def456ghi789jkl012mno345" (pos 21..54)
+
+Acción global: block
+
+
+[PASS] daemon arranca en modo shadow y /health ok
+      health={"status":"ok","version":"0.1.0","mode":"shadow","upstream_count":1,"uptime_secs":0} home=/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/cerberus-sim-v2aup1_s
+
+==============================================================================
+  SHADOW / bloqueo 'habría bloqueado' pero pasa intacto
+==============================================================================
+[PASS] secreto critical en SHADOW → NO bloquea (status 200)
+      status=200 body={"mock": true, "echo": {"method": "POST", "path": "/openai/v1/chat/completions", "body": "{\"messages\": [{\"role\": \"user\", \"content\": \"OPENAI_API_KEY=sk-
+[PASS] body pasa intacto al upstream con el secreto crudo
+      {"method": "POST", "path": "/openai/v1/chat/completions", "headers": {"accept-encoding": "identity", "user-agent": "Python-urllib/3.9", "content-type": "application/json", "host": "127.0.0.1:58547", "
+[PASS] shadow SÍ audita el evento (block registrado) aunque pasó
+      {"id": "evt_fd91c842cf9747cd809243a348185504", "ts": "2026-08-20T18:36:18.465885+00:00", "mode": "local", "tool": "proxy", "provider": "local", "flags": ["secret.openai_api_key", "secret.env_block"], 
+
+==============================================================================
+  RESULTADO: 26 PASS / 0 FAIL
+==============================================================================

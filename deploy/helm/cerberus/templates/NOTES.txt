@@ -1,0 +1,32 @@
+{{- if .Values.config.admin.enabled }}
+1. Cerberus requiere un token de admin >= 24 chars. Asegúrate de que llegaste con
+   `--set config.admin.token="$CERBERUS_ADMIN_TOKEN"` (el install FALLA sin él).
+   El pod lo recibe vía Storage Secret `{{ include "cerberus.fullname" . }}-admin`.
+
+2. Verifica que el daemon está alive y saludable:
+   kubectl get pods -l {{ include "cerberus.selectorLabels" . }}
+   # o con el hook de test:
+   helm test {{ .Release.Name }}
+
+3. Forward al proxy (Modo A — self-host en tu flota):
+   kubectl port-forward svc/{{ include "cerberus.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+   export OPENCODE_BASE_URL=http://127.0.0.1:{{ .Values.service.port }}
+   export CERBERUS_ADMIN_TOKEN="$CERBERUS_ADMIN_TOKEN"  # mismo token que al instalar
+
+4. Configura la URL de backend (upstreams) si no te sirven los defaults:
+   helm upgrade {{ .Release.Name }} . \
+     --set config.upstreams.openai.url="https://gateway.mi-corp.com/v1" \
+     ...
+   ---- de cualquier modo, revisa config.yaml montado en el pod:
+   kubectl get cm {{ include "cerberus.fullname" . }}-config -o yaml
+
+Telemetría: OFF por defecto. Para activarla (opt-in consciente):
+   --set config.telemetry.enabled=true --set config.telemetry.endpoint='https://tu-endpoint/v1'
+El payload solo lleva métricas anónimas (version, os, rule_count, event_count,
+uptime, install_id) — nunca secretos ni contenido. Política: `cerberus telemetry policy`.
+{{- else }}
+Cerberus desplegado SIN token de admin (usa ingreso
+   kubectl port-forward svc/{{ include "cerberus.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+Pero ojo: el daemon se niega a escribir en interfaces no-loopback sin token; si el
+daemon no arranca, vuelve a instalar con config.admin.enabled=true.
+{{- end }}

@@ -1,0 +1,85 @@
+   Compiling cpufeatures v0.2.17
+   Compiling syn v3.0.3
+   Compiling sha2 v0.10.9
+   Compiling serde_derive v1.0.229
+   Compiling serde v1.0.229
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling cerberus-engine v0.1.0 (/Users/alexeirojas/Work/Personal/cerberus-wt-f1-multiline/crates/cerberus-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.73s
+     Running unittests src/lib.rs (target/debug/deps/cerberus_engine-6e2b9a1b40995da2)
+
+running 48 tests
+test engine::hex::tests::encode_ff ... ok
+test engine::hex::tests::encode_empty ... ok
+test engine::hex::tests::encode_known ... ok
+test engine::tests::extract_prefix_sk ... ok
+test engine::tests::extract_prefix_none_for_class ... ok
+test engine::tests::extract_prefix_ak ... ok
+test engine::tests::hash_value_is_sha256 ... ok
+test engine::tests::compile_invalid_regex_returns_error ... ok
+test engine::tests::compile_one_rule ... ok
+test engine::tests::compile_zero_rules ... ok
+test engine::tests::compile_many_rules ... ok
+test engine::tests::scan_no_secrets ... ok
+test engine::tests::action_per_rule_honoured ... ok
+test loader::tests::defaults_applied_when_loading ... ok
+test engine::tests::scan_text_with_no_match ... ok
+test loader::tests::load_from_json_array_string ... ok
+test engine::tests::scan_detects_secret ... ok
+test engine::tests::scan_allow_rule_passes_through ... ok
+test loader::tests::load_from_json_object_string ... ok
+test loader::tests::malformed_json_returns_error ... ok
+test loader::tests::missing_file_returns_io_error ... ok
+test loader::tests::missing_required_field_returns_error ... ok
+test engine::tests::scan_output_action_overall_most_severe ... ok
+test loader::tests::load_from_yaml_object_string ... ok
+test loader::tests::load_from_yaml_string ... ok
+test engine::tests::scan_multiple_patterns_same_rule ... ok
+test engine::tests::finding_never_contains_raw_value ... ok
+test multiline::tests::multiline_pattern_detection ... ok
+test multiline::tests::no_detection_without_multiline_pattern ... ok
+test loader::tests::load_from_json_file_roundtrip ... ok
+test multiline::tests::detects_pem_dsa_private_key ... ok
+test rule::tests::action_defaults_to_warn ... ok
+test multiline::tests::detects_id_rsa_ssh_key ... ok
+test multiline::tests::detects_env_file_with_secrets ... ok
+test multiline::tests::detects_pem_ec_private_key ... ok
+test multiline::tests::no_false_positive_on_normal_text ... ok
+test rule::tests::action_is_honoured_when_present ... ok
+test rule::tests::enum_display ... ok
+test scan::tests::scan_request_is_generic_no_domain_ids ... ok
+test rule::tests::full_rule_deserializes ... ok
+test scan::tests::scan_request_without_metadata ... ok
+test scan::tests::scan_through_convenience_fn ... ok
+test multiline::tests::pem_block_captures_full_range ... ok
+test multiline::tests::detects_pem_openssh_private_key ... ok
+test multiline::tests::detects_pem_rsa_private_key ... ok
+test multiline::tests::pem_block_multi_line_body ... ok
+test engine::tests::scan_unprefixed_pattern ... ok
+test engine::tests::prefixed_and_unprefixed_mixed ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/integration_test.rs (target/debug/deps/integration_test-307b7decc64f69ae)
+
+running 11 tests
+test actions_are_honoured_per_rule ... ok
+test test_rules_file_loads_with_expected_count ... ok
+test malformed_json_returns_clear_error ... ok
+test categories_are_present ... ok
+test rules_have_all_required_fields ... ok
+test yaml_load_matches_json_behavior ... ok
+test engine_compiles_from_loaded_rules ... ok
+test allowed_examples_do_not_fire ... ok
+test generic_scan_request_has_no_domain_fields ... ok
+test scan_finds_email_as_pii ... ok
+test scan_finds_openai_key ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests cerberus_engine
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -1,0 +1,45 @@
+ Downloading crates ...
+  Downloaded shlex v2.0.1
+  Downloaded cmake v0.1.58
+  Downloaded cc v1.4.3
+  Downloaded find-msvc-tools v0.1.11
+  Downloaded vectorscan v0.1.0
+    Blocking waiting for file lock on package cache
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling cc v1.4.3
+   Compiling cmake v0.1.58
+   Compiling vectorscan v0.1.0
+error: failed to run custom build command for `vectorscan v0.1.0`
+
+Caused by:
+  process didn't exit successfully: `/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-scan/target/debug/build/vectorscan-9146ea4dc7fc8072/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rustc-link-lib=c++
+  CMAKE_TOOLCHAIN_FILE_aarch64-apple-darwin = None
+  CMAKE_TOOLCHAIN_FILE_aarch64_apple_darwin = None
+  HOST_CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_GENERATOR_aarch64-apple-darwin = None
+  CMAKE_GENERATOR_aarch64_apple_darwin = None
+  HOST_CMAKE_GENERATOR = None
+  CMAKE_GENERATOR = None
+  CMAKE_PREFIX_PATH_aarch64-apple-darwin = None
+  CMAKE_PREFIX_PATH_aarch64_apple_darwin = None
+  HOST_CMAKE_PREFIX_PATH = None
+  CMAKE_PREFIX_PATH = None
+  CMAKE_aarch64-apple-darwin = None
+  CMAKE_aarch64_apple_darwin = None
+  HOST_CMAKE = None
+  CMAKE = None
+
+  --- stderr
+  running: cd "/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-scan/target/debug/build/vectorscan-de347e7ca66e5d5e/out/build" && CMAKE_PREFIX_PATH="" LC_ALL="C" "cmake" "/Users/alexeirojas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vectorscan-0.1.0/vectorscan" "-B" "/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-scan/target/debug/build/vectorscan-de347e7ca66e5d5e/out/build" "-DCMAKE_OSX_ARCHITECTURES=arm64" "-DCMAKE_INSTALL_INCLUDEDIR=/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-scan/target/debug/build/vectorscan-de347e7ca66e5d5e/out/include" "-DFAT_RUNTIME=OFF" "-DBUILD_AVX512=OFF" "-DBUILD_EXAMPLES=OFF" "-DBUILD_BENCHMARKS=OFF" "-DBUILD_UNITTESTS=OFF" "-DBUILD_DOCS=OFF" "-DBUILD_TOOLS=OFF" "-DCMAKE_INSTALL_PREFIX=/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-scan/target/debug/build/vectorscan-de347e7ca66e5d5e/out" "-DCMAKE_C_FLAGS= -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=26.5 -w" "-DCMAKE_C_COMPILER=/usr/bin/cc" "-DCMAKE_CXX_FLAGS= -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=26.5 -w" "-DCMAKE_CXX_COMPILER=/usr/bin/c++" "-DCMAKE_ASM_FLAGS= -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=26.5 -w" "-DCMAKE_ASM_COMPILER=/usr/bin/cc" "-DCMAKE_BUILD_TYPE=Debug"
+
+  thread 'main' (28383224) panicked at /Users/alexeirojas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cmake-0.1.58/src/lib.rs:1132:5:
+
+  failed to execute command: No such file or directory (os error 2)
+  is `cmake` not installed?
+
+  build script failed, must exit now
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -1,0 +1,172 @@
+
+running 136 tests
+test constraints::tests::allowed_examples_known_false_positive_discarded ... ok
+test constraints::tests::all_constraints_together ... ok
+test constraints::tests::allowed_examples_non_matching_value_passes ... ok
+test constraints::tests::context_keywords_empty_list_passes ... ok
+test constraints::tests::context_keywords_absent_discarded ... ok
+test constraints::tests::combined_min_length_and_context_keywords ... ok
+test constraints::tests::max_length_exact_boundary_passes ... ok
+test constraints::tests::max_length_short_enough_passes ... ok
+test constraints::tests::max_length_long_value_is_discarded ... ok
+test constraints::tests::min_length_exact_boundary_passes ... ok
+test constraints::tests::context_keywords_present_passes ... ok
+test constraints::tests::min_length_long_enough_value_passes ... ok
+test constraints::tests::min_length_short_value_is_discarded ... ok
+test constraints::tests::multiple_context_keywords_any_one_suffices ... ok
+test constraints::tests::no_constraints_always_passes ... ok
+test engine::hex::tests::encode_empty ... ok
+test engine::hex::tests::encode_ff ... ok
+test engine::hex::tests::encode_known ... ok
+test engine::tests::extract_prefix_ak ... ok
+test engine::tests::extract_prefix_none_for_class ... ok
+test engine::tests::extract_prefix_sk ... ok
+test engine::tests::compile_invalid_regex_returns_error ... ok
+test engine::tests::hash_value_is_sha256 ... ok
+test engine::tests::compile_one_rule ... ok
+test engine::tests::compile_many_rules ... ok
+test engine::tests::compile_zero_rules ... ok
+test engine::tests::scan_allow_rule_passes_through ... ok
+test engine::tests::scan_no_secrets ... ok
+test engine::tests::finding_never_contains_raw_value ... ok
+test engine::tests::scan_detects_secret ... ok
+test engine::tests::scan_text_with_no_match ... ok
+test engine::tests::scan_output_action_overall_most_severe ... ok
+test engine::tests::action_per_rule_honoured ... ok
+test engine::tests::scan_multiple_patterns_same_rule ... ok
+test engine::tests::scan_with_entropy_validator_discards_low_entropy ... ok
+test engine::tests::prefixed_and_unprefixed_mixed ... ok
+test engine::tests::scan_with_unknown_validator_fails_closed ... ok
+test entropy::tests::detect_case_insensitive_keyword ... ok
+test entropy::tests::detect_hashed_value_not_raw ... ok
+test entropy::tests::detect_high_entropy_near_keyword ... ok
+test engine::tests::scan_unprefixed_pattern ... ok
+test entropy::tests::detect_json_style ... ok
+test entropy::tests::detect_short_value_no_finding ... ok
+test engine::tests::scan_with_entropy_validator_keeps_high_entropy ... ok
+test entropy::tests::detect_low_entropy_near_keyword_no_finding ... ok
+test entropy::tests::entropy_empty_string ... ok
+test entropy::tests::entropy_high_random_token ... ok
+test entropy::tests::entropy_low_password ... ok
+test entropy::tests::entropy_medium_mixed ... ok
+test entropy::tests::entropy_repeated_char ... ok
+test loader::tests::defaults_applied_when_loading ... ok
+test entropy::tests::detect_token_after_colon ... ok
+test loader::tests::load_from_json_array_string ... ok
+test loader::tests::load_from_json_object_string ... ok
+test loader::tests::load_from_yaml_string ... ok
+test loader::tests::malformed_json_returns_error ... ok
+test loader::tests::load_from_yaml_object_string ... ok
+test loader::tests::missing_file_returns_io_error ... ok
+test loader::tests::missing_required_field_returns_error ... ok
+test loader::tests::load_from_json_file_roundtrip ... ok
+test entropy::tests::detect_token_after_equals ... ok
+test multiline::tests::detects_env_file_with_secrets ... ok
+test entropy::tests::detect_within_window_multiple_keywords ... ok
+test entropy::tests::detect_no_keywords_no_findings ... ok
+test multiline::tests::multiline_pattern_detection ... ok
+test multiline::tests::detects_pem_ec_private_key ... ok
+test multiline::tests::no_detection_without_multiline_pattern ... ok
+test multiline::tests::detects_pem_openssh_private_key ... ok
+test multiline::tests::no_false_positive_on_normal_text ... ok
+test redact::tests::allow_does_not_modify_text ... ok
+test redact::tests::block_returns_error ... ok
+test entropy::tests::entropy_finding_never_raw ... ok
+test redact::tests::block_with_other_findings_returns_error ... ok
+test redact::tests::custom_token_template ... ok
+test multiline::tests::detects_id_rsa_ssh_key ... ok
+test redact::tests::empty_text_returns_empty ... ok
+test redact::tests::findings_sorted_incorrectly_still_works ... ok
+test multiline::tests::detects_pem_rsa_private_key ... ok
+test redact::tests::json_remains_valid_after_redaction ... ok
+test redact::tests::multiple_redacts_all_replaced ... ok
+test redact::tests::multiple_severity_overlap_complex ... ok
+test redact::tests::no_findings_returns_original ... ok
+test multiline::tests::detects_pem_dsa_private_key ... ok
+test redact::tests::preserve_length_pads_token ... ok
+test redact::tests::preserve_length_pads_when_token_shorter ... ok
+test redact::tests::preserve_length_truncates_when_token_longer ... ok
+test redact::tests::redact_and_warn_mixed_no_overlap ... ok
+test redact::tests::redact_at_end_of_text ... ok
+test redact::tests::redact_at_start_of_text ... ok
+test redact::tests::redact_wins_over_warn_for_overlapping_spans ... ok
+test redact::tests::single_redact_replaces_span ... ok
+test redact::tests::two_redacts_overlap_first_wins ... ok
+test redact::tests::warn_does_not_modify_text ... ok
+test redact::tests::warn_over_redact_overlap_redact_wins ... ok
+test rule::tests::action_defaults_to_warn ... ok
+test rule::tests::enum_display ... ok
+test rule::tests::action_is_honoured_when_present ... ok
+test multiline::tests::pem_block_captures_full_range ... ok
+test multiline::tests::pem_block_multi_line_body ... ok
+test rule::tests::full_rule_deserializes ... ok
+test scan::tests::scan_request_is_generic_no_domain_ids ... ok
+test scan::tests::scan_request_without_metadata ... ok
+test validator::tests::entropy_constant_string ... ok
+test validator::tests::entropy_at_least_threshold ... ok
+test validator::tests::entropy_empty_string ... ok
+test validator::tests::entropy_high_token_passes ... ok
+test validator::tests::entropy_low_string_fails ... ok
+test validator::tests::get_validator_checksum ... ok
+test validator::tests::get_validator_empty_string ... ok
+test validator::tests::get_validator_luhn ... ok
+test validator::tests::get_validator_nonexistent ... ok
+test validator::tests::get_validator_shannon_entropy_bare ... ok
+test validator::tests::iban_invalid_string ... ok
+test validator::tests::get_validator_shannon_entropy_with_threshold ... ok
+test validator::tests::iban_lowercase_fails ... ok
+test validator::tests::iban_too_short ... ok
+test validator::tests::iban_valid_be ... ok
+test validator::tests::iban_valid_gb ... ok
+test validator::tests::iban_valid_with_spaces ... ok
+test validator::tests::luhn_empty ... ok
+test validator::tests::luhn_invalid_random_number ... ok
+test validator::tests::luhn_too_short ... ok
+test validator::tests::luhn_valid_card_visa ... ok
+test validator::tests::luhn_valid_card_with_spaces ... ok
+test validator::tests::registry_all_pass_empty ... ok
+test validator::tests::registry_all_pass_unknown_fails ... ok
+test validator::tests::registry_all_pass_valid ... ok
+test validator::tests::registry_get_luhn ... ok
+test validator::tests::registry_get_nonexistent ... ok
+test validator::tests::shannon_entropy_empty ... ok
+test validator::tests::shannon_entropy_uniform_two_chars ... ok
+test engine::tests::scan_with_luhn_validator_keeps_valid_card ... ok
+test engine::tests::scan_with_multiple_validators_requires_all ... ok
+test scan::tests::scan_through_convenience_fn ... ok
+test engine::tests::scan_without_validators_passes_match ... ok
+test engine::tests::scan_with_luhn_validator_discards_invalid_card ... ok
+
+test result: ok. 136 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 11 tests
+test malformed_json_returns_clear_error ... ok
+test categories_are_present ... ok
+test actions_are_honoured_per_rule ... ok
+test rules_have_all_required_fields ... ok
+test test_rules_file_loads_with_expected_count ... ok
+test yaml_load_matches_json_behavior ... ok
+test engine_compiles_from_loaded_rules ... ok
+test allowed_examples_do_not_fire ... ok
+test generic_scan_request_has_no_domain_fields ... ok
+test scan_finds_email_as_pii ... ok
+test scan_finds_openai_key ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 5 tests
+test corpus_minimum_size ... ok
+test negative_files_no_false_positives ... ok
+test positive_files_detected ... ok
+test print_detailed_scan_report ... ok
+test precision_recall_measurement ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

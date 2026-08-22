@@ -1,0 +1,33 @@
+   Compiling spike-proxy v0.1.0 (/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-proxy/crates/spike-proxy)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.74s
+     Running unittests src/lib.rs (target/debug/deps/spike_proxy-5f57801134fb0134)
+
+running 3 tests
+test bench::tests::payload_sizes_returns_four ... ok
+test bench::tests::stats_returns_reasonable_values ... ok
+test bench::tests::synthetic_payload_has_approximate_size ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/spike_proxy-98366fd680cf56f3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/integration.rs (target/debug/deps/integration-a9c94b635acf790e)
+
+running 4 tests
+test proxy_preserves_custom_header ... ok
+test proxy_forwards_request_and_upstream_responds ... ok
+test bench_produces_valid_result ... ok
+test binary_bench_outputs_valid_json ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+   Doc-tests spike_proxy
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

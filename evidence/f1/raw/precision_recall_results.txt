@@ -1,0 +1,71 @@
+========================================
+ Cerberus F1 - Precision/Recall Report  
+========================================
+
+Corpus positives: 6 files
+Corpus negatives: 4 files
+
+per-instance: true
+ground-truth: spans(33)
+
+--- Per-Category Results ---
+
+  api-keys                   expected=6    detected=6    findings=9    recall=100.0%
+  emails                     expected=6    detected=6    findings=6    recall=100.0%
+  credit-cards               expected=5    detected=5    findings=5    recall=100.0%
+  phone-numbers              expected=5    detected=5    findings=5    recall=100.0%
+  pem-keys                   expected=4    detected=4    findings=4    recall=100.0%
+  high-entropy               expected=7    detected=5    findings=5    recall=71.4%
+
+--- Per-File (per-instance) ---
+
+  [api-keys]  declared=6    detected=6    findings=9    fp=0 (regex:0 entropy:0)  over/under=0/0
+    flag=secret.anthropic_api_key            expected=1  found=1  tp=1  over=0  under=0
+    flag=secret.aws_access_key_id            expected=1  found=1  tp=1  over=0  under=0
+    flag=secret.generic_bearer_token         expected=1  found=1  tp=1  over=0  under=0
+    flag=secret.github_token                 expected=1  found=1  tp=1  over=0  under=0
+    flag=secret.openai_api_key               expected=1  found=1  tp=1  over=0  under=0
+    flag=secret.slack_token                  expected=1  found=1  tp=1  over=0  under=0
+
+  [emails]  declared=6    detected=6    findings=6    fp=0 (regex:0 entropy:0)  over/under=0/0
+    flag=pii.email                           expected=6  found=6  tp=6  over=0  under=0
+
+  [credit-cards]  declared=5    detected=5    findings=5    fp=0 (regex:0 entropy:0)  over/under=0/0
+    flag=pii.credit_card                     expected=5  found=5  tp=5  over=0  under=0
+
+  [phone-numbers]  declared=5    detected=5    findings=5    fp=0 (regex:0 entropy:0)  over/under=0/0
+    flag=pii.phone                           expected=5  found=5  tp=5  over=0  under=0
+
+  [pem-keys]  declared=4    detected=4    findings=4    fp=0 (regex:0 entropy:0)  over/under=0/0
+    flag=internal.private_key_pem            expected=4  found=4  tp=4  over=0  under=0
+
+  [high-entropy]  declared=7    detected=5    findings=5    fp=0 (regex:0 entropy:0)  over/under=0/2
+    flag=entropy.high_entropy_secret         expected=7  found=5  tp=5  over=0  under=2
+
+--- Summary ---
+
+Total expected instances: 33
+Total detected instances: 31
+False negatives:          2
+True positives (regex):   26
+True positives (entropy): 5
+True positives (other):    0
+False positives (regex):   3
+False positives (entropy): 1
+False positives (other):    0
+Entropy overlaps skipped:  2
+Total findings (TP+FP):    35
+
+Recall:    93.9% (31/33)
+Precision: 88.6% (31/35)
+
+--- Methodology ---
+  1. per-instance: true — ground truth is a list of ExpectedInstance,
+     each with the exact literal value; its byte span is the k-th
+     occurrence of that literal for the k-th instance sharing the
+     same (flag, value) (span_in_all), never just text.find (first match).
+  2. A finding counts as TP only if it overlaps the span of a DIFFERENT
+     expected instance of the same flag (greedy, one finding/con instance).
+  3. Two same-flag instances can NEVER substitute for each other (item 8).
+  4. Entropy findings overlapping an already-consumed named secret are
+     excluded (duplicate detector); all other non-consuming findings are FP.

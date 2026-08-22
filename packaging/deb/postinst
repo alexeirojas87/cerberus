@@ -1,0 +1,10 @@
+#!/bin/sh
+# postinst — sample (Mínimo: un binario estático no requiere postinst).
+trap 'exit $?' EXIT HUP INT TERM
+
+# El daemon es tardanza: si existe el binario, se queda en modo manual.
+if [ -f /usr/bin/cerberus ]; then
+    chmod 755 /usr/bin/cerberus
+fi
+
+exit 0

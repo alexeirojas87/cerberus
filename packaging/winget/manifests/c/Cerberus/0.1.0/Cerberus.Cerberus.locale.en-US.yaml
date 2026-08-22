@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: Cerberus.Cerberus
+PackageVersion: 0.1.0
+DefaultLocale: en-US
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
+PackageName: Cerberus
+PackageUrl: https://github.com/alexeirojas87/cerberus
+Publisher: Cerberus
+PublisherUrl: https://github.com/alexeirojas87/cerberus
+Author: Cerberus
+ShortDescription: DLP firewall for LLM agents - blocks secrets and PII from leaving your machine
+Description: >-
+  Cerberus is a local DLP firewall for LLM agents. It intercepts egress traffic,
+  detects secrets and PII with a regex/entropy engine, and applies redaction and
+  block policies. It provides a CLI and a local daemon (Modo B) plus a reverse
+  and forward proxy (Modo A). Installs cerberus.exe and the Cerberus daemon.
+Moniker: cerberus
+Tags:
+  - security
+  - dlp
+  - cli
+  - llm
+  - proxy
+  - agent
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/alexeirojas87/cerberus/blob/main/LICENSE
+ReleaseNotesUrl: https://github.com/alexeirojas87/cerberus/releases

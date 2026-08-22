@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cerberus Dashboard</title>
+<!-- Review v6.1: la CSP la emite el servidor en la CABECERA
+     `Content-Security-Policy` (api.rs::build_dashboard_csp). No se duplica
+     aquí en un <meta> por dos razones: `frame-ancestors` sólo tiene efecto en
+     la cabecera, y una copia en el HTML se desincroniza del hash sha256 que
+     autoriza los bloques inline. NO uses handlers inline (`onclick=`) ni
+     atributos `style=`: la CSP ya no lleva 'unsafe-inline' y los bloquearía.
+     -->
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; padding: 20px; }
+.container { max-width: 1200px; margin: 0 auto; }
+h1 { color: #38bdf8; font-size: 1.8rem; margin-bottom: 20px; }
+h2 { color: #94a3b8; font-size: 1.2rem; margin: 20px 0 10px; border-bottom: 1px solid #1e293b; padding-bottom: 5px; }
+.card { background: #1e293b; border-radius: 8px; padding: 16px; margin: 10px 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.stat { text-align: center; padding: 12px; }
+.stat-value { font-size: 2rem; font-weight: bold; color: #38bdf8; }
+.stat-label { font-size: 0.85rem; color: #64748b; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #334155; }
+th { color: #64748b; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+td { font-size: 0.9rem; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+.badge-block { background: #dc2626; color: #fff; }
+.badge-redact { background: #f59e0b; color: #000; }
+.badge-warn { background: #6366f1; color: #fff; }
+.badge-allow { background: #22c55e; color: #000; }
+.badge-inherit { background: #334155; color: #cbd5e1; }
+.refresh { text-align: right; margin-bottom: 10px; }
+button { background: #38bdf8; color: #000; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.85rem; margin: 2px; }
+button:hover { background: #7dd3fc; }
+input, select { background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; padding: 8px; font-size: 0.9rem; }
+input[type="password"] { width: 60%; max-width: 420px; }
+.error { color: #f87171; padding: 10px; }
+.loading { color: #64748b; padding: 10px; }
+.login-card { border: 1px solid #334155; }
+#provider-links a { display: inline-block; margin: 4px 6px 4px 0; padding: 4px 12px; border-radius: 999px; background: #0f172a; color: #38bdf8; text-decoration: none; border: 1px solid #334155; font-size: 0.85rem; }
+#provider-links a:hover { background: #1e293b; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.row label { color: #64748b; font-size: 0.85rem; }
+.muted { color: #64748b; font-size: 0.85rem; }
+.danger { background: #dc2626; color: #fff; }
+.danger:hover { background: #ef4444; }
+.note { color: #fbbf24; font-size: 0.8rem; padding: 6px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🔒 Cerberus Dashboard</h1>
+  <div class="refresh"><button id="btn-refresh" type="button">⟳ Refrescar</button></div>
+
+  <!-- Card de login (review v5 F6): el token NUNCA se incrusta en el DOM.
+       El usuario lo pega aquí; se guarda SOLO en localStorage y se envía vía
+       header X-Cerberus-Admin-Token en cada fetch. -->
+  <div class="card login-card" id="auth-card" hidden>
+    <h2>Autenticación requerida</h2>
+    <p class="loading" id="login-msg">Este dashboard es público (HTML sin datos). Para ver datos, ingresa el token de administrador.</p>
+    <input type="password" id="cerberus-token" placeholder="Admin token" autocomplete="off">
+    <button id="btn-save-token" type="button">Guardar</button>
+    <p class="loading">Se guarda únicamente en este navegador y se envía en el header <code>X-Cerberus-Admin-Token</code>.</p>
+  </div>
+
+  <h2>Resumen</h2>
+  <div class="grid" id="summary-cards"></div>
+
+  <h2>Filtro por Proveedor</h2>
+  <div class="card">
+    <label for="provider-filter">Proveedor:</label>
+    <select id="provider-filter"></select>
+    <button id="btn-apply-provider" type="button">Aplicar</button>
+  </div>
+
+  <h2>Por Proveedor</h2>
+  <div class="card" id="provider-links"><div class="loading">Cargando...</div></div>
+  <div class="card" id="provider-stats"><div class="loading">Cargando...</div></div>
+
+  <h2>Eventos Recientes</h2>
+  <div class="card" id="recent-events"><div class="loading">Cargando...</div></div>
+
+  <h2>Configuración</h2>
+  <div class="card" id="config-view"><div class="loading">Cargando...</div></div>
+
+  <!-- Providers (CRUD) contra /api/upstreams: alta, baja y listado. -->
+  <h2>Providers (CRUD)</h2>
+  <div class="card" id="upstreams-view"><div class="loading">Cargando...</div></div>
+  <div class="card">
+    <div class="row">
+      <label for="up-name">name</label><input type="text" id="up-name" placeholder="openai">
+      <label for="up-url">url</label><input type="text" id="up-url" placeholder="https://api.openai.com">
+      <label for="up-auth">auth_header</label><input type="text" id="up-auth" placeholder="authorization">
+      <button id="btn-add-upstream" type="button">Añadir / actualizar</button>
+    </div>
+    <div class="muted" id="upstream-msg"></div>
+  </div>
+
+  <!-- F6: rule packs contra /api/packs (list / install / rollback). El
+       navegador transporta el contenido firmado; nunca una ruta local. -->
+  <h2>Rule packs</h2>
+  <div class="card" id="packs-view"><div class="loading">Cargando...</div></div>
+  <div class="card">
+    <div class="row">
+      <label for="pack-file">pack firmado (.json)</label>
+      <input type="file" id="pack-file" accept=".json,application/json">
+      <button id="btn-install-pack" type="button">Instalar</button>
+      <button id="btn-rollback-pack" class="danger" type="button">Rollback</button>
+    </div>
+    <div class="muted" id="packs-msg"></div>
+  </div>
+
+  <!-- F6: categorías + reglas propias + allowlist contra /api/policy. -->
+  <h2>Categorías y acciones</h2>
+  <div class="card" id="categories-view"><div class="loading">Cargando...</div></div>
+  <div class="card">
+    <div class="row">
+      <label for="cat-name">categoría</label><input type="text" id="cat-name" placeholder="secrets">
+      <label for="cat-action">acción</label><select id="cat-action"></select>
+      <button id="btn-set-category" type="button">Fijar</button>
+    </div>
+  </div>
+
+  <h2>Reglas propias (override de acción)</h2>
+  <div class="card" id="rules-view"><div class="loading">Cargando...</div></div>
+  <div class="card">
+    <div class="row">
+      <label for="rule-id">regla</label><input type="text" id="rule-id" placeholder="secret.openai_api_key">
+      <label for="rule-action">acción</label><select id="rule-action"></select>
+      <button id="btn-set-rule" type="button">Fijar</button>
+    </div>
+    <div class="muted" id="policy-msg"></div>
+  </div>
+
+  <h2>Allowlist (triage de falsos positivos)</h2>
+  <div class="card" id="allowlist-view"><div class="loading">Cargando...</div></div>
+  <div class="card">
+    <div class="row">
+      <label for="allow-value">valor</label>
+      <input type="text" id="allow-value" placeholder="sk-EXAMPLE-do-not-flag">
+      <button id="btn-add-allow" type="button">Añadir</button>
+    </div>
+    <div class="muted" id="allowlist-msg"></div>
+  </div>
+</div>
+<script>
+// Token de admin del control plane (review v5 F6). NUNCA se incrusta en el DOM
+// ni se manda por URL: se guarda en localStorage 'cerberus.adminJWT' y se envía
+// solo via header `X-Cerberus-Admin-Token`.
+const TOKEN_KEY = 'cerberus.adminJWT';
+
+function getToken() {
+  return window.localStorage ? localStorage.getItem(TOKEN_KEY) : null;
+}
+
+function showLogin(msg) {
+  document.getElementById('auth-card').hidden = false;
+  if (msg) document.getElementById('login-msg').textContent = msg;
+}
+
+function hideLogin() {
+  document.getElementById('auth-card').hidden = true;
+}
+
+function saveToken() {
+  const input = document.getElementById('cerberus-token');
+  const t = (input.value || '').trim();
+  if (!t) {
+    document.getElementById('login-msg').textContent = 'Ingresa un token válido.';
+    return;
+  }
+  if (window.localStorage) localStorage.setItem(TOKEN_KEY, t);
+  input.value = '';
+  loadData();
+}
+
+async function fetchJson(url) {
+  const tok = getToken();
+  if (!tok) {
+    showLogin();
+    throw new Error('no token');
+  }
+  const resp = await fetch(url, { headers: { 'X-Cerberus-Admin-Token': tok } });
+  if (resp.status === 401) {
+    if (window.localStorage) localStorage.removeItem(TOKEN_KEY);
+    showLogin('Token inválido o expirado: pégalo de nuevo.');
+    throw new Error('unauthorized');
+  }
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+// P1-13: NINGÚN dato proveniente de la API se interpola en HTML ni en atributos.
+// Toda salida dinámica se construye con nodos DOM y textContent (que escapa
+// automáticamente). Los handlers se asignan vía addEventListener/closure; nunca
+// se escriben atributos on*="" con contenido interpolado.
+
+function el(tag, className) {
+  const n = document.createElement(tag);
+  if (className) n.className = className;
+  return n;
+}
+
+function tdCell(text) {
+  const n = el('td');
+  n.textContent = text === undefined || text === null ? '' : String(text);
+  return n;
+}
+
+function thCell(text) {
+  const n = el('th');
+  n.textContent = text;
+  return n;
+}
+
+// Badge de acción (DOM, textContent): el `action` viene de la API y puede ser
+// cualquier string; juega seguro sin reflejarlo en HTML.
+function badge(action) {
+  const map = { block: 'badge-block', redact: 'badge-redact', warn: 'badge-warn', allow: 'badge-allow', inherit: 'badge-inherit' };
+  const n = el('span', `badge ${map[action] || ''}`.trim());
+  n.textContent = action;
+  return n;
+}
+
+// ─── Filtro por proveedor (review v5 F6) ────────────────────────────────
+let currentProvider = '';
+
+function providerQuery() {
+  return currentProvider ? `?provider=${encodeURIComponent(currentProvider)}` : '';
+}
+
+function setProvider(p) {
+  currentProvider = p || '';
+  const sel = document.getElementById('provider-filter');
+  if (sel) sel.value = currentProvider;
+  loadData();
+}
+
+function applyProviderFilter() {
+  setProvider(document.getElementById('provider-filter').value);
+}
+
+async function loadData() {
+  if (!getToken()) { showLogin(); return; }
+  hideLogin();
+  try {
+    const q = providerQuery();
+    const [stats, events] = await Promise.all([
+      fetchJson('/api/stats' + q),
+      fetchJson('/api/events' + q)
+    ]);
+
+    // Summary cards (DOM + textContent, sin innerHTML).
+    const sc = document.getElementById('summary-cards');
+    sc.replaceChildren();
+    const cards = [
+      { v: stats.total, l: 'Total Eventos' },
+      { v: stats.by_provider?.length || 0, l: 'Proveedores' },
+      { v: stats.by_tool?.length || 0, l: 'Herramientas' },
+      { v: stats.top_flags?.length || 0, l: 'Flags Distintos' },
+    ];
+    for (const c of cards) {
+      const card = el('div', 'card stat');
+      const v = el('div', 'stat-value'); v.textContent = c.v;
+      const l = el('div', 'stat-label'); l.textContent = c.l;
+      card.appendChild(v); card.appendChild(l); sc.appendChild(card);
+    }
+
+    // Select de filtro + enlaces rápidos por proveedor.
+    renderProviderSelect(stats);
+    renderProviderLinks(stats);
+
+    // Provider stats
+    const ps = document.getElementById('provider-stats');
+    ps.replaceChildren();
+    if (stats.by_provider?.length) {
+      const table = el('table');
+      const thead = el('thead');
+      const trH = el('tr');
+      for (const h of ['Proveedor', 'Eventos', 'Acciones']) trH.appendChild(thCell(h));
+      thead.appendChild(trH);
+      table.appendChild(thead);
+      const tbody = el('tbody');
+      for (const p of stats.by_provider) {
+        const tr = el('tr');
+        tr.appendChild(tdCell(p.provider));
+        tr.appendChild(tdCell(p.total));
+        const tda = el('td');
+        const entries = p.by_action ? Object.entries(p.by_action) : [];
+        for (const [a, c] of entries) {
+          tda.appendChild(badge(a));
+          const sp = el('span'); sp.textContent = ' ' + c; tda.appendChild(sp);
+        }
+        tr.appendChild(tda);
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      ps.appendChild(table);
+    } else {
+      const d = el('div', 'loading'); d.textContent = 'Sin datos de proveedores'; ps.appendChild(d);
+    }
+
+    // Recent events
+    const re = document.getElementById('recent-events');
+    re.replaceChildren();
+    if (events.length) {
+      const table = el('table');
+      const thead = el('thead');
+      const trH = el('tr');
+      for (const h of ['Timestamp', 'Tool', 'Provider', 'Acción', 'Flags']) trH.appendChild(thCell(h));
+      thead.appendChild(trH);
+      table.appendChild(thead);
+      const tbody = el('tbody');
+      for (const e of events.slice(0, 20)) {
+        const tr = el('tr');
+        tr.appendChild(tdCell(new Date(e.ts).toLocaleString()));
+        tr.appendChild(tdCell(e.tool));
+        tr.appendChild(tdCell(e.provider));
+        const tda = el('td'); tda.appendChild(badge(e.action_taken)); tr.appendChild(tda);
+        tr.appendChild(tdCell((e.flags || []).join(', ')));
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      re.appendChild(table);
+    } else {
+      const d = el('div', 'loading'); d.textContent = 'No hay eventos recientes'; re.appendChild(d);
+    }
+
+    renderConfig();
+    renderUpstreams();
+    renderPacks();
+    renderPolicy();
+  } catch (err) {
+    if (!getToken()) { showLogin(); return; }
+    const sc = document.getElementById('summary-cards');
+    sc.replaceChildren();
+    const e = el('div', 'error');
+    e.textContent = 'Error: ' + (err && err.message ? err.message : err);
+    sc.appendChild(e);
+  }
+}
+
+function renderProviderSelect(stats) {
+  const sel = document.getElementById('provider-filter');
+  const providers = (stats.by_provider || []).map(p => p.provider);
+  sel.replaceChildren();
+  const all = el('option');
+  all.value = '';
+  all.textContent = 'Todos los proveedores';
+  if (currentProvider === '') all.selected = true;
+  sel.appendChild(all);
+  for (const p of providers) {
+    const opt = el('option');
+    opt.value = p;
+    opt.textContent = p;
+    if (p === currentProvider) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+function renderProviderLinks(stats) {
+  const box = document.getElementById('provider-links');
+  box.replaceChildren();
+  const providers = (stats.by_provider || []).map(p => p.provider);
+  if (!providers.length) {
+    const d = el('div', 'loading'); d.textContent = 'Sin datos de proveedores'; box.appendChild(d);
+    return;
+  }
+  // Los links son solo chips: no llevan el provider en un href y capturan el
+  // valor por closure, así un provider malicioso no puede inyectar JS.
+  for (const p of providers) {
+    const a = el('a');
+    a.href = '#';
+    a.textContent = p;
+    a.addEventListener('click', (ev) => { ev.preventDefault(); setProvider(p); });
+    box.appendChild(a);
+  }
+}
+
+// ─── Configuración (paridad CLI/UI, review v5 F6) ───────────────────────
+let pendingConfig = null;
+
+function configValue(v) {
+  return (v === undefined || v === null) ? '' : String(v);
+}
+
+function renderConfig() {
+  const conEl = document.getElementById('config-view');
+  fetchJson('/api/config').then(cfg => {
+    pendingConfig = cfg;
+    conEl.replaceChildren();
+    const table = el('table');
+    const thead = el('thead');
+    const trH = el('tr');
+    for (const h of ['Campo', 'Valor']) trH.appendChild(thCell(h));
+    thead.appendChild(trH);
+    table.appendChild(thead);
+    const tbody = el('tbody');
+    tbody.id = 'config-fields';
+    const fields = ['listen', 'mode', 'fail_policy', 'max_body_bytes', 'health_path', 'log_level'];
+    for (const key of fields) {
+      const tr = el('tr');
+      tr.appendChild(tdCell(key));
+      tr.appendChild(tdCell(configValue(cfg[key])));
+      tbody.appendChild(tr);
+    }
+    const trU = el('tr');
+    trU.appendChild(tdCell('upstreams'));
+    trU.appendChild(tdCell(cfg.upstreams ? Object.keys(cfg.upstreams).join(', ') : '—'));
+    tbody.appendChild(trU);
+    const trT = el('tr');
+    trT.appendChild(tdCell('admin_token')); // el token jamás se imprime en el DOM
+    // La API expone SOLO el booleano derivado; `cfg.admin_token` no existe.
+    trT.appendChild(tdCell(cfg.admin_token_configured ? 'configurado' : 'no configurado'));
+    tbody.appendChild(trT);
+    table.appendChild(tbody);
+    conEl.appendChild(table);
+    const actions = el('div');
+    actions.id = 'config-actions';
+    const btn = el('button');
+    btn.textContent = 'Editar';
+    btn.addEventListener('click', startEditConfig);
+    actions.appendChild(btn);
+    conEl.appendChild(actions);
+  }).catch(err => {
+    if (getToken()) {
+      conEl.replaceChildren();
+      const d = el('div', 'error');
+      d.textContent = 'Config: ' + (err && err.message ? err.message : err);
+      conEl.appendChild(d);
+    }
+  });
+}
+
+function startEditConfig() {
+  const cfg = pendingConfig || {};
+  const tbody = document.getElementById('config-fields');
+  tbody.replaceChildren();
+  const fields = ['listen', 'mode', 'fail_policy', 'max_body_bytes', 'health_path', 'log_level'];
+  for (const key of fields) {
+    const tr = el('tr');
+    tr.appendChild(tdCell(key));
+    const tdv = el('td');
+    const inp = el('input');
+    inp.id = 'cfg-' + key;
+    inp.type = 'text';
+    inp.value = configValue(cfg[key]);
+    tdv.appendChild(inp);
+    tr.appendChild(tdv);
+    tbody.appendChild(tr);
+  }
+  const actions = document.getElementById('config-actions');
+  actions.replaceChildren();
+  const saveBtn = el('button');
+  saveBtn.textContent = 'Guardar cambios';
+  saveBtn.addEventListener('click', saveConfig);
+  actions.appendChild(saveBtn);
+  const cancelBtn = el('button');
+  cancelBtn.textContent = 'Cancelar';
+  cancelBtn.addEventListener('click', renderConfig);
+  actions.appendChild(cancelBtn);
+}
+
+// PUT /api/config es un PATCH (api.rs::ConfigPatch): sólo se mandan los
+// campos editados. En particular NO se manda `admin_token` (el GET no lo
+// revela y omitirlo lo preserva) ni `admin_token_configured` (sólo lectura).
+async function saveConfig() {
+  const val = id => (document.getElementById(id) || { value: '' }).value;
+  const mb = val('cfg-max_body_bytes');
+  const patch = {
+    listen: val('cfg-listen'),
+    mode: val('cfg-mode'),
+    fail_policy: val('cfg-fail_policy'),
+    max_body_bytes: mb === '' ? null : Number(mb),
+    health_path: val('cfg-health_path'),
+    log_level: val('cfg-log_level'),
+  };
+  const resp = await sendJson('PUT', '/api/config', patch);
+  if (!resp) return;
+  if (!resp.ok) { await reportError('PUT /api/config', resp); return; }
+  const body = await resp.json().catch(() => ({}));
+  if (body.requires_restart) {
+    window.alert('Config guardada. El cambio de `listen` aplica en el siguiente arranque.');
+  }
+  loadData();
+}
+
+// ─── Helpers de mutación (F6) ────────────────────────────────────────────
+
+// Envía JSON con el admin token. Devuelve null si la sesión caducó (ya
+// gestionado mostrando el login), o la Response en cualquier otro caso.
+async function sendJson(method, url, payload) {
+  const resp = await fetch(url, {
+    method,
+    headers: { 'content-type': 'application/json', 'X-Cerberus-Admin-Token': getToken() },
+    body: JSON.stringify(payload)
+  });
+  if (resp.status === 401) {
+    if (window.localStorage) localStorage.removeItem(TOKEN_KEY);
+    showLogin('Token inválido o expirado.');
+    return null;
+  }
+  return resp;
+}
+
+// Muestra el `error` que devuelve la API (nunca se interpola en HTML: va por
+// textContent / window.alert).
+async function reportError(what, resp) {
+  const body = await resp.json().catch(() => null);
+  const detail = body && body.error ? body.error : `HTTP ${resp.status}`;
+  window.alert(`${what} falló: ${detail}`);
+}
+
+function setMsg(id, text) {
+  const n = document.getElementById(id);
+  if (n) n.textContent = text || '';
+}
+
+// ─── Rule packs (F6) — misma API que el CLI `cerberus pack` ─────────────
+const PACK_WIRE_VERSION = 2;
+const MAX_PACK_BYTES = 523776;
+
+async function renderPacks() {
+  const box = document.getElementById('packs-view');
+  if (!box) return;
+  try {
+    const info = await fetchJson('/api/packs');
+    box.replaceChildren();
+    const pre = el('div');
+    pre.textContent = info && info.message ? info.message : JSON.stringify(info);
+    box.appendChild(pre);
+  } catch (err) {
+    if (!getToken()) return;
+    box.replaceChildren();
+    const msg = String(err && err.message ? err.message : err);
+    const d = el('div', 'loading');
+    // 503 = el daemon corre sin pack worker (modo local/tests).
+    d.textContent = /503/.test(msg) ? 'pack worker no conectado (modo local)' : 'Packs: ' + msg;
+    box.appendChild(d);
+  }
+}
+
+async function installPack() {
+  const input = document.getElementById('pack-file');
+  const file = input && input.files ? input.files[0] : null;
+  if (!file) {
+    setMsg('packs-msg', 'Selecciona un archivo de pack firmado (.json).');
+    return;
+  }
+  if (file.size === 0) {
+    setMsg('packs-msg', 'El archivo seleccionado está vacío.');
+    return;
+  }
+  if (file.size > MAX_PACK_BYTES) {
+    setMsg('packs-msg', `El pack ocupa ${file.size} bytes; el máximo es ${MAX_PACK_BYTES}.`);
+    return;
+  }
+
+  setMsg('packs-msg', `Leyendo ${file.name || 'pack seleccionado'}…`);
+  let pack;
+  try {
+    const bytes = await file.arrayBuffer();
+    pack = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (err) {
+    const detail = err && err.message ? err.message : String(err);
+    setMsg('packs-msg', `No se pudo leer el pack como UTF-8: ${detail}`);
+    return;
+  }
+
+  // PackInstallRequest wire v2 exacto: sólo contenido firmado, nunca
+  // input.value ni otro dato con semántica de ruta local.
+  const request = { wire_version: PACK_WIRE_VERSION, pack };
+  setMsg('packs-msg', `Instalando ${file.name || 'pack seleccionado'}…`);
+  try {
+    const resp = await sendJson('POST', '/api/packs/install', request);
+    if (!resp) return;
+    const body = await resp.json().catch(() => ({}));
+    setMsg(
+      'packs-msg',
+      resp.ok
+        ? (body.message || 'Pack instalado correctamente.')
+        : `No se pudo instalar el pack: ${body.error || `HTTP ${resp.status}`}`
+    );
+    if (resp.ok) {
+      input.value = '';
+      renderPacks();
+    }
+  } catch (err) {
+    const detail = err && err.message ? err.message : String(err);
+    setMsg('packs-msg', `No se pudo contactar al daemon: ${detail}`);
+  }
+}
+
+async function rollbackPack() {
+  setMsg('packs-msg', 'Revirtiendo…');
+  const resp = await sendJson('POST', '/api/packs/rollback', {});
+  if (!resp) return;
+  const body = await resp.json().catch(() => ({}));
+  setMsg('packs-msg', resp.ok ? (body.message || 'rollback aplicado') : (body.error || `HTTP ${resp.status}`));
+  renderPacks();
+}
+
+// ─── Política: categorías, reglas propias y allowlist (F6) ──────────────
+let validActions = ['allow', 'warn', 'redact', 'block'];
+
+function fillActionSelect(id) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  const previous = sel.value;
+  sel.replaceChildren();
+  for (const a of validActions) {
+    const opt = el('option');
+    opt.value = a;
+    opt.textContent = a;
+    if (a === previous) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+// Tabla clave → acción con un botón "Quitar" por fila. El nombre de la clave
+// se captura por closure, nunca se interpola en HTML ni en un atributo.
+function renderPolicyTable(box, entries, onRemove) {
+  box.replaceChildren();
+  if (!entries.length) {
+    const d = el('div', 'loading'); d.textContent = 'Sin entradas'; box.appendChild(d);
+    return;
+  }
+  const table = el('table');
+  const thead = el('thead');
+  const trH = el('tr');
+  for (const h of ['Clave', 'Acción', '']) trH.appendChild(thCell(h));
+  thead.appendChild(trH);
+  table.appendChild(thead);
+  const tbody = el('tbody');
+  for (const [key, action] of entries) {
+    const tr = el('tr');
+    tr.appendChild(tdCell(key));
+    const inherited = action === null;
+    const tda = el('td'); tda.appendChild(badge(inherited ? 'inherit' : action)); tr.appendChild(tda);
+    const tdb = el('td');
+    if (inherited) {
+      tdb.textContent = 'acción declarada por la regla';
+      tdb.className = 'muted';
+    } else {
+      const btn = el('button', 'danger');
+      btn.type = 'button';
+      btn.textContent = 'Quitar';
+      btn.addEventListener('click', () => onRemove(key));
+      tdb.appendChild(btn);
+    }
+    tr.appendChild(tdb);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
+}
+
+async function renderPolicy() {
+  const catBox = document.getElementById('categories-view');
+  const ruleBox = document.getElementById('rules-view');
+  const allowBox = document.getElementById('allowlist-view');
+  if (!catBox || !ruleBox || !allowBox) return;
+  try {
+    const pol = await fetchJson('/api/policy');
+    if (Array.isArray(pol.valid_actions) && pol.valid_actions.length) validActions = pol.valid_actions;
+    fillActionSelect('cat-action');
+    fillActionSelect('rule-action');
+    const configuredCategories = pol.categories || {};
+    const categoryNames = Array.isArray(pol.valid_categories) ? pol.valid_categories : Object.keys(configuredCategories);
+    const categoryEntries = categoryNames.map(k => [
+      k,
+      Object.prototype.hasOwnProperty.call(configuredCategories, k) ? configuredCategories[k] : null
+    ]);
+    renderPolicyTable(catBox, categoryEntries, k => setCategory(k, null));
+    renderPolicyTable(ruleBox, Object.entries(pol.rules || {}), k => setRule(k, null));
+    // `persisted:false` = el overlay vive en memoria del daemon (ver api.rs).
+    if (pol.persisted === false) {
+      const note = el('div', 'note');
+      note.textContent = 'Este overlay vive en memoria del daemon: se pierde al reiniciar (aún no se serializa al YAML).';
+      ruleBox.appendChild(note);
+    }
+    renderAllowlist(allowBox, pol.allowlist || []);
+  } catch (err) {
+    if (!getToken()) return;
+    const msg = String(err && err.message ? err.message : err);
+    for (const box of [catBox, ruleBox, allowBox]) {
+      box.replaceChildren();
+      const d = el('div', 'loading'); d.textContent = 'Política: ' + msg; box.appendChild(d);
+    }
+  }
+}
+
+function renderAllowlist(box, values) {
+  box.replaceChildren();
+  if (!values.length) {
+    const d = el('div', 'loading'); d.textContent = 'Allowlist vacía'; box.appendChild(d);
+    return;
+  }
+  const table = el('table');
+  const tbody = el('tbody');
+  for (const v of values) {
+    const tr = el('tr');
+    tr.appendChild(tdCell(v));
+    const td = el('td');
+    const btn = el('button', 'danger');
+    btn.type = 'button';
+    btn.textContent = 'Quitar';
+    btn.addEventListener('click', () => removeAllowlist(v));
+    td.appendChild(btn);
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
+}
+
+// `action === null` borra la entrada (semántica de PolicyPatch en api.rs).
+async function patchPolicy(field, key, action) {
+  const payload = {};
+  payload[field] = {};
+  payload[field][key] = action;
+  const resp = await sendJson('PUT', '/api/policy', payload);
+  if (!resp) return;
+  if (!resp.ok) { await reportError('PUT /api/policy', resp); return; }
+  setMsg('policy-msg', action === null ? `${key} eliminado` : `${key} → ${action}`);
+  renderPolicy();
+}
+
+function setCategory(key, action) { return patchPolicy('categories', key, action); }
+function setRule(key, action) { return patchPolicy('rules', key, action); }
+
+async function addAllowlist() {
+  const value = (document.getElementById('allow-value').value || '').trim();
+  if (!value) { setMsg('allowlist-msg', 'Indica un valor.'); return; }
+  const resp = await sendJson('POST', '/api/allowlist', { value });
+  if (!resp) return;
+  if (!resp.ok) { await reportError('POST /api/allowlist', resp); return; }
+  document.getElementById('allow-value').value = '';
+  setMsg('allowlist-msg', `${value} añadido`);
+  renderPolicy();
+}
+
+async function removeAllowlist(value) {
+  const resp = await sendJson('DELETE', '/api/allowlist', { value });
+  if (!resp) return;
+  if (!resp.ok) { await reportError('DELETE /api/allowlist', resp); return; }
+  setMsg('allowlist-msg', `${value} eliminado`);
+  renderPolicy();
+}
+
+// ─── Providers: alta y baja (F6) ────────────────────────────────────────
+async function addUpstream() {
+  const name = (document.getElementById('up-name').value || '').trim();
+  const url = (document.getElementById('up-url').value || '').trim();
+  const auth = (document.getElementById('up-auth').value || '').trim();
+  if (!name || !url) { setMsg('upstream-msg', 'name y url son obligatorios.'); return; }
+  const payload = { name, url };
+  if (auth) payload.auth_header = auth;
+  const resp = await sendJson('POST', '/api/upstreams', payload);
+  if (!resp) return;
+  if (!resp.ok) { await reportError('POST /api/upstreams', resp); return; }
+  setMsg('upstream-msg', `${name} guardado`);
+  renderUpstreams();
+}
+
+async function deleteUpstream(name) {
+  const resp = await sendJson('DELETE', '/api/upstreams/' + encodeURIComponent(name), {});
+  if (!resp) return;
+  if (!resp.ok) { await reportError('DELETE /api/upstreams', resp); return; }
+  setMsg('upstream-msg', `${name} eliminado`);
+  renderUpstreams();
+}
+
+// ─── Providers (CRUD), añadido por el agente de API en paralelo ─────────
+// Resiliente: si /api/upstreams no existe (fetch 404), se muestra "no
+// disponible aún" sin bloquear el resto del dashboard. Nunca refleja datos en
+// href; usa textContent en celdas.
+async function renderUpstreams() {
+  const conEl = document.getElementById('upstreams-view');
+  if (!conEl) return;
+  try {
+    const list = await fetchJson('/api/upstreams');
+    conEl.replaceChildren();
+    const rows = Array.isArray(list) ? list : [];
+    if (!rows.length) {
+      const d = el('div', 'loading'); d.textContent = 'Sin providers configurados'; conEl.appendChild(d);
+      return;
+    }
+    const table = el('table');
+    const thead = el('thead');
+    const trH = el('tr');
+    for (const h of ['Provider', 'Base URL', 'auth_header', '']) trH.appendChild(thCell(h));
+    thead.appendChild(trH);
+    table.appendChild(thead);
+    const tbody = el('tbody');
+    for (const u of rows) {
+      const tr = el('tr');
+      const name = u.name || '';
+      tr.appendChild(tdCell(name));
+      tr.appendChild(tdCell(u.url || ''));
+      tr.appendChild(tdCell(u.auth_header || ''));
+      const td = el('td');
+      const btn = el('button', 'danger');
+      btn.type = 'button';
+      btn.textContent = 'Quitar';
+      btn.addEventListener('click', () => deleteUpstream(name));
+      td.appendChild(btn);
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    conEl.appendChild(table);
+  } catch (err) {
+    if (!getToken()) return;
+    conEl.replaceChildren();
+    const msg = String(err && err.message ? err.message : err);
+    const d = el('div', 'loading');
+    d.textContent = /404/.test(msg)
+      ? 'endpoint de providers no disponible aún'
+      : 'Providers: ' + msg;
+    conEl.appendChild(d);
+  }
+}
+
+// Todos los handlers se enganchan aquí: la CSP servida por api.rs ya no
+// lleva 'unsafe-inline', así que un `onclick=` en el HTML no se ejecutaría.
+function on(id, fn) {
+  const n = document.getElementById(id);
+  if (n) n.addEventListener('click', fn);
+}
+on('btn-refresh', loadData);
+on('btn-save-token', saveToken);
+on('btn-apply-provider', applyProviderFilter);
+on('btn-add-upstream', addUpstream);
+on('btn-install-pack', installPack);
+on('btn-rollback-pack', rollbackPack);
+on('btn-add-allow', addAllowlist);
+on('btn-set-category', () => setCategory(
+  (document.getElementById('cat-name').value || '').trim(),
+  document.getElementById('cat-action').value
+));
+on('btn-set-rule', () => setRule(
+  (document.getElementById('rule-id').value || '').trim(),
+  document.getElementById('rule-action').value
+));
+// El campo de token se envía también con Enter.
+const tokenInput = document.getElementById('cerberus-token');
+if (tokenInput) {
+  tokenInput.addEventListener('keydown', ev => { if (ev.key === 'Enter') saveToken(); });
+}
+fillActionSelect('cat-action');
+fillActionSelect('rule-action');
+loadData();
+setInterval(loadData, 10000);
+</script>
+</body>
+</html>

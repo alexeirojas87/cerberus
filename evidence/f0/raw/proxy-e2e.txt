@@ -1,0 +1,12 @@
+$ curl -i -X POST http://127.0.0.1:8090/v1/chat/completions -H 'content-type: application/json' -d '{"prompt":"hello","secret":"sk-test-fake-api-key-12345"}'
+
+HTTP/1.1 200 OK
+content-type: application/json
+x-upstream: spike-upstream
+content-length: 88
+date: Mon, 17 Aug 2026 01:38:52 GMT
+
+{"body_len":56,"method":"POST","ok":true,"path":"/v1/chat/completions","test_header":""}
+---
+Direct to upstream (control):
+{"body_len":27,"method":"POST","ok":true,"path":"/v1/chat/completions","test_header":""}

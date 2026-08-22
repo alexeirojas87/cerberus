@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "cerberus.fullname" . }}-test"
+  labels:
+    {{- include "cerberus.selectorLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  containers:
+    - name: cerberus-health
+      image: curlimages/curl:8.5.0
+      command:
+        - sh
+        - -ec
+        - |
+          curl -fsS -o /dev/null "http://{{ include "cerberus.fullname" . }}:{{ .Values.service.port }}/health"
+          echo "cerberus /health OK"
+  restartPolicy: Never

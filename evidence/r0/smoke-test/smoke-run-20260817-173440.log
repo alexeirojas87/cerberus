@@ -1,0 +1,88 @@
+
+═══════════════════════════════════════════════════════════════════
+ STEP 0: Build
+═══════════════════════════════════════════════════════════════════
+  ✅ PASS: Binary exists at ./target/release/cerberus
+
+═══════════════════════════════════════════════════════════════════
+ STEP 1: Clean installation (tmp HOME)
+═══════════════════════════════════════════════════════════════════
+  Using tmp HOME: /var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/tmp.nWghgMfB4J
+  ✅ PASS: Clean HOME created
+
+═══════════════════════════════════════════════════════════════════
+ STEP 2: cerberus init
+═══════════════════════════════════════════════════════════════════
+✦ Cerberus Init ✦
+
+Configuración: /var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/tmp.nWghgMfB4J/.cerberus
+Reglas: 13 cargadas
+
+📋 Agentes detectados:
+  Claude Code          ⚠️  detectado, requiere configurar var de entorno
+  Codex                ⚠️  detectado, requiere configurar var de entorno
+  opencode             ⚠️  detectado, requiere configurar var de entorno
+  pi                   ❌ no encontrado
+  Continue (Cursor)    ❌ no encontrado
+
+Resumen: 0/5 agentes configurados
+
+💡 Tip: configura manualmente la variable de entorno de tu agente:
+  export CLAUDE_CODE_BASE_URL=http://127.0.0.1:8787
+  export CODEX_BASE_URL=http://127.0.0.1:8787
+  export OPENCODE_BASE_URL=http://127.0.0.1:8787
+
+  ✅ PASS: Config directory ~/.cerberus created
+
+═══════════════════════════════════════════════════════════════════
+ STEP 3: Start proxy daemon on port 18787
+═══════════════════════════════════════════════════════════════════
+  Health check response: {"status":"ok","version":"0.1.0","mode":"enforce","upstream_count":1,"uptime_secs":0}
+  ✅ PASS: Health endpoint returns OK on port 18787
+
+═══════════════════════════════════════════════════════════════════
+ STEP 4: Start mock upstream server on port 61391
+═══════════════════════════════════════════════════════════════════
+  Mock ready: {"ready": true}
+  ✅ PASS: Mock upstream server running on port 61391
+
+═══════════════════════════════════════════════════════════════════
+ STEP 5: TEST POINT 3 — .env en MAYÚSCULAS (P0-1)
+═══════════════════════════════════════════════════════════════════
+  Request: secret in .env uppercase content
+  Response: {"error":"blocked","flag":"secret.openai_api_key"}
+  ✅ PASS: P0-1: SECRET DETECTED (block or redact)
+
+═══════════════════════════════════════════════════════════════════
+ STEP 6: TEST POINT 4 — Pass-through limpio (P0-4, P0-5)
+═══════════════════════════════════════════════════════════════════
+  Request: clean payload to /openai/v1/chat/completions
+  HTTP response code: 200
+  Response body: {"mock": true, "echo": {"method": "POST", "path": "/openai/v1/chat/completions", "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"hola\"}]}"}}
+  ✅ PASS: P0-4/P0-5: CLEAN REQUEST forwarded successfully (HTTP 200)
+  Mock /__cerberus__/last: {"method": "POST", "path": "/openai/v1/chat/completions", "headers": {"user-agent": "curl/8.7.1", "accept": "*/*", "content-type": "application/json", "host": "127.0.0.1:61391", "content-length": "47"}, "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"hola\"}]}", "body_bytes": 47}
+  NOTE: Proxy returned 200 but mock didn't record (timing?)
+
+═══════════════════════════════════════════════════════════════════
+ STEP 7: TEST POINT 5 — Events persistidos con provider (P0-6)
+═══════════════════════════════════════════════════════════════════
+  /api/events: [{"id":"evt_8638bdda40814f2e9fd6beb1d7936a56","ts":"2026-08-17T21:34:41.907251+00:00","mode":"local","tool":"proxy","provider":"openai","flags":["secret.openai_api_key","secret.env_block"],"counts":{"secret.env_block":2,"secret.openai_api_key":1},"action_taken":"block","hashed_values":["sha256:47ab9d0943c35e869e8745769a26148a080085b46290f5b0048373efa8e04890","sha256:cf06630494d56fb93807658a5c13a843c160146a5fe6f3adc147425905805f96"],"severity":"critical","ts_unix":1787002481},{"id":"evt_327ce2f1f84347e3b9921e6ac40368d3","ts":"2026-08-17T21:34:41.934423+00:00","mode":"local","tool":"proxy","provider":"local","flags":[],"counts":{},"action_taken":"warn","hashed_values":[],"severity":"low","ts_unix":1787002481}]
+  ✅ PASS: P0-6: /api/events returned events (non-empty)
+  /api/stats: {"total":2,"by_provider":[{"provider":"local","total":1,"by_action":{"warn":1},"top_flags":[]},{"provider":"openai","total":1,"by_action":{"block":1},"top_flags":[["secret.env_block",2],["secret.openai_api_key",1]]}],"by_tool":[{"tool":"proxy","total":2,"by_action":{"block":1,"warn":1}}],"top_flags":[["secret.env_block",2],["secret.openai_api_key",1]],"by_action":{"block":1,"warn":1}}
+  ✅ PASS: P0-6: /api/stats returned non-trivial data
+  ✅ PASS: SQLite database file exists
+
+═══════════════════════════════════════════════════════════════════
+ STEP 8: TEST POINT 6 — Fuga cero (no raw secrets in logs/DB)
+═══════════════════════════════════════════════════════════════════
+  ✅ PASS: No raw secret leaked in HOME, proxy logs, or mock logs
+
+═══════════════════════════════════════════════════════════════════
+ RESULTADO DEL SMOKE TEST
+═══════════════════════════════════════════════════════════════════
+  Pass: 11
+  Fail: 0
+  Log file: ./tests/../evidence/r0/smoke-test/smoke-run-20260817-173440.log
+
+  ✅ TODO: Smoke test PASSED
+═══════════════════════════════════════════════════════════════════

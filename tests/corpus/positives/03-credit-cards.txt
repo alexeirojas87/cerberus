@@ -1,0 +1,9 @@
+The customer paid with card number 4111111111111111 (Visa) and the transaction completed.
+
+Please refund the amount to the saved card 5500000000000004 (Mastercard) on file.
+
+The corporate card 340000000000009 (Amex) was used for the annual subscription.
+
+Process the monthly invoice with card 4000056655665556 for the enterprise plan.
+
+The secondary card on account is 5555555555554444 for backup billing purposes.

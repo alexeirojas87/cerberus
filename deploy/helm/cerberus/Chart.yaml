@@ -1,0 +1,18 @@
+apiVersion: v2
+name: cerberus
+description: "Cerberus — DLP firewall for LLM agents. Modo A: self-hosted reverse proxy for LLM backends with secret/PII blocking."
+version: 0.1.0
+appVersion: "0.1.0"
+type: application
+keywords:
+  - security
+  - dlp
+  - llm
+  - proxy
+  - secret-scanning
+home: https://cerberus.dev
+maintainers:
+  - name: Cerberus maintainers
+    email: ops@cerberus.dev
+sources:
+  - https://github.com/alexeirojas87/cerberus

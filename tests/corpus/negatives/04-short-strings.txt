@@ -1,0 +1,19 @@
+The SK prefix alone sk-abc is too short to be a real API key.
+
+Short token example: ghp_abc should not trigger detection.
+
+A phone-like number without country code is just 123-4567.
+
+PEM begin marker alone without the PRIVATE KEY part is not valid.
+
+A short email user@short is not a valid address.
+
+The word "password" by itself is not a secret.
+
+A low-entropy value aaaaaaaa next to a key is still just repeated characters.
+
+A test credit card number like 4111 can appear in documentation examples.
+
+Phone extensions like x1234 are not full phone numbers.
+
+The token short_token_here is not long enough to match any pattern meaningfully.

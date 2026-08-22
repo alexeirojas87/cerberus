@@ -1,0 +1,97 @@
+
+═══════════════════════════════════════════════════════════════════
+ STEP 0: Build
+═══════════════════════════════════════════════════════════════════
+  Building release binary...
+warning: unused variable: `cli_listen`
+  --> crates/cerberus/src/daemon.rs:71:9
+   |
+71 |     let cli_listen = format!("127.0.0.1:{port}");
+   |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cli_listen`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+cargo build: 0 errors, 1 warnings (0 crates)
+  ✅ PASS: Binary exists at ./target/release/cerberus
+
+═══════════════════════════════════════════════════════════════════
+ STEP 1: Clean installation (tmp HOME)
+═══════════════════════════════════════════════════════════════════
+  Using tmp HOME: /var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/tmp.2fPBK9sTZk
+  ✅ PASS: Clean HOME created
+
+═══════════════════════════════════════════════════════════════════
+ STEP 2: cerberus init
+═══════════════════════════════════════════════════════════════════
+✦ Cerberus Init ✦
+
+Configuración: /var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/tmp.2fPBK9sTZk/.cerberus
+Reglas: 13 cargadas
+
+📋 Agentes detectados:
+  Claude Code          ⚠️  detectado, requiere configurar var de entorno
+  Codex                ⚠️  detectado, requiere configurar var de entorno
+  opencode             ⚠️  detectado, requiere configurar var de entorno
+  pi                   ❌ no encontrado
+  Continue (Cursor)    ❌ no encontrado
+
+Resumen: 0/5 agentes configurados
+
+💡 Tip: configura manualmente la variable de entorno de tu agente:
+  export CLAUDE_CODE_BASE_URL=http://127.0.0.1:8787
+  export CODEX_BASE_URL=http://127.0.0.1:8787
+  export OPENCODE_BASE_URL=http://127.0.0.1:8787
+
+  ✅ PASS: Config directory ~/.cerberus created
+
+═══════════════════════════════════════════════════════════════════
+ STEP 3: Start proxy daemon on port 18787
+═══════════════════════════════════════════════════════════════════
+  Health check response: {"status":"ok","version":"0.1.0","mode":"enforce","upstream_count":1,"uptime_secs":0}
+  ✅ PASS: Health endpoint returns OK on port 18787
+
+═══════════════════════════════════════════════════════════════════
+ STEP 4: Start mock upstream server on port 56256
+═══════════════════════════════════════════════════════════════════
+  Mock ready: {"ready": true}
+  ✅ PASS: Mock upstream server running on port 56256
+
+═══════════════════════════════════════════════════════════════════
+ STEP 5: TEST POINT 3 — .env en MAYÚSCULAS (P0-1)
+═══════════════════════════════════════════════════════════════════
+  Request: secret in .env uppercase content
+  Response: {"error":"blocked","flag":"secret.openai_api_key"}
+  ✅ PASS: P0-1: SECRET DETECTED (block or redact)
+
+═══════════════════════════════════════════════════════════════════
+ STEP 6: TEST POINT 4 — Pass-through limpio (P0-4, P0-5)
+═══════════════════════════════════════════════════════════════════
+  Request: clean payload to /openai/v1/chat/completions
+  HTTP response code: 000
+  Response body: 
+  ❌ FAIL: P0-4/P0-5: CLEAN REQUEST NOT forwarded — exit code 000
+  Mock /__cerberus__/last: {}
+  ❌ FAIL: Mock upstream did NOT receive the clean request body
+
+═══════════════════════════════════════════════════════════════════
+ STEP 7: TEST POINT 5 — Events persistidos con provider (P0-6)
+═══════════════════════════════════════════════════════════════════
+  /api/events: []
+  ❌ FAIL: P0-6: /api/events is EMPTY (should have at least the blocked event)
+  /api/stats: {}
+  ✅ PASS: P0-6: /api/stats returned non-trivial data
+  ❌ FAIL: SQLite database file NOT created at ~/.cerberus/cerberus.db
+
+═══════════════════════════════════════════════════════════════════
+ STEP 8: TEST POINT 6 — Fuga cero (no raw secrets in logs/DB)
+═══════════════════════════════════════════════════════════════════
+  ✅ PASS: No raw secret leaked in HOME, proxy logs, or mock logs
+
+═══════════════════════════════════════════════════════════════════
+ RESULTADO DEL SMOKE TEST
+═══════════════════════════════════════════════════════════════════
+  Pass: 8
+  Fail: 4
+  Log file: ./tests/../evidence/r0/smoke-test/smoke-run-20260817-165041.log
+
+  ❌ FALLO: Smoke test tiene 4 pruebas fallidas
+═══════════════════════════════════════════════════════════════════

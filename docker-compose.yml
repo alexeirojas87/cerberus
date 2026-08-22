@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  cerberus:
+    build: .
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./config.yaml:/root/.cerberus/config.yaml:ro
+      - cerberus-data:/root/.cerberus
+    environment:
+      - RUST_LOG=info
+      - CERBERUS_LISTEN_HOST=0.0.0.0
+      # P0 (review v4): interfaz no-loopback exige token de admin de ≥24 bytes
+      # al arrancar. `:?` falla el compose si el operador no lo define.
+      - CERBERUS_ADMIN_TOKEN=${CERBERUS_ADMIN_TOKEN:?set a strong admin token (>=24 chars)}
+      - CERBERUS_RETENTION_DAYS=${CERBERUS_RETENTION_DAYS:-90}
+      - 'CERBERUS_UPSTREAMS={"openai":{"url":"https://api.openai.com","path_prefix":"/openai/","auth_header":"authorization"}}'
+    restart: unless-stopped
+
+volumes:
+  cerberus-data:

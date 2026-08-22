@@ -1,0 +1,4 @@
+   Compiling spike-proxy v0.1.0 (/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-proxy/crates/spike-proxy)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.47s
+   Compiling spike-proxy v0.1.0 (/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-proxy/crates/spike-proxy)
+    Finished `release` profile [optimized] target(s) in 2.29s

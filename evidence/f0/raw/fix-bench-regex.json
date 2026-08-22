@@ -1,0 +1,14 @@
+{
+  "engine": "regex",
+  "iterations": 100,
+  "patterns": 300,
+  "payload_size_kb": 99,
+  "regex": {
+    "compile_ms": 8.099,
+    "matches_found": 236,
+    "scan_p50_ms": 158.521,
+    "scan_p99_ms": 166.107,
+    "throughput_mbps": 0.646
+  },
+  "vectorscan": null
+}

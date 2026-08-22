@@ -1,0 +1,24 @@
+The deployment script references the SSH key:
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA0OhmukK+eN3fVNiOqNl5LJfA7BkY
+yO7p8Rz6sQxW9jK2mLn3R4tUvXyZ5AbCdEfGhIjKlMn
+-----END RSA PRIVATE KEY-----
+This key grants access to the production servers.
+
+The CI pipeline uses this EC key for signing artifacts:
+-----BEGIN EC PRIVATE KEY-----
+MHQCAQEEIIm3V8oRz6sQxW9jK2mLn3R4tUvXyZ5AbC
+dEfGhIjKlMnOpQrStUvWxYzABCDEFGHIJ
+-----END EC PRIVATE KEY-----
+
+Legacy system authentication with OpenSSH format key:
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn
+NhAAAAAwEAAQAAAQEA0OhmukK+eN3fVNiOqNl5LJfA7BkYyO7p8Rz6sQxW9jK2mLn3
+-----END OPENSSH PRIVATE KEY-----
+
+Old DSA key still in authorized_keys on backup servers:
+-----BEGIN DSA PRIVATE KEY-----
+MIIBvAIBAAKBgQDwOhmukK+eN3fVNiOqNl5LJfA7BkYyO7p8
+Rz6sQxW9jK2mLn3R4tUvXyZ5AbCdEfGhIjKlMnOpQrStUvW
+-----END DSA PRIVATE KEY-----

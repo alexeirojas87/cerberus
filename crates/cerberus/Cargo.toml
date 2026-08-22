@@ -1,0 +1,40 @@
+[package]
+name = "cerberus"
+version = "0.1.0"
+edition = "2021"
+description = "Cerberus Local — CLI/daemon for local agent DLP (Modo B)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alexeirojas87/cerberus"
+readme = "README.md"
+keywords = ["security", "dlp", "cli", "daemon", "llm"]
+categories = ["command-line-utilities", "security"]
+
+[lints]
+workspace = true
+
+[dependencies]
+cerberus-engine = { path = "../cerberus-engine" }
+cerberus-packs = { path = "../cerberus-packs" }
+cerberus-proxy = { path = "../cerberus-proxy" }
+cerberus-store = { path = "../cerberus-store" }
+
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "6"
+reqwest = { version = "0.12", default-features = false, features = ["default-tls", "json"] }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+hex = "0.4"
+tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+notify-rust = "4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+notify-rust = "4"

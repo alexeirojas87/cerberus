@@ -1,0 +1,39 @@
+[package]
+name = "cerberus-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "F3: Cerberus reverse proxy core — provider-agnostic scan+redact for LLM egress"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alexeirojas87/cerberus"
+readme = "README.md"
+keywords = ["security", "proxy", "llm", "dlp", "redaction"]
+categories = ["network-programming", "security"]
+
+[lints]
+workspace = true
+
+[dependencies]
+cerberus-engine = { path = "../cerberus-engine" }
+cerberus-packs = { path = "../cerberus-packs" }
+cerberus-store = { path = "../cerberus-store" }
+
+hyper = { version = "1", features = ["server", "http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio", "http1", "tls12", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+x509-parser = "0.18"
+http-body-util = "0.1"
+bytes = "1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["default-tls", "json"] }
+tokio = { version = "1", features = ["full", "rt", "macros"] }
+tempfile = "3"

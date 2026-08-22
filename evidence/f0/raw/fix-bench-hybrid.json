@@ -1,0 +1,14 @@
+{
+  "engine": "hybrid",
+  "hybrid": {
+    "compile_ms": 10.3,
+    "matches_found": 227,
+    "scan_p50_ms": 0.469,
+    "scan_p99_ms": 0.623,
+    "throughput_mbps": 218.548
+  },
+  "iterations": 1000,
+  "patterns": 300,
+  "payload_size_kb": 99,
+  "vectorscan": null
+}

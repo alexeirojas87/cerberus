@@ -1,0 +1,24 @@
+[package]
+name = "spike-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "F0 spike: reverse proxy latency benchmark for Cerberus"
+license = "MIT"
+repository = "https://github.com/cerberus/cerberus"
+readme = "README.md"
+keywords = ["security", "proxy", "benchmark", "latency", "spike"]
+categories = ["network-programming", "development-tools::testing"]
+
+[lints]
+workspace = true
+
+[dependencies]
+hyper = { version = "1", features = ["server", "http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", "http1"] }
+http-body-util = "0.1"
+bytes = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+benchkit = { path = "../benchkit" }

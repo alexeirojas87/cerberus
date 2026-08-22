@@ -1,0 +1,14 @@
+[package]
+name = "benchkit"
+version = "0.1.0"
+edition = "2021"
+description = "Shared benchmark utilities for Cerberus spike units"
+
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alexeirojas87/cerberus"
+readme = "README.md"
+keywords = ["secret", "pii", "benchmark", "utilities"]
+categories = ["development-tools::testing"]
+
+[lints]
+workspace = true

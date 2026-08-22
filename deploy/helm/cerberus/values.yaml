@@ -1,0 +1,128 @@
+# Default values for cerberus.
+# This is a YAML-formatted file. Declare variables to be passed into your templates.
+
+# -- Número de réplicas del daemon.
+replicaCount: 1
+
+image:
+  # -- Imagen del daemon (Modo A). Publicada en CI release; sustituye por tu
+  # propio registro si haces self-host completo.
+  repository: ghcr.io/alexeirojas87/cerberus
+  # -- Tag de la imagen; se recomienda un digest o un tag de release fijo.
+  tag: "0.1.0"
+  # -- Política de pull.
+  pullPolicy: IfNotPresent
+
+# -- Secrets para pull de imagen (private registries).
+imagePullSecrets: []
+
+# -- Overrides de nombre del deployment y objetos asociados.
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Crear ServiceAccount para el pod.
+  create: true
+  # -- Nombre del ServiceAccount (auto-generado si vacío).
+  name: ""
+
+# -- securityContext a nivel de POD. El daemon escribe en `~/.cerberus`; los
+# volumenes (emptyDir) se montan en `/root/.cerberus`, así que el contenedor
+# corre como root dentro del pod (igual que la imagen oficial). Para non-root,
+# re-configura `securityContext.runAsUser` y los puntos de montaje de config.
+podSecurityContext: {}
+
+# -- securityContext a nivel de CONTAINER. `readOnlyRootFilesystem: true`
+# protege la capa de imagen; los writes van al emptyDir de `/root/.cerberus`.
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  # -- Tipo de Service. El proxy se expone ante la flota de agentes/datos.
+  type: ClusterIP
+  # -- Puerto canónico de Cerberus hacia fuera (el mismo del Dockerfile/compose).
+  port: 8787
+  # -- Puerto real del proceso dentro del pod (`start --port 8080`).
+  targetPort: 8080
+
+# -- Recursos del contenedor. `{}` en defaults; valores reales en values-prod.yaml.
+resources: {}
+
+config:
+  # -- Modo de operación del proxy: `enforce` (bloquear/redactar) o `shadow`.
+  mode: enforce
+  # -- fail_policy cuando el motor no puede escanear: `closed` (rechaza) u `open`.
+  failPolicy: closed
+  # -- Días de retención de auditoría.
+  retentionDays: 90
+  admin:
+    # -- ¿Exigir token de admin? El daemon REFUSE arrancar en interfaz
+    # no-loopback (0.0.0.0, caso K8s) sin un token fuerte (>= 24 bytes).
+    # Por eso el default es `true` y el chart falla (required) si falta.
+    enabled: true
+    # -- Token de admin (>= 24 chars). Suele venir de
+    # `${CERBERUS_ADMIN_TOKEN}` en CI: `--set config.admin.token=$CERBERUS_ADMIN_TOKEN`.
+    # Si `config.admin.enabled=true` y este campo está vacío, `helm install` FALLA.
+    token: ""
+  # -- Upstreams LLM (mismo formato que `config.yaml` de cerberus init).
+  #   Cada entrada: `name -> {url, path_prefix, auth_header}`.
+  upstreams:
+    openai:
+      url: https://api.openai.com
+      path_prefix: /openai/
+      auth_header: authorization
+    anthropic:
+      url: https://api.anthropic.com
+      path_prefix: /anthropic/
+      auth_header: authorization
+    gemini:
+      url: https://generativelanguage.googleapis.com
+      path_prefix: /gemini/
+      auth_header: authorization
+    default:
+      url: https://api.openai.com
+      path_prefix: null
+      auth_header: authorization
+  # -- Telemetría opt-in: OFF por defecto. El daemon no envía nada salvo
+  # `telemetry.enabled: true` AND un endpoint alcanzable.
+  telemetry:
+    enabled: false
+    endpoint: https://telemetry.cerberus.dev/v1/ping
+    intervalSecs: 86400
+
+ingress:
+  # -- ¿Crear Ingress para exponer el proxy hacia fuera de la flota?
+  enabled: false
+  # -- ClassName del Ingress (ej. `nginx`, `traefik`).
+  className: ""
+  # -- Anotaciones del Ingress.
+  annotations: {}
+  hosts:
+    - host: cerberus.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: cerberus-tls
+  #    hosts:
+  #      - cerberus.example.com
+
+# -- Puertos extra de entorno del pod:
+#   mapa clave->valor que se convierte en env vars con `toYaml ... | nindent 8`.
+#   Ejemplo:
+#   environment:
+#     RUST_LOG: info
+#   NOTA: los envvars reservados por el chart (CERBERUS_LISTEN_HOST,
+#   CERBERUS_ADMIN_TOKEN, CERBERUS_TELEMETRY_ENDPOINT) se configuran de forma
+#   fija/derivada y no deben repetirse aquí.
+environment: {}
+
+# -- Config de ayuda del liveness/readiness probe.
+probes:
+  # -- Path del healthcheck del daemon.
+  path: /health
+  # -- Puerto (nombre) del healthcheck.
+  port: http

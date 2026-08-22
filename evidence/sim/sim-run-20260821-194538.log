@@ -1,0 +1,117 @@
+[PASS] daemon arranca en modo enforce y /health ok
+      health={"status":"ok","version":"0.1.0","mode":"enforce","upstream_count":3,"uptime_secs":0}
+
+==============================================================================
+  ENFORCE / block critical + feedback header
+==============================================================================
+[FAIL] secreto critical → 403
+      status=200 body={"mock": true, "echo": {"method": "POST", "path": "/v1/chat/completions", "body": "{\"messages\":[{\
+[FAIL] flag secret.openai
+      {"mock": true, "echo": {"method": "POST", "path": "/v1/chat/completions", "body": "{\"messages\":[{\"content\":\"[REDACT
+[PASS] feedback header presente
+      ['server', 'date', 'content-type', 'content-length', 'x-cerberus-feedback', 'connection']
+
+==============================================================================
+  ENFORCE / redact preserva JSON (P0-2)
+==============================================================================
+[PASS] redact → 200
+      status=200
+[PASS] upstream recibe JSON válido
+      {"messages":[{"content":"Authorization: [REDACTED:secret.generic_bearer_token] fin","role":"user"}],"model":"gpt-4","n":1,"temperature":0.0}
+[PASS] secreto → [REDACTED ...]
+      Authorization: [REDACTED:secret.generic_bearer_token] fin
+[PASS] model/temperature intactos
+      {"messages": [{"content": "Authorization: [REDACTED:secret.generic_bearer_token] fin", "role": "user"}], "model": "gpt-4", "n": 1, "temperat
+[PASS] raw token ausente upstream
+
+==============================================================================
+  ENFORCE / redact con keyword en OTRO campo (P0 rev2)
+==============================================================================
+[PASS] cross-field: el secreto NO llega crudo al upstream
+      {"method": "POST", "path": "/v1/chat/completions", "headers": {"accept-encoding": "identity", "user-agent": "Python-urllib/3.9", "content-type": "application/json", "host": "127.0.0.1:65458", "content
+[PASS] cross-field: [REDACTED presente
+      {"method": "POST", "path": "/v1/chat/completions", "headers": {"accept-encoding": "identity", "user-agent": "Python-urllib/3.9", "content-type": "application/json", "host": "127.0.0.1:65458", "content
+
+==============================================================================
+  ENFORCE / warn PII pasa intacto
+==============================================================================
+[PASS] warn email → 200 y llega upstream
+      status=200 {"method": "POST", "path": "/v1/chat/completions", "headers": {"accept-encoding": "identity", "user-agent": "Python-urllib/3.9", "content-ty
+
+==============================================================================
+  ENFORCE / clean sin evento warn (P1-12)
+==============================================================================
+[PASS] payload limpio forward 200
+      status=200
+[PASS] limpio no añade eventos (ni warn)
+      events before=4 after=4
+
+==============================================================================
+  ENFORCE / allowlist en la ruta real (P0-5)
+==============================================================================
+[FAIL] antes: bloquea
+[PASS] después de allowlist: pasa
+      status=200
+
+==============================================================================
+  ENFORCE / hot-reload PUT /api/config (P0-5)
+==============================================================================
+[PASS] PUT config responde ok
+      {"status":"ok","requires_restart":false,"message":"config updated"}
+[PASS] tras reload (shadow) deja pasar
+      status=200
+
+==============================================================================
+  ENFORCE / break-glass header (P1-7)
+==============================================================================
+[PASS] con header bypass: NO bloquea
+      status=200
+
+==============================================================================
+  ENFORCE / límite de body en vivo (413) — rev2 P1 #5
+==============================================================================
+[PASS] body>200 → 413 (limitado durante streaming)
+      status=413 {"error":"body too large"}
+
+==============================================================================
+  ENFORCE / fuga cero + HMAC + CLI
+==============================================================================
+[PASS] sin raw en disco ni daemon log
+[PASS] eventos usan HMAC (hmac:)
+      [["hmac:da5053c1f9eb2b79e1098e699e80cb65015cd455490f2ae76d10a40709ab386f", "hmac:5d0bd10934dd14bc43de343148aae33ae3ace7e878b396f6b24e9b461363e634"], ["hmac:c469325dc0d709abb05faa82eb2c43c63041e4b4ddcf
+[PASS] CLI detecta hallazgo
+      🔍 Hallazgos de escaneo:
+
+  [block] secret.openai_api_key (pos 21..54) hash=sha256:47ab9d0943c35e869e8745769a26148a080085b46290f5b0048373efa8e04890
+
+Acción globa
+[PASS] CLI NO imprime el raw secreto
+      🔍 Hallazgos de escaneo:
+
+  [block] secret.openai_api_key (pos 21..54) hash=sha256:47ab9d0943c35e869e8745769a26148a080085b46290f5b0048373efa8e04890
+
+Acción globa
+[PASS] doctor reporta reglas
+      ✦ Cerberus Doctor ✦
+
+Daemon: Cerberus: [32mRUNNING[0m (PID 97316)
+Reglas cargadas: 13
+
+Agentes:
+  Claude Code         
+[PASS] daemon arranca en modo shadow y /health ok
+      health={"status":"ok","version":"0.1.0","mode":"shadow","upstream_count":3,"uptime_secs":0}
+
+==============================================================================
+  SHADOW / bloqueo no aplica, sí audita
+==============================================================================
+[PASS] shadow: 200 (no bloquea)
+      status=200
+[PASS] shadow: secret crudo llega upstream
+      {"method": "POST", "path": "/v1/chat/completions", "headers": {"accept-encoding": "identity", "user-agent": "Python-urllib/3.9", "content-type": "application/js
+[FAIL] shadow: evento block auditado
+
+==============================================================================
+  RESULTADO: 25 PASS / 4 FAIL
+==============================================================================
+FAILED: secreto critical → 403; flag secret.openai; antes: bloquea; shadow: evento block auditado

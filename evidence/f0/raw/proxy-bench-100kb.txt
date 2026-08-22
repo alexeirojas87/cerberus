@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running `target/release/spike-proxy --bench --payload-kb 100 --iterations 1000`
+{
+  "payload_kb": 100,
+  "iterations": 1000,
+  "direct": {
+    "p50_ms": 0.11620799999999999,
+    "p99_ms": 0.21350000000000002
+  },
+  "proxy": {
+    "p50_ms": 0.216417,
+    "p99_ms": 0.284959
+  },
+  "overhead": {
+    "p50_ms": 0.100209,
+    "p99_ms": 0.071459
+  },
+  "overhead_percentile_p99_ms": 0.071459
+}

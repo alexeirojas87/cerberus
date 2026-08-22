@@ -1,0 +1,73 @@
+    Blocking waiting for file lock on package cache
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling zerocopy v0.8.56
+   Compiling memchr v2.8.3
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling regex-syntax v0.8.11
+   Compiling itoa v1.0.18
+   Compiling benchkit v0.1.0 (/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-scan/crates/benchkit)
+   Compiling aho-corasick v1.1.5
+   Compiling regex-automata v0.4.18
+   Compiling syn v3.0.3
+   Compiling regex v1.13.1
+   Compiling serde_derive v1.0.229
+   Compiling getrandom v0.2.17
+   Compiling rand_core v0.6.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.7
+   Compiling spike-scan v0.1.0 (/private/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-spike-scan/crates/spike-scan)
+warning: unused import: `imp::VectorscanEngine`
+  --> crates/spike-scan/src/engine_vectorscan.rs:84:16
+   |
+84 | pub(crate) use imp::VectorscanEngine;
+   |                ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `VectorscanEngine` is never constructed
+  --> crates/spike-scan/src/engine_vectorscan.rs:64:23
+   |
+64 |     pub(crate) struct VectorscanEngine;
+   |                       ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `new`, `scan`, and `compile_time` are never used
+  --> crates/spike-scan/src/engine_vectorscan.rs:68:23
+   |
+66 |     impl VectorscanEngine {
+   |     --------------------- associated items in this implementation
+67 |         #[allow(clippy::unnecessary_wraps)]
+68 |         pub(crate) fn new(_patterns: &[String]) -> Result<Self, String> {
+   |                       ^^^
+...
+73 |         pub(crate) fn scan(&self, _payload: &str) -> Result<(std::time::Duration, usize), String> {
+   |                       ^^^^
+...
+77 |         pub(crate) fn compile_time(&self) -> std::time::Duration {
+   |                       ^^^^^^^^^^^^
+
+warning: `spike-scan` (bin "spike-scan") generated 3 warnings (run `cargo fix --bin "spike-scan" -p spike-scan` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 5.93s
+     Running `target/release/spike-scan --patterns 300 --payload-size 100 --iterations 1000`
+{
+  "iterations": 1000,
+  "patterns": 300,
+  "payload_size_kb": 99,
+  "regex": {
+    "compile_ms": 6.917,
+    "matches_found": 236,
+    "scan_p50_ms": 158.672,
+    "scan_p99_ms": 163.246,
+    "throughput_mbps": 0.646
+  },
+  "vectorscan": null
+}

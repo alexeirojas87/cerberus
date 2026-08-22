@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets --workspace -- -D warnings
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Run tests
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # En Windows los tests se serializan (--test-threads=1) para
+            # evitar carreras con los tests que mutan HOME/PATH/APPDATA.
+            cargo test --workspace --all-targets -- --test-threads=1
+          else
+            cargo test --workspace --all-targets
+          fi
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+  load-test:
+    name: load-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-load-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      - name: Run load tests (isolated, single-threaded, release)
+        run: cargo test --release --package cerberus-hardening --test load_test -- --test-threads=1
+        timeout-minutes: 10
+
+  smoke-test:
+    name: smoke-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install Python (for mock server)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build release binary
+        run: cargo build --release --workspace
+
+      - name: Run smoke test (attempt 1)
+        run: bash ./tests/smoke-test.sh --build
+        id: smoke1
+        continue-on-error: true
+
+      - name: Copy attempt 1 log to evidence
+        run: |
+          mkdir -p evidence/smoke-test
+          mv evidence/r0/smoke-test/smoke-run-*.log evidence/smoke-test/ 2>/dev/null || true
+
+      - name: Run smoke test (attempt 2)
+        run: bash ./tests/smoke-test.sh --build
+        id: smoke2
+
+      - name: Upload smoke test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-evidence-${{ matrix.os }}
+          path: |
+            evidence/smoke-test/
+            evidence/r0/smoke-test/

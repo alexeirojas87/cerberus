@@ -1,0 +1,33 @@
+warning: unused import: `imp::VectorscanEngine`
+  --> crates/spike-scan/src/engine_vectorscan.rs:84:16
+   |
+84 | pub(crate) use imp::VectorscanEngine;
+   |                ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `VectorscanEngine` is never constructed
+  --> crates/spike-scan/src/engine_vectorscan.rs:64:23
+   |
+64 |     pub(crate) struct VectorscanEngine;
+   |                       ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `new`, `scan`, and `compile_time` are never used
+  --> crates/spike-scan/src/engine_vectorscan.rs:68:23
+   |
+66 |     impl VectorscanEngine {
+   |     --------------------- associated items in this implementation
+67 |         #[allow(clippy::unnecessary_wraps)]
+68 |         pub(crate) fn new(_patterns: &[String]) -> Result<Self, String> {
+   |                       ^^^
+...
+73 |         pub(crate) fn scan(&self, _payload: &str) -> Result<(std::time::Duration, usize), String> {
+   |                       ^^^^
+...
+77 |         pub(crate) fn compile_time(&self) -> std::time::Duration {
+   |                       ^^^^^^^^^^^^
+
+warning: `spike-scan` (bin "spike-scan") generated 3 warnings (run `cargo fix --bin "spike-scan" -p spike-scan` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s

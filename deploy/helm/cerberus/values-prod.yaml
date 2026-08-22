@@ -1,0 +1,91 @@
+# Perfil de producción para el chart de Cerberus.
+# Uso:
+#   helm upgrade cerberus deploy/helm/cerberus --values deploy/helm/cerberus/values-prod.yaml \
+#     --set config.admin.token="$CERBERUS_ADMIN_TOKEN"
+#   helm test cerberus
+#
+# Ajusta la imagen a tu registro publicado antes de ir a producción.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/alexeirojas87/cerberus
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8787
+  targetPort: 8080
+
+# Bloqueo de recursos duro; escale con HPA si la carga del flujo de
+# agentes lo pide (recomendado: 0.5-1 vCPU por core de reglas).
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+config:
+  mode: enforce
+  failPolicy: closed
+  retentionDays: 90
+  admin:
+    # Token obligatorio: llega por --set (env de CI) o un secret pre-existente.
+    enabled: true
+    token: ""
+  upstreams:
+    openai:
+      url: https://api.openai.com
+      path_prefix: /openai/
+      auth_header: authorization
+    anthropic:
+      url: https://api.anthropic.com
+      path_prefix: /anthropic/
+      auth_header: authorization
+    gemini:
+      url: https://generativelanguage.googleapis.com
+      path_prefix: /gemini/
+      auth_header: authorization
+    default:
+      url: https://api.openai.com
+      path_prefix: null
+      auth_header: authorization
+  telemetry:
+    # Telemetría OFF en produccción por defecto (privacy-by-default).
+    # Actívala solo tras revisar la política (telemetry.rs privacy_policy) y
+    # decidir tu endpoint interno de colección.
+    enabled: false
+    endpoint: https://telemetry.cerberus.dev/v1/ping
+    intervalSecs: 86400
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 64m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+  hosts:
+    - host: cerberus.my-corp.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: cerberus-tls
+      hosts:
+        - cerberus.my-corp.example.com
+
+serviceAccount:
+  create: true
+  name: ""
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+environment:
+  RUST_LOG: info

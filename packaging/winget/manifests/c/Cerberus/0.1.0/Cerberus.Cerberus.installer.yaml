@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: Cerberus.Cerberus
+PackageVersion: 0.1.0
+InstallerLocale: en-US
+InstallerType: zip
+Scope: machine
+InstallerSuccessCodes:
+  - 0
+# El pipeline `tools/release/build_release.sh` empaqueta el binario en un
+# `.zip` para Windows (`cerberus-<version>-windows-<arch>.zip`). Un futuro
+# MSI/WiX es opcional y requeriría un ProductCode real (el validador de
+# winget-pkgs rechaza GUIDs fake), por eso hoy se publica el artifact zip.
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/alexeirojas87/cerberus/releases/download/v0.1.0/cerberus-0.1.0-windows-x86_64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    ElevationRequirement: elevatesSelf
+ManifestType: installer
+ManifestVersion: 1.6.0

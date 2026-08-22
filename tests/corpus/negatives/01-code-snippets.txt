@@ -1,0 +1,32 @@
+const API_KEY = "your-api-key-here"; // placeholder for local development
+
+function connect(host, port) {
+    const password = "password123"; // short, low-entropy, only used in dev
+    return new Connection(host, port, password);
+}
+
+const GITHUB_TOKEN = "ghp_example_token_do_not_use_in_production"; // matches pattern but too short
+
+const slackConfig = {
+    token: "xoxb-example-token-1234", // example token for documentation
+};
+
+// const dbConfig = { user: "admin", password: "testpass" };
+
+const creditCard = "4111 1111 1111 1111"; // common test number, might still be detected
+
+function logDebug(message) {
+    console.log(`[DEBUG] ${message}`);
+    if (message.includes("error") || message.includes("warning")) {
+        console.trace();
+    }
+}
+
+function calculateHash(data) {
+    const hash = require("crypto").createHash("sha256").update(data).digest("hex");
+    return hash;
+}
+
+const serverPort = process.env.PORT || 3000;
+const dbHost = "localhost";
+const dbName = "testdb";

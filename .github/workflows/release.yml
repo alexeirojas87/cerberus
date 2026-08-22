@@ -1,0 +1,220 @@
+name: release
+
+# Release pipeline — F8 (installers multiplataforma).
+# Dispara en tags v* (p.ej. `git tag v0.1.0 && git push --tags v0.1.0`).
+#
+#   build (matrix 5 targets): compila cerberus --release y prepara artefactos
+#                             con el MISMO esquema de nombres que install.sh,
+#                             la formula Homebrew y el manifest de winget:
+#                               cerberus-<version>-<os>-<arch>.tar.gz|.zip
+#                             + SHA256SUMS. En el mismo job se inyecta la
+#                             firma real cuando hay credenciales:
+#                             - macOS : codesign + notarytool + stapler
+#                                       (secrets APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
+#                                        APPLE_TEAM_ID / APPLE_IDENTITY)
+#                             - Windows: signtool Authenticode
+#                                       (secrets WINDOWS_SIGN_CERT = pfx en base64 /
+#                                        WINDOWS_SIGN_PASSWORD)
+#                             Sin credenciales esos steps se omiten y los
+#                             binarios salen sin firmar (documentado).
+#   release        : agrega todo y crea el GitHub Release + SHA256SUMS global.
+#
+# Helm y firma de packs los cubre otro agente — aquí SOLO vending.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.os_name }} / ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            os_name: linux
+            arch: x86_64
+            ext: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            os_name: linux
+            arch: aarch64
+            ext: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            os_name: macos
+            arch: x86_64
+            ext: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            os_name: macos
+            arch: aarch64
+            ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            os_name: windows
+            arch: x86_64
+            ext: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.arch }}-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-release-
+            ${{ runner.os }}-
+
+      - name: Build release binary + artifact
+        id: build
+        env:
+          CERBERUS_OS: ${{ matrix.os_name }}
+          CERBERUS_ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+          CERBERUS_STRIP: "1"
+        run: |
+          ./tools/release/build_release.sh
+          art=$(basename "$(echo dist/cerberus-*.${{ matrix.ext }})")
+          echo "$art"
+          echo "artifact=$art" >> "$GITHUB_OUTPUT"
+
+      # ── Firma macOS (solo si la CI tiene credenciales de Apple) ────────────
+      - name: codesign + notarize (macOS)
+        if: ${{ runner.os == 'macOS' && secrets.APPLE_ID != '' &&
+              secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+        run: |
+          ARF="dist/${{ steps.build.outputs.artifact }}"
+          echo "firmando $ARF"
+          bash -x tools/release/macos-notarize.sh "$ARF"
+
+      # ── Firma Authenticode Windows (solo con credenciales) ─────────────────
+      - name: signtool Authenticode
+        if: ${{ matrix.os == 'windows-latest' && secrets.WINDOWS_SIGN_CERT != '' &&
+              secrets.WINDOWS_SIGN_PASSWORD != '' }}
+        shell: bash
+        env:
+          WINDOWS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT }}
+          WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+        run: |
+          # 1) extraer cerberus.exe del .zip
+          python - <<'PY'
+          import glob, zipfile
+          zips = glob.glob('dist/*.zip')
+          assert zips, 'no zip en dist/'
+          zipfile.ZipFile(zips[0]).extractall('dist/exe')
+          PY
+          # 2) localizar signtool del Windows SDK en el runner
+          signtool_path="$(ls /c/Program\ Files*/Windows\ Kits/10/bin/*/x64/signtool.exe 2>/dev/null | head -1)"
+          [ -n "$signtool_path" ] || { echo "signtool no hallado; instalar Windows SDK (choco install windows-sdk)"; exit 1; }
+          export PATH="$PATH:$(dirname "$signtool_path")"
+          # 3) certificado PFX (en base64) y firma
+          echo "$WINDOWS_SIGN_CERT" | base64 --decode > /tmp/cerberus-cert.pfx
+          export WINDOWS_SIGN_CERT=/tmp/cerberus-cert.pfx
+          bash tools/release/windows-sign.sh dist/exe/cerberus.exe
+          # 4) re-empaquetar zip con el exe FIRMAADO mismo nombre + sumas
+          python - <<'PY'
+          import glob, os, zipfile
+          zips = [f for f in glob.glob('dist/*.zip')]
+          assert zips
+          z = zips[0]
+          with zipfile.ZipFile(z, 'w', zipfile.ZIP_DEFLATED) as zo:
+              zo.write('dist/exe/cerberus.exe', 'cerberus.exe')
+          print('re-empaquetado', z)
+          PY
+          (cd dist && sha256sum *.zip > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Sanity check
+        run: |
+          ls -lh dist/
+          cat dist/SHA256SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cerberus-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  # ── Publicación del GitHub Release ─────────────────────────────────────────
+  release:
+    name: release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Version from Cargo.toml
+        id: ver
+        run: |
+          VER="$(sed -nE 's/^version = "([^"]+)"/\1/p' crates/cerberus/Cargo.toml | head -1)"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Global SHA256SUMS
+        run: |
+          cd artifacts
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.msi' \) -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artefacts=()
+          for f in artifacts/*.tar.gz artifacts/*.zip artifacts/*.msi; do
+            [ -e "$f" ] && artefacts+=("$f")
+          done
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            "${artefacts[@]}" \
+            artifacts/SHA256SUMS \
+            --title "Cerberus ${{ steps.ver.outputs.version }}" \
+            --notes "Release multiplataforma ${{ steps.ver.outputs.version }}
+
+            Artefactos:
+            - macOS/Linux: cerberus-<v>-macos|linux-{x86_64,aarch64}.tar.gz
+            - Windows: cerberus-<v>-windows-x86_64.zip (firmado si CI tenia secretos)
+            - SHA256SUMS adjunto por integridad de descarga.
+
+            Homebrew: tras publicar, lanzar tools/release/fill_brew_formula.sh con estos sha
+            (ver tools/release/README_F8.md). Sin credenciales de firma en CI, los binarios
+            salen sin firmar." \
+                ${{ github.event_name == 'workflow_dispatch' && '--draft' || '' }}

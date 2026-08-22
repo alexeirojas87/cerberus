@@ -1,0 +1,45 @@
+
+═══════════════════════════════════════════════════════════════════
+ STEP 0: Build
+═══════════════════════════════════════════════════════════════════
+  Building release binary...
+cargo build (0 crates compiled)
+Finished `release` profile [optimized] target(s) in 0.33s
+  ✅ PASS: Binary exists at ./target/release/cerberus
+
+═══════════════════════════════════════════════════════════════════
+ STEP 1: Clean installation (tmp HOME)
+═══════════════════════════════════════════════════════════════════
+  Using tmp HOME: /var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/tmp.94nN2TV39y
+  ✅ PASS: Clean HOME created
+
+═══════════════════════════════════════════════════════════════════
+ STEP 2: cerberus init
+═══════════════════════════════════════════════════════════════════
+✦ Cerberus Init ✦
+
+Configuración: /var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/tmp.94nN2TV39y/.cerberus
+Reglas: 13 cargadas
+
+📋 Agentes detectados:
+  Claude Code          ⚠️  detectado, requiere configurar var de entorno
+  Codex                ⚠️  detectado, requiere configurar var de entorno
+  opencode             ⚠️  detectado, requiere configurar var de entorno
+  pi                   ❌ no encontrado
+  Continue (Cursor)    ❌ no encontrado
+
+Resumen: 0/5 agentes configurados
+
+💡 Tip: configura manualmente la variable de entorno de tu agente:
+  export CLAUDE_CODE_BASE_URL=http://127.0.0.1:8787
+  export CODEX_BASE_URL=http://127.0.0.1:8787
+  export OPENCODE_BASE_URL=http://127.0.0.1:8787
+
+  ✅ PASS: Config directory ~/.cerberus created
+
+═══════════════════════════════════════════════════════════════════
+ STEP 3: Start proxy daemon on port 18787
+═══════════════════════════════════════════════════════════════════
+  ERROR: daemon never became healthy on port 18787
+  ❌ FAIL: Health endpoint NOT responding on port 18787
+FATAL: daemon not ready. Aborting test.

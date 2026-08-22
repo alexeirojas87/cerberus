@@ -1,0 +1,194 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/benchkit-385be887bb750b22)
+
+running 6 tests
+test tests::percentile_p50_of_even_count ... ok
+test tests::percentile_p50_of_single_element ... ok
+test tests::percentile_p99_of_odd_count ... ok
+test tests::percentile_returns_none_for_empty ... ok
+test tests::time_n_returns_correct_count ... ok
+test tests::time_n_results_are_non_zero ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/cerberus_core-d0026724ff7dd45a)
+
+running 1 test
+test tests::engine_version_returns_non_empty ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/cerberus_engine-12aaae12223357d5)
+
+running 52 tests
+test constraints::tests::allowed_examples_known_false_positive_discarded ... ok
+test constraints::tests::allowed_examples_non_matching_value_passes ... ok
+test constraints::tests::all_constraints_together ... ok
+test constraints::tests::context_keywords_present_passes ... ok
+test constraints::tests::max_length_exact_boundary_passes ... ok
+test constraints::tests::combined_min_length_and_context_keywords ... ok
+test constraints::tests::context_keywords_absent_discarded ... ok
+test constraints::tests::context_keywords_empty_list_passes ... ok
+test constraints::tests::max_length_long_value_is_discarded ... ok
+test constraints::tests::max_length_short_enough_passes ... ok
+test constraints::tests::min_length_exact_boundary_passes ... ok
+test constraints::tests::min_length_long_enough_value_passes ... ok
+test constraints::tests::min_length_short_value_is_discarded ... ok
+test constraints::tests::multiple_context_keywords_any_one_suffices ... ok
+test constraints::tests::no_constraints_always_passes ... ok
+test engine::hex::tests::encode_empty ... ok
+test engine::hex::tests::encode_ff ... ok
+test engine::hex::tests::encode_known ... ok
+test engine::tests::extract_prefix_ak ... ok
+test engine::tests::extract_prefix_sk ... ok
+test engine::tests::extract_prefix_none_for_class ... ok
+test engine::tests::compile_invalid_regex_returns_error ... ok
+test engine::tests::hash_value_is_sha256 ... ok
+test engine::tests::compile_zero_rules ... ok
+test engine::tests::compile_one_rule ... ok
+test engine::tests::scan_allow_rule_passes_through ... ok
+test engine::tests::scan_text_with_no_match ... ok
+test engine::tests::compile_many_rules ... ok
+test loader::tests::defaults_applied_when_loading ... ok
+test loader::tests::load_from_json_array_string ... ok
+test loader::tests::load_from_json_object_string ... ok
+test loader::tests::load_from_yaml_object_string ... ok
+test engine::tests::action_per_rule_honoured ... ok
+test engine::tests::scan_output_action_overall_most_severe ... ok
+test engine::tests::scan_no_secrets ... ok
+test loader::tests::load_from_yaml_string ... ok
+test loader::tests::malformed_json_returns_error ... ok
+test loader::tests::missing_file_returns_io_error ... ok
+test loader::tests::missing_required_field_returns_error ... ok
+test rule::tests::action_defaults_to_warn ... ok
+test rule::tests::action_is_honoured_when_present ... ok
+test rule::tests::enum_display ... ok
+test rule::tests::full_rule_deserializes ... ok
+test scan::tests::scan_request_is_generic_no_domain_ids ... ok
+test engine::tests::scan_detects_secret ... ok
+test scan::tests::scan_request_without_metadata ... ok
+test engine::tests::scan_multiple_patterns_same_rule ... ok
+test scan::tests::scan_through_convenience_fn ... ok
+test engine::tests::finding_never_contains_raw_value ... ok
+test loader::tests::load_from_json_file_roundtrip ... ok
+test engine::tests::scan_unprefixed_pattern ... ok
+test engine::tests::prefixed_and_unprefixed_mixed ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/integration_test.rs (target/debug/deps/integration_test-92be88fbe1c7e96e)
+
+running 11 tests
+test malformed_json_returns_clear_error ... ok
+test actions_are_honoured_per_rule ... ok
+test test_rules_file_loads_with_expected_count ... ok
+test categories_are_present ... ok
+test rules_have_all_required_fields ... ok
+test yaml_load_matches_json_behavior ... ok
+test engine_compiles_from_loaded_rules ... ok
+test generic_scan_request_has_no_domain_fields ... ok
+test allowed_examples_do_not_fire ... ok
+test scan_finds_email_as_pii ... ok
+test scan_finds_openai_key ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/spike_proxy-afe43d8711f66a97)
+
+running 3 tests
+test bench::tests::payload_sizes_returns_four ... ok
+test bench::tests::stats_returns_reasonable_values ... ok
+test bench::tests::synthetic_payload_has_approximate_size ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/spike_proxy-1846dc0f763b52d2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/integration.rs (target/debug/deps/integration-478fd51a1e6b577d)
+
+running 4 tests
+test proxy_forwards_request_and_upstream_responds ... ok
+test proxy_preserves_custom_header ... ok
+test bench_produces_valid_result ... ok
+test binary_bench_outputs_valid_json ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+     Running unittests src/lib.rs (target/debug/deps/spike_scan-d521e5b1cab4d03d)
+
+running 7 tests
+test payload::tests::generate_payload_handles_small_size ... ok
+test payload::tests::generate_payload_contains_examples ... ok
+test patterns::tests::generate_returns_non_empty_patterns ... ok
+test patterns::tests::load_from_json_array ... ok
+test patterns::tests::load_from_jsonl_fallback ... ok
+test patterns::tests::generate_returns_expected_count ... ok
+test payload::tests::generate_payload_size_within_tolerance ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/spike_scan-344e85b6abe4c571)
+
+running 11 tests
+test engine_hybrid::tests::extract_prefix_ak ... ok
+test engine_hybrid::tests::extract_prefix_pem ... ok
+test engine_hybrid::tests::extract_prefix_none_for_class ... ok
+test engine_hybrid::tests::extract_prefix_sk ... ok
+test engine_hybrid::tests::hybrid_scan_empty_patterns ... ok
+test engine_hybrid::tests::hybrid_scan_simple_match ... ok
+test engine_hybrid::tests::hybrid_scan_empty_payload ... ok
+test engine_hybrid::tests::hybrid_scan_no_false_positive ... ok
+test engine_hybrid::tests::hybrid_scan_prefixed_match ... ok
+test engine_hybrid::tests::hybrid_scan_unprefixed_pattern ... ok
+test engine_hybrid::tests::hybrid_scan_many_patterns ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/integration.rs (target/debug/deps/integration-10af1fdedf729502)
+
+running 8 tests
+test patterns_generate_correct_count ... ok
+test patterns_all_non_empty ... ok
+test binary_handles_zero_patterns ... ok
+test binary_with_regex_engine ... ok
+test binary_handles_zero_payload ... ok
+test binary_runs_with_minimal_flags ... ok
+test binary_uses_defaults_when_no_flags ... ok
+test json_schema_complete ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.08s
+
+   Doc-tests benchkit
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cerberus_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cerberus_engine
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests spike_proxy
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests spike_scan
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

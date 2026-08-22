@@ -1,0 +1,112 @@
+[PASS] daemon arranca en modo enforce y /health ok
+      health={"status":"ok","version":"0.1.0","mode":"enforce","upstream_count":3,"uptime_secs":0}
+
+==============================================================================
+  ENFORCE / block critical + feedback header
+==============================================================================
+[PASS] secreto critical → 403
+      status=403 body={"error":"blocked","flag":"secret.openai_api_key"}
+[PASS] flag secret.openai
+      {"error":"blocked","flag":"secret.openai_api_key"}
+[PASS] feedback header presente
+      ['content-type', 'x-cerberus-feedback', 'connection', 'content-length', 'date']
+
+==============================================================================
+  ENFORCE / redact preserva JSON (P0-2)
+==============================================================================
+[FAIL] redact → 200
+      status=503
+[FAIL] upstream recibe JSON válido
+
+==============================================================================
+  ENFORCE / redact con keyword en OTRO campo (P0 rev2)
+==============================================================================
+[PASS] cross-field: el secreto NO llega crudo al upstream
+      {}
+[FAIL] cross-field: [REDACTED presente
+      {}
+
+==============================================================================
+  ENFORCE / warn PII pasa intacto
+==============================================================================
+[FAIL] warn email → 200 y llega upstream
+      status=503 {}
+
+==============================================================================
+  ENFORCE / clean sin evento warn (P1-12)
+==============================================================================
+[FAIL] payload limpio forward 200
+      status=503
+[PASS] limpio no añade eventos (ni warn)
+      events before=4 after=4
+
+==============================================================================
+  ENFORCE / allowlist en la ruta real (P0-5)
+==============================================================================
+[PASS] antes: bloquea
+[FAIL] después de allowlist: pasa
+      status=503
+
+==============================================================================
+  ENFORCE / hot-reload PUT /api/config (P0-5)
+==============================================================================
+[PASS] PUT config responde ok
+      {"status":"ok","message":"config updated"}
+[FAIL] tras reload (shadow) deja pasar
+      status=503
+
+==============================================================================
+  ENFORCE / break-glass header (P1-7)
+==============================================================================
+[FAIL] con header bypass: NO bloquea
+      status=503
+
+==============================================================================
+  ENFORCE / límite de body en vivo (413) — rev2 P1 #5
+==============================================================================
+[PASS] body>200 → 413 (limitado durante streaming)
+      status=413 {"error":"body too large"}
+
+==============================================================================
+  ENFORCE / fuga cero + HMAC + CLI
+==============================================================================
+[PASS] sin raw en disco ni daemon log
+[PASS] eventos usan HMAC (hmac:)
+      [["hmac:c469325dc0d709abb05faa82eb2c43c63041e4b4ddcfba215a2168725ece4aa8", "hmac:452eada368e12790c7765d36b3d6f7a2bdfdd7b232cb055075cb5c8fef450062"], ["hmac:da5053c1f9eb2b79e1098e699e80cb65015cd455490f
+[PASS] CLI detecta hallazgo
+      🔍 Hallazgos de escaneo:
+
+  [block] secret.openai_api_key (pos 21..54) hash=sha256:47ab9d0943c35e869e8745769a26148a080085b46290f5b0048373efa8e04890
+
+Acción globa
+[PASS] CLI NO imprime el raw secreto
+      🔍 Hallazgos de escaneo:
+
+  [block] secret.openai_api_key (pos 21..54) hash=sha256:47ab9d0943c35e869e8745769a26148a080085b46290f5b0048373efa8e04890
+
+Acción globa
+[PASS] doctor reporta reglas
+      ✦ Cerberus Doctor ✦
+
+Daemon: Cerberus: [32mRUNNING[0m (PID 16399)
+Reglas cargadas: 13
+
+Agentes:
+  Claude Code         
+[PASS] daemon arranca en modo shadow y /health ok
+      health={"status":"ok","version":"0.1.0","mode":"shadow","upstream_count":3,"uptime_secs":0}
+
+==============================================================================
+  SHADOW / bloqueo no aplica, sí audita
+==============================================================================
+[FAIL] shadow: 200 (no bloquea)
+      status=503
+[FAIL] shadow: secret crudo llega upstream
+      {}
+[PASS] shadow: evento block auditado
+      {"id": "evt_c3d70a0924e1408282bf64f54ad8bc82", "ts": "2026-08-20T21:54:19.173854+00:00", "mode": "local", "tool": "proxy", "provider": "openai", "flags": ["secret.openai_api_key", "secret.env_block"],
+
+==============================================================================
+  RESULTADO: 16 PASS / 10 FAIL
+==============================================================================
+FAILED: redact → 200; upstream recibe JSON válido; cross-field: [REDACTED presente; warn email → 200 y llega upstream; payload limpio forward 200; después de allowlist: pasa; tras reload (shadow) deja pasar; con header bypass: NO bloquea; shadow: 200 (no bloquea); shadow: secret crudo llega upstream

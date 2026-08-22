@@ -1,0 +1,22 @@
+[package]
+name = "cerberus-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Cerberus F1 core: pure rule-loader + hybrid AC/regex detection engine (texto -> findings)"
+
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alexeirojas87/cerberus"
+readme = "README.md"
+keywords = ["secret", "pii", "detection", "engine", "rules"]
+categories = ["security", "text-processing"]
+
+[lints]
+workspace = true
+
+[dependencies]
+aho-corasick = "1"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"

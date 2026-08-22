@@ -1,0 +1,14 @@
+[package]
+name = "cerberus-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core detection engine for Cerberus secret/PII firewall"
+
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alexeirojas87/cerberus"
+readme = "README.md"
+keywords = ["secret", "pii", "firewall", "llm"]
+categories = ["security", "network-programming"]
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cerberus.fullname" . }}-config
+  labels:
+    {{- include "cerberus.labels" . | nindent 4 }}
+data:
+  config.yaml: |-
+    listen: 0.0.0.0:{{ .Values.service.targetPort }}
+    mode: {{ .Values.config.mode }}
+    fail_policy: {{ .Values.config.failPolicy }}
+    health_path: {{ .Values.probes.path }}
+    retention_days: {{ .Values.config.retentionDays }}
+    upstreams:
+{{ toYaml .Values.config.upstreams | nindent 6 }}
+    telemetry:
+      enabled: {{ .Values.config.telemetry.enabled }}
+      endpoint: {{ .Values.config.telemetry.endpoint | quote }}
+      interval_secs: {{ .Values.config.telemetry.intervalSecs }}

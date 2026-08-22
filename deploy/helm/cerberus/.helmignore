@@ -1,0 +1,11 @@
+# Patterns to ignore when building packages.
+# See https://helm.sh/docs/chart_template_guide/#helmignore
+.DS_Store
+.git/
+.gitignore
+*.tmproj
+.vscode/
+.idea/
+*.tmp
+*.log
+.gitkeep

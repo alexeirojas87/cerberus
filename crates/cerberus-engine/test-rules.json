@@ -1,0 +1,127 @@
+[
+  {
+    "flag": "secret.openai_api_key",
+    "category": "secrets",
+    "severity": "critical",
+    "action": "block",
+    "hashNormalization": "trim",
+    "contextKeywords": ["openai", "api_key", "apikey"],
+    "minLength": 20,
+    "maxLength": 128,
+    "allowedExamples": ["sk-test-example-not-real", "sk-AllowedExampleABCDEFGHIJKLMNOPQRSTUVWXYZ"],
+    "patterns": ["\\bsk-[A-Za-z0-9]{20,}\\b"],
+    "validators": []
+  },
+  {
+    "flag": "secret.anthropic_api_key",
+    "category": "secrets",
+    "severity": "critical",
+    "action": "block",
+    "contextKeywords": ["anthropic", "api_key", "apikey"],
+    "minLength": 20,
+    "maxLength": 128,
+    "patterns": ["\\bsk-ant-[A-Za-z0-9]{20,}\\b"],
+    "validators": []
+  },
+  {
+    "flag": "secret.aws_access_key_id",
+    "category": "secrets",
+    "severity": "critical",
+    "action": "block",
+    "contextKeywords": ["aws", "access", "key"],
+    "minLength": 16,
+    "maxLength": 32,
+    "patterns": ["\\bAKIA[0-9A-Z]{16}\\b"],
+    "validators": []
+  },
+  {
+    "flag": "secret.generic_bearer_token",
+    "category": "secrets",
+    "severity": "high",
+    "action": "redact",
+    "contextKeywords": ["bearer", "authorization", "auth"],
+    "minLength": 16,
+    "maxLength": 256,
+    "patterns": ["\\bBearer\\s+[A-Za-z0-9._~+/-]+=*\\b"],
+    "validators": []
+  },
+  {
+    "flag": "secret.github_token",
+    "category": "secrets",
+    "severity": "critical",
+    "action": "block",
+    "contextKeywords": ["github", "token"],
+    "minLength": 20,
+    "maxLength": 64,
+    "patterns": ["\\bgh[pousr]_[A-Za-z0-9]{36,}\\b"],
+    "validators": []
+  },
+  {
+    "flag": "pii.email",
+    "category": "pii",
+    "severity": "medium",
+    "action": "warn",
+    "contextKeywords": [],
+    "minLength": 6,
+    "maxLength": 254,
+    "allowedExamples": ["user@example.com"],
+    "patterns": ["\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"],
+    "validators": []
+  },
+  {
+    "flag": "pii.credit_card",
+    "category": "pii",
+    "severity": "critical",
+    "action": "redact",
+    "contextKeywords": ["card", "credit", "payment"],
+    "minLength": 13,
+    "maxLength": 19,
+    "patterns": ["\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\\b"],
+    "validators": ["luhn"]
+  },
+  {
+    "flag": "pii.phone",
+    "category": "pii",
+    "severity": "medium",
+    "action": "warn",
+    "contextKeywords": ["phone", "tel", "mobile"],
+    "minLength": 8,
+    "maxLength": 20,
+    "patterns": ["\\+?[0-9]{1,3}[\\s.-]?\\(?[0-9]{1,4}\\)?[\\s.-]?[0-9]{3,4}[\\s.-]?[0-9]{3,4}"],
+    "validators": []
+  },
+  {
+    "flag": "internal.private_key_pem",
+    "category": "internal_code",
+    "severity": "critical",
+    "action": "block",
+    "contextKeywords": [],
+    "minLength": 60,
+    "patterns": [
+      "-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----\\n(?:.*\\n)*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
+    ],
+    "validators": []
+  },
+  {
+    "flag": "secret.slack_token",
+    "category": "secrets",
+    "severity": "high",
+    "action": "redact",
+    "contextKeywords": ["slack", "token"],
+    "minLength": 30,
+    "maxLength": 64,
+    "patterns": ["\\bxox[baprs]-[0-9A-Za-z-]{20,}\\b"],
+    "validators": []
+  },
+  {
+    "flag": "secret.stripe_key",
+    "category": "secrets",
+    "severity": "high",
+    "action": "redact",
+    "contextKeywords": ["stripe", "key"],
+    "minLength": 24,
+    "maxLength": 128,
+    "patterns": ["\\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{24,}\\b"],
+    "validators": []
+  }
+]
