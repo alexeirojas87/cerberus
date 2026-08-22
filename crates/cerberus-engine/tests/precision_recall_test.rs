@@ -178,7 +178,11 @@ const POSITIVE_FILES: &[CorpusFile] = &[
 
 fn read_corpus_file(path: &str) -> String {
     let full_path = format!("{CORPUS_DIR}/{path}");
-    std::fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read corpus file {full_path}: {e}"))
+    std::fs::read_to_string(&full_path)
+        .unwrap_or_else(|e| panic!("Failed to read corpus file {full_path}: {e}"))
+        // Normalize CRLF → LF so ground-truth values (which use \n) match
+        // on Windows where git may check out corpus files with \r\n.
+        .replace("\r\n", "\n")
 }
 
 fn load_engine() -> (
