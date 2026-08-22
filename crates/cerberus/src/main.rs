@@ -9,6 +9,8 @@
 //! - `test <text>`: test detection with inline text
 //! - `doctor`: system diagnostics
 
+#![allow(unknown_lints)]
+
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};

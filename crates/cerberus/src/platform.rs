@@ -26,8 +26,7 @@ pub(crate) fn config_dir() -> PathBuf {
         // %APPDATA%/Cerberus
         std::env::var("APPDATA")
             .map(PathBuf::from)
-            .map(|p| p.join("Cerberus"))
-            .unwrap_or_else(|_| PathBuf::from("C:\\Cerberus"))
+            .map_or_else(|_| PathBuf::from("C:\\Cerberus"), |p| p.join("Cerberus"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {

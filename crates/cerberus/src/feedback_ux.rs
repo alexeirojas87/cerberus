@@ -130,6 +130,7 @@ fn notify_desktop(title: &str, body: &str) -> Result<(), String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[allow(clippy::unnecessary_wraps)]
 fn notify_desktop(title: &str, body: &str) -> Result<(), String> {
     // Unsupported platform (Windows, etc.): the "notification" is a line to
     // stderr with an emoji — the dev still sees what was blocked/redacted.
@@ -248,6 +249,7 @@ fn notify(summary: &str, body: &str) -> Result<(), String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)]
 fn notify(_summary: &str, _body: &str) -> Result<(), String> {
     // Desktop notifications not supported on this platform yet
     Ok(())

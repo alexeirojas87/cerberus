@@ -153,6 +153,7 @@ fn binary_candidates(name: &str) -> Vec<String> {
 
 /// Check that `path` is an executable candidate (execution bit on unix; on
 /// Windows it is enough that the file exists).
+#[allow(clippy::missing_const_for_fn)]
 fn is_executable_candidate(path: &Path) -> bool {
     #[cfg(unix)]
     {
