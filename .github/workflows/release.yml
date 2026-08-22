@@ -1,7 +1,8 @@
 name: release
 
 # Release pipeline — F8 (installers multiplataforma).
-# Dispara en tags v* (p.ej. `git tag v0.1.0 && git push --tags v0.1.0`).
+# Dispara en cada push a main (prerelease con tag v<version>-ci.<sha>)
+# y vía workflow_dispatch (draft).
 #
 #   build (matrix 5 targets): compila cerberus --release y prepara artefactos
 #                             con el MISMO esquema de nombres que install.sh,
@@ -23,8 +24,8 @@ name: release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -181,12 +182,15 @@ jobs:
           path: artifacts/
           merge-multiple: true
 
-      - name: Version from Cargo.toml
+      - name: Version and tag
         id: ver
         run: |
           VER="$(sed -nE 's/^version = "([^"]+)"/\1/p' crates/cerberus/Cargo.toml | head -1)"
+          SHA="$(git rev-parse --short HEAD)"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          # Cada push a main = prerelease con tag único basado en SHA.
+          # Los tags v* manuales siguen creando releases estables.
+          echo "tag=v${VER}-ci.${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Global SHA256SUMS
         run: |
@@ -206,15 +210,13 @@ jobs:
           gh release create "${{ steps.ver.outputs.tag }}" \
             "${artefacts[@]}" \
             artifacts/SHA256SUMS \
-            --title "Cerberus ${{ steps.ver.outputs.version }}" \
-            --notes "Release multiplataforma ${{ steps.ver.outputs.version }}
+            --title "Cerberus ${{ steps.ver.outputs.version }} (CI build ${{ github.sha }})" \
+            --notes "Automated release from push to main.
 
-            Artefactos:
-            - macOS/Linux: cerberus-<v>-macos|linux-{x86_64,aarch64}.tar.gz
-            - Windows: cerberus-<v>-windows-x86_64.zip (firmado si CI tenia secretos)
-            - SHA256SUMS adjunto por integridad de descarga.
+          Artefactos:
+          - macOS/Linux: cerberus-<v>-macos|linux-{x86_64,aarch64}.tar.gz
+          - Windows: cerberus-<v>-windows-x86_64.zip
+          - SHA256SUMS adjunto por integridad de descarga.
 
-            Homebrew: tras publicar, lanzar tools/release/fill_brew_formula.sh con estos sha
-            (ver tools/release/README_F8.md). Sin credenciales de firma en CI, los binarios
-            salen sin firmar." \
-                ${{ github.event_name == 'workflow_dispatch' && '--draft' || '' }}
+          Sin credenciales de firma en CI, los binarios salen sin firmar." \
+            --prerelease
