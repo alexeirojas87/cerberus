@@ -226,6 +226,7 @@ fn write_and_sync(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn read_ca_file(path: &Path, private: bool) -> Result<String, String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| format!("CA file unavailable: {e}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
