@@ -478,10 +478,7 @@ mod tests {
             features: Vec::new(),
         };
         let mgr = LicenseManager { license };
-        assert!(
-            !mgr.is_pro(),
-            "expired license must not count as Pro (review 2, P1 #3)"
-        );
+        assert!(!mgr.is_pro(), "expired license must not count as Pro (review 2, P1 #3)");
     }
 
     #[test]

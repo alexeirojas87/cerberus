@@ -339,10 +339,7 @@ mod tests {
         let yaml = init_config_yaml();
         let parsed = cerberus_proxy::config::ProxyConfig::parse(yaml).expect("default yaml parses");
         assert!(parsed.upstreams.contains_key("openai"), "openai default required");
-        assert!(
-            parsed.upstreams.contains_key("anthropic"),
-            "anthropic default required"
-        );
+        assert!(parsed.upstreams.contains_key("anthropic"), "anthropic default required");
         assert_eq!(
             parsed.upstreams["openai"].url, "https://api.openai.com",
             "without env, the first boot must reach OpenAI"

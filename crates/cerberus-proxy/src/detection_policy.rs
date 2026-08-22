@@ -558,7 +558,11 @@ mod tests {
             .custom_rules
             .push(rule("custom.s", Category::Secrets, Action::Block, "SSS"));
         let eff = effective_rules(&[], &policy);
-        assert_eq!(eff[0].action, Action::Redact, "the coarse control applies to custom rules too");
+        assert_eq!(
+            eff[0].action,
+            Action::Redact,
+            "the coarse control applies to custom rules too"
+        );
 
         // …and the per-flag override is the way to except it.
         policy.rule_actions.insert("custom.s".to_string(), Action::Block);

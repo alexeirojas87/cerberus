@@ -136,7 +136,10 @@ fn cli_pack_uses_control_plane_when_daemon_running() {
     // The control plane RECORDED the call with the token and the pack BYTES.
     let pack_path = pack_file.to_string_lossy().to_string();
     let recv = hits.lock().unwrap().join("\n");
-    assert!(recv.contains("/api/packs/install"), "mock did not see the install: {recv}");
+    assert!(
+        recv.contains("/api/packs/install"),
+        "mock did not see the install: {recv}"
+    );
     assert!(
         recv.contains(ADMIN_TOKEN),
         "mock did not receive X-Cerberus-Admin-Token: {recv}"

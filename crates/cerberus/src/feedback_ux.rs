@@ -49,8 +49,8 @@ impl InterventionWatcher {
     pub(crate) fn drain_interventions<'a>(&mut self, events: &'a [AuditEvent]) -> Vec<&'a AuditEvent> {
         let len = events.len();
         if len < self.processed {
-        // The buffer trimmed from the front (cap 10k): resync without
-        // re-notifying what was already delivered.
+            // The buffer trimmed from the front (cap 10k): resync without
+            // re-notifying what was already delivered.
             self.processed = len;
             return Vec::new();
         }

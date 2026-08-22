@@ -275,10 +275,7 @@ pub(crate) fn trust_instructions() -> String {
         cert.display()
     );
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    format!(
-        "Manually trust {} only if you accept the MITM risk.",
-        cert.display()
-    )
+    format!("Manually trust {} only if you accept the MITM risk.", cert.display())
 }
 
 #[cfg(test)]
@@ -382,7 +379,10 @@ mod tests {
         let msg = enable_with_daemon_state(&["api.openai.com".to_string()], "127.0.0.1:8788", false)
             .expect("enable without daemon");
         assert!(msg.contains("Config persisted"), "{msg}");
-        assert!(!msg.contains("NOTICE"), "without daemon must not warn about restart: {msg}");
+        assert!(
+            !msg.contains("NOTICE"),
+            "without daemon must not warn about restart: {msg}"
+        );
         let saved = load_config_from(&config_path()).expect("config written");
         assert!(saved.enabled);
         assert_eq!(saved.hosts, vec!["api.openai.com".to_string()]);

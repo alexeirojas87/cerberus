@@ -438,9 +438,7 @@ pub(crate) async fn start(port: u16) -> Result<String, String> {
                                         match rebase_live_engine(&engine_control_worker, &policy_source, &new_engine) {
                                             Ok(rules) => {
                                                 tracing::info!(pack_origin = %origin, rules, "pack installed via control plane");
-                                                Ok(format!(
-                                                    "pack installed (hot-reload): engine now has {rules} rules"
-                                                ))
+                                                Ok(format!("pack installed (hot-reload): engine now has {rules} rules"))
                                             }
                                             Err(e) => Err(format!("policy rebase failed after install: {e}")),
                                         }
@@ -466,9 +464,9 @@ pub(crate) async fn start(port: u16) -> Result<String, String> {
                                     // Same as install: the operator's policy is
                                     // re-applied over the reverted rules.
                                     match rebase_live_engine(&engine_control_worker, &policy_source, &new_engine) {
-                                        Ok(rules) => Ok(format!(
-                                            "rollback executed (hot-reload): engine now has {rules} rules"
-                                        )),
+                                        Ok(rules) => {
+                                            Ok(format!("rollback executed (hot-reload): engine now has {rules} rules"))
+                                        }
                                         Err(e) => Err(format!("policy rebase failed after rollback: {e}")),
                                     }
                                 }

@@ -1788,11 +1788,7 @@ mod tests {
         assert_eq!(applied.log_level, base.log_level);
         assert_eq!(applied.health_path, base.health_path);
         assert_eq!(applied.max_body_bytes, base.max_body_bytes);
-        assert_eq!(
-            applied.upstreams.len(),
-            1,
-            "upstreams are not lost in a partial patch"
-        );
+        assert_eq!(applied.upstreams.len(), 1, "upstreams are not lost in a partial patch");
     }
 
     #[test]
@@ -1966,10 +1962,7 @@ mod tests {
     #[test]
     fn policy_defaults_are_inherited_rule_actions() {
         let p = ProxyConfig::default().policy;
-        assert!(
-            p.categories.is_empty(),
-            "absent categories = inherit the rule action"
-        );
+        assert!(p.categories.is_empty(), "absent categories = inherit the rule action");
         assert!(p.rule_actions.is_empty());
         assert!(p.custom_rules.is_empty());
     }
@@ -2089,10 +2082,7 @@ mod tests {
         );
         assert_eq!(control.live_rules(), 1, "the live engine did not change");
         assert!(ctx.config.read().unwrap().policy.custom_rules.is_empty());
-        assert!(
-            !dir.join("config.yaml").exists(),
-            "an invalid policy is not persisted"
-        );
+        assert!(!dir.join("config.yaml").exists(), "an invalid policy is not persisted");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2184,7 +2174,10 @@ mod tests {
         let patch: ConfigPatch = serde_json::from_str(r#"{"log_level":"debug"}"#).unwrap();
         let candidate = patch.apply(&base);
         assert_eq!(candidate.log_level, "debug");
-        assert_eq!(candidate.policy, base.policy, "PUT /api/config does not clobber the policy");
+        assert_eq!(
+            candidate.policy, base.policy,
+            "PUT /api/config does not clobber the policy"
+        );
     }
 
     #[test]

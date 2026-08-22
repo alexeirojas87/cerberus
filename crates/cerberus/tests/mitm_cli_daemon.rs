@@ -77,11 +77,7 @@ fn mitm_enable_without_ca_fails_with_instructions() {
     let r = run(&["mitm", "enable", "--host", "api.openai.com"], &dir);
     assert_ne!(r.status, 0, "without CA it must fail");
     assert!(r.stderr.contains("CA not ready"), "stderr: {}", r.stderr);
-    assert!(
-        r.stderr.contains("mitm init-ca"),
-        "must point to init-ca: {}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("mitm init-ca"), "must point to init-ca: {}", r.stderr);
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -2014,7 +2014,8 @@ async fn pack_install_wire_v2_accepts_bytes_and_never_opens_legacy_path() {
         1,
         "legacy path must be rejected before the worker: {seen:?}"
     );
-    assert_eq!(seen[0].pack, signed_pack, "worker receives exact signed-pack bytes");    assert_eq!(seen[0].origin_name.as_deref(), Some("demo.json"));
+    assert_eq!(seen[0].pack, signed_pack, "worker receives exact signed-pack bytes");
+    assert_eq!(seen[0].origin_name.as_deref(), Some("demo.json"));
     drop(seen);
 
     proxy_handle.abort();

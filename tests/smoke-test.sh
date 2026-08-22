@@ -116,7 +116,7 @@ log_section "STEP 0: Build"
 
 if [ "$BUILD" = true ]; then
     echo "  Building release binary..." | tee -a "$TEST_LOG"
-    rtk cargo build --release --workspace 2>&1 | tee -a "$TEST_LOG"
+    cargo build --release --workspace 2>&1 | tee -a "$TEST_LOG"
 fi
 
 BINARY="./target/release/cerberus"

@@ -404,7 +404,7 @@ impl PackManager {
     ///
     /// The pack's rules replace the owned rules of the previous version of the
     /// SAME pack (`pack_name`); the engine is rebuilt deterministically (base
-    /// + active packs ordered by name/version). Other rule packs do NOT lose
+    /// and active packs ordered by name/version). Other rule packs do NOT lose
     /// rules. The result is persisted to the manifest and to a versioned file
     /// `pack_<name>-v<ver>.json` (the old version remains as history with
     /// `active: false`).
@@ -1233,7 +1233,11 @@ mod tests {
         assert_eq!(mgr.engine().lock().await.num_rules(), 1);
 
         mgr.rollback().await.unwrap();
-        assert_eq!(mgr.engine().lock().await.num_rules(), 0, "rollback leaves the base engine");
+        assert_eq!(
+            mgr.engine().lock().await.num_rules(),
+            0,
+            "rollback leaves the base engine"
+        );
 
         // rollback PERSISTED: new manager in the same dir.
         let reopened = PackManager::new(tmp.path(), EngineBuilder::new(&[]).build().unwrap()).unwrap();
@@ -1417,7 +1421,10 @@ mod tests {
             "Free must NOT receive pack rules at boot"
         );
         assert!(free.list_packs().await.is_empty(), "Free does not report active packs");
-        assert!(free.effective_trust_root().is_none(), "Free does not retain a trust root");
+        assert!(
+            free.effective_trust_root().is_none(),
+            "Free does not retain a trust root"
+        );
         // The on-disk manifest is NOT degraded: it still marks the pack active.
         assert_eq!(
             read_manifest(tmp.path()).active.get("test-pack@1.0.0"),
@@ -1540,7 +1547,10 @@ mod tests {
             let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let prev = std::env::var("CERBERUS_PACK_TRUST_ROOT").ok();
             std::env::set_var("CERBERUS_PACK_TRUST_ROOT", &root);
-            let err = mgr.install(signed).await.expect_err("must fail without an explicit root");
+            let err = mgr
+                .install(signed)
+                .await
+                .expect_err("must fail without an explicit root");
             match prev {
                 Some(p) => std::env::set_var("CERBERUS_PACK_TRUST_ROOT", p),
                 None => std::env::remove_var("CERBERUS_PACK_TRUST_ROOT"),

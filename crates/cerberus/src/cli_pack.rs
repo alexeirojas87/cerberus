@@ -280,8 +280,7 @@ pub(crate) async fn install(pack_file: &str) -> Result<String, String> {
 /// from the name, as an informational label.
 fn read_pack_request(pack_file: &str) -> Result<PackInstallRequest, String> {
     let raw = std::path::Path::new(pack_file);
-    let path =
-        std::fs::canonicalize(raw).map_err(|e| format!("cannot resolve pack '{}': {e}", raw.display()))?;
+    let path = std::fs::canonicalize(raw).map_err(|e| format!("cannot resolve pack '{}': {e}", raw.display()))?;
     let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
     if !meta.is_file() {
         return Err(format!("'{}' is not a pack file", path.display()));
