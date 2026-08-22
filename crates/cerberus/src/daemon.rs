@@ -551,7 +551,7 @@ pub(crate) async fn start(port: u16) -> Result<String, String> {
     #[cfg(unix)]
     let sigterm = term_signal.recv();
     #[cfg(not(unix))]
-    let sigterm = tokio::future::pending::<Option<()>>();
+    let sigterm = std::future::pending::<Option<()>>();
     tokio::pin!(ctrl_c);
     tokio::pin!(sigterm);
 
