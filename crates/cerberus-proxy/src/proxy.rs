@@ -1,23 +1,23 @@
-//! Reverse proxy core — escanea y redacta requests LLM antes de
-//! reenviarlos al upstream (§4.1, §4.2, §4.4 del build plan).
+//! Reverse proxy core — scans and redacts LLM requests before
+//! forwarding them to the upstream (§4.1, §4.2, §4.4 of the build plan).
 #![allow(
     clippy::needless_borrows_for_generic_args,
     clippy::redundant_closure_for_method_calls
 )]
 //!
 //! Fixes post-review:
-//! - **TLS**: cliento conecta a upstreams `https://` vía hiper-rustls
-//!   (webpki-roots). Adiós al `HttpConnector` sin TLS (P0-1).
+//! - **TLS**: the client connects to `https://` upstreams via hiper-rustls
+//!   (webpki-roots). Goodbye to the TLS-less `HttpConnector` (P0-1).
 //! - **JSON-safe redaction** on the AST, not the concatenated text (P0-2).
-//! - **Body limit** defensivo (memory-exhaustion, P1-11); streaming resp.
-//!   sigue fuera de MVP (documentado).
-//! - **Routing provider-agnostic** por `path_prefix` explícito, con stripping
-//!   del prefijo y conservación del query string (P0-6).
-//! - **Hot-reload real**: la config vive en un `Arc<RwLock>` compartido entre
-//!   el proxy y la Config API (P0-5).
-//! - **Allowlist** consultada en la ruta de scanning; bypass auditado por
-//!   header `X-Cerberus-Bypass` (P1-7); header de feedback (P1-7).
-//! - Los request limpios no contaminan la métricas (P1-12).
+//! - **Body limit** defensive (memory-exhaustion, P1-11); streaming resp.
+//!   remains out of MVP (documented).
+//! - **Provider-agnostic routing** by explicit `path_prefix`, with prefix
+//!   stripping and query string preservation (P0-6).
+//! - **Real hot-reload**: the config lives in a shared `Arc<RwLock>` between
+//!   the proxy and the Config API (P0-5).
+//! - **Allowlist** consulted in the scanning path; bypass audited by
+//!   `X-Cerberus-Bypass` header (P1-7); feedback header (P1-7).
+//! - Clean requests do not pollute the metrics (P1-12).
 
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -49,8 +49,9 @@ use crate::json_redact::redact_body;
 use crate::log::{log_security_event, SecurityEvent};
 use crate::shadow;
 
-/// Headers hop-by-hop que nunca se reenvían al upstream (fix P1: list extended
-/// con `te`, `trailer` y `proxy-authorization`, además de la lista estándar).
+/// Hop-by-hop headers that are never forwarded to the upstream (fix P1: list
+/// extended with `te`, `trailer` and `proxy-authorization`, in addition to
+/// the standard list).
 const SKIP_HEADERS: &[&str] = &[
     "host",
     "content-length",
@@ -64,8 +65,8 @@ const SKIP_HEADERS: &[&str] = &[
     "proxy-authorization",
 ];
 
-/// Cabeceras hop-by-hop que se filtran de la RESPUESTA del upstream antes de
-/// copiarlas al cliente (fix P1: incluye `te`, `trailer`, `proxy-authenticate`).
+/// Hop-by-hop headers filtered from the upstream RESPONSE before copying
+/// them to the client (fix P1: includes `te`, `trailer`, `proxy-authenticate`).
 const RESPONSE_HOP_BY_HOP: &[&str] = &[
     "connection",
     "keep-alive",
@@ -93,55 +94,57 @@ const BUILTIN_PREFIXES: &[(&str, &str)] = &[
     ("/groq/", "groq"),
 ];
 
-/// Resultado de resolver la ruta de un request.
+/// Result of resolving a request's route.
 struct UpstreamRoute {
-    /// Base URL del upstream, e.g. `https://api.openai.com`.
+    /// Upstream base URL, e.g. `https://api.openai.com`.
     base: String,
-    /// Path que se reenvía (sin el prefijo de ruta).
+    /// Path that is forwarded (without the path prefix).
     rest_path: String,
-    /// Nombre del proveedor (auditoría consistente con el destino).
+    /// Provider name (audit consistent with the destination).
     provider: String,
 }
 
-/// Destino directo fijado por el forward proxy una vez que un `CONNECT` fue
-/// validado contra su allowlist exacta. Nunca se construye desde headers del
-/// request TLS ya interceptado: el authority autorizado del túnel es la única
-/// fuente de verdad, evitando confused-deputy/SSRF entre hosts.
+/// Direct destination fixed by the forward proxy once a `CONNECT` has been
+/// validated against its exact allowlist. It is never built from headers of
+/// the already-intercepted TLS request: the authorized authority of the
+/// tunnel is the only source of truth, avoiding confused-deputy/SSRF
+/// between hosts.
 #[derive(Clone, Debug)]
 pub(crate) struct DirectUpstream {
     pub(crate) base: String,
     pub(crate) provider: String,
 }
 
-/// Compartido del proxy.
+/// Proxy shared state.
 pub struct ProxyContext {
-    /// Configuración compartida con la Config API (hot-reload).
+    /// Config shared with the Config API (hot-reload).
     pub config: Arc<RwLock<ProxyConfig>>,
-    /// Engine de detección compilado, intercambiable atómicamente (fix review
-    /// v5: hot-reload de packs). El `RwLock` permite que un pack instalado en
-    /// caliente sustituya las reglas sin reiniciar el proxy; la lectura en el
-    /// hot path es muy corta (un `read()` que toma una referencia al Arc).
+    /// Compiled detection engine, atomically swappable (fix review v5:
+    /// pack hot-reload). The `RwLock` allows a pack installed hot to replace
+    /// the rules without restarting the proxy; the read in the hot path is
+    /// very short (a `read()` that takes a reference to the Arc).
     pub engine: Arc<RwLock<Arc<CompiledEngine>>>,
-    /// Opciones de redacción.
+    /// Redaction options.
     pub redact_options: RedactOptions,
-    /// Contexto de la API (dashboard, config, stats).
+    /// API context (dashboard, config, stats).
     pub api: ApiContext,
-    /// Último upstream name usado para routing (provider tracking).
+    /// Last upstream name used for routing (provider tracking).
     pub last_upstream: Arc<std::sync::Mutex<Option<String>>>,
 }
 
-/// ¿La dirección de escucha es loopback (127.0.0.0/8 o `::1`)?
+/// Is the listen address loopback (127.0.0.0/8 or `::1`)?
 #[must_use]
 const fn is_loopback(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
 }
 
-/// Validar que un arranque en interfaz NO-loopback exige un admin token fuerte
-/// (review v4 #1). En loopback se permite dev-mode abierto (documentado).
+/// Validate that a startup on a NON-loopback interface requires a strong
+/// admin token (review v4 #1). On loopback open dev-mode is allowed
+/// (documented).
 ///
 /// # Errors
 ///
-/// `Err` si `listen` no es loopback y el token es `None` o < 24 bytes.
+/// `Err` if `listen` is not loopback and the token is `None` or < 24 bytes.
 fn check_listen_security(listen: &SocketAddr, ctx: &ProxyContext) -> Result<(), String> {
     if is_loopback(listen) {
         return Ok(());
@@ -170,9 +173,9 @@ pub async fn spawn_proxy(
     listen: SocketAddr,
     ctx: Arc<ProxyContext>,
 ) -> Result<(SocketAddr, JoinHandle<()>), Box<dyn std::error::Error + Send + Sync>> {
-    // Fix P0 (review v4 #1): el control plane NO puede quedar abierto en una
-    // interfaz no-loopback; exigimos un admin token fuerte (≥24 bytes) ahí.
-    // La validación ocurre ANTES del bind, para que el arranque falle limpio.
+    // Fix P0 (review v4 #1): the control plane must NOT be left open on a
+    // non-loopback interface; we require a strong admin token (≥24 bytes) there.
+    // The validation happens BEFORE the bind, so startup fails cleanly.
     check_listen_security(&listen, &ctx)?;
     let listener = TcpListener::bind(listen).await?;
     let actual = listener.local_addr()?;
@@ -321,7 +324,7 @@ async fn serve_proxy_until_shutdown(
     }
 }
 
-/// Tokens declarados dinámicamente en el header `Connection` (hop-by-hop).
+/// Tokens declared dynamically in the `Connection` header (hop-by-hop).
 fn connection_tokens(headers: &hyper::HeaderMap) -> Vec<String> {
     headers
         .get("connection")
@@ -330,9 +333,9 @@ fn connection_tokens(headers: &hyper::HeaderMap) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Bufferear el body aplicando `max_body_bytes` DURANTE la lectura
-/// (`http_body_util::Limited`), de modo que un body excesivo no se materialice
-/// jamás en memoria (revisión 2, P1 #5).
+/// Buffer the body applying `max_body_bytes` DURING the read
+/// (`http_body_util::Limited`), so an oversized body never materializes
+/// in memory (review 2, P1 #5).
 async fn build_buffered<B>(body: B, max: Option<usize>) -> Result<Bytes, String>
 where
     B: hyper::body::Body + Sized,
@@ -352,8 +355,8 @@ where
     }
 }
 
-/// Filtrar las cabeceras hop-by-hop de una respuesta upstream antes de
-/// copiarlas al cliente: lista fija + tokens dinámicos de `Connection`.
+/// Filter the hop-by-hop headers from an upstream response before copying
+/// them to the client: fixed list + dynamic tokens from `Connection`.
 fn filter_response_headers(headers: &hyper::HeaderMap) -> hyper::HeaderMap {
     let conn_tokens = connection_tokens(headers);
     let mut out = hyper::HeaderMap::new();
@@ -367,8 +370,9 @@ fn filter_response_headers(headers: &hyper::HeaderMap) -> hyper::HeaderMap {
     out
 }
 
-/// Truncar el motivo de bypass a máximo 200 bytes sin cortar un char UTF-8
-/// a mitad (el hash se hace luego sobre el trunco; el secreto jamás se guarda).
+/// Truncate the bypass reason to at most 200 bytes without cutting a UTF-8
+/// char in half (the hash is done afterwards on the truncation; the secret
+/// is never stored).
 #[must_use]
 fn truncate_bypass_reason(reason: &str) -> &str {
     const MAX: usize = 200;
@@ -382,14 +386,14 @@ fn truncate_bypass_reason(reason: &str) -> &str {
     &reason[..end]
 }
 
-/// Error al leer el body de la respuesta upstream con limit aplicado.
+/// Error reading the upstream response body with the limit applied.
 enum RespBodyError {
     TooLarge,
     Read(String),
 }
 
-/// Bufferear la respuesta del upstream con `max_body`, distinguiendo el corte
-/// por límite (`LengthLimitError`) de los errores de lectura genéricos.
+/// Buffer the upstream response with `max_body`, distinguishing the limit
+/// cutoff (`LengthLimitError`) from generic read errors.
 async fn collect_resp_body(body: hyper::body::Incoming, max: Option<usize>) -> Result<Bytes, RespBodyError> {
     use http_body_util::BodyExt;
     match max {
@@ -406,16 +410,16 @@ async fn collect_resp_body(body: hyper::body::Incoming, max: Option<usize>) -> R
     }
 }
 
-/// Decisión resultante del fallo de redacción según la política (review v4 #5).
+/// Resulting decision from a redaction failure according to the policy (review v4 #5).
 #[derive(Debug)]
 enum RedactDecision {
     Forward(Vec<u8>),
     Reject(StatusCode, String),
 }
 
-/// Aplicar `fail_policy` a un fallo de redacción. Closed → 502 con
-/// `{"error":"redact failure",...}` (el secreto crudo NUNCA se manda);
-/// Open → reenviar el body ORIGINAL y marcar warn (fail-open real).
+/// Apply `fail_policy` to a redaction failure. Closed → 502 with
+/// `{"error":"redact failure",...}` (the raw secret is NEVER sent);
+/// Open → forward the ORIGINAL body and mark warn (real fail-open).
 #[must_use]
 fn decide_redact_result(
     redaction: Result<Vec<u8>, String>,
@@ -435,7 +439,7 @@ fn decide_redact_result(
     }
 }
 
-/// Handler principal del proxy.
+/// Main proxy handler.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn proxy_handler(
     req: Request<Incoming>,
@@ -470,13 +474,13 @@ pub(crate) async fn proxy_handler(
             .map_err(|e| e.to_string());
     }
 
-    // Límite de body aplicado DURANTE el buffering, no después (revisión 2, P1 #5).
+    // Body limit applied DURING buffering, not after (review 2, P1 #5).
     let (max_body, mode, fail_policy) = {
         let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
         (cfg.max_body_bytes, cfg.mode, cfg.fail_policy)
     };
-    // Errores de lectura del body (fix P1): demasiado grande → 413; el resto
-    // de errores de lectura → 502 (no hay body que forwardear).
+    // Body read errors (fix P1): too large → 413; the rest of the read
+    // errors → 502 (there is no body to forward).
     let body_bytes = match build_buffered(body, max_body).await {
         Ok(b) => b,
         Err(msg) if msg == "body too large" => {
@@ -490,15 +494,15 @@ pub(crate) async fn proxy_handler(
         }
     };
 
-    // Break-glass auditado: el header `X-Cerberus-Bypass` solo se honra cuando
-    // el control plane está protegido Y la request trae el admin token válido
-    // **vía `X-Cerberus-Admin-Token`** (fix review v4 #2). El auth por
-    // `Authorization: Bearer` vale para `/api/*`, pero en el DATA PLANE
-    // exigimos exclusivamente el header propio, para no arriesgar a sustituir
-    // la key del proveedor (que viaja en `Authorization`) por el admin token.
-    // Con token configurado y auth ausente/inválida el header se IGNORA (no
-    // bloquea) y se registra un warn. Sin token configurado (dev mode) el
-    // bypass queda abierto (P0).
+    // Audited break-glass: the `X-Cerberus-Bypass` header is only honored when
+    // the control plane is protected AND the request carries the valid admin
+    // token **via `X-Cerberus-Admin-Token`** (fix review v4 #2). Auth via
+    // `Authorization: Bearer` is valid for `/api/*`, but on the DATA PLANE
+    // we require exclusively the own header, to avoid risking substituting
+    // the provider key (which travels in `Authorization`) with the admin
+    // token. With a configured token and missing/invalid auth the header is
+    // IGNORED (it does not block) and a warn is logged. Without a configured
+    // token (dev mode) the bypass stays open (P0).
     let bypass_reason: Option<String> = {
         let present = parts
             .headers
@@ -508,10 +512,10 @@ pub(crate) async fn proxy_handler(
         present.filter(|_| {
             let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
             match api::expected_admin_token(&cfg) {
-                // Dev mode: sin token configurado, bypass abierto.
+                // Dev mode: no token configured, bypass open.
                 None => true,
-                // Token config: el bypass del data plane se honra SOLO por el
-                // header `X-Cerberus-Admin-Token` (no por `Authorization`).
+                // Token config: the data-plane bypass is honored ONLY by the
+                // `X-Cerberus-Admin-Token` header (not by `Authorization`).
                 Some(expected) => {
                     if api::admin_token_header_is_present(&parts.headers, expected) {
                         true
@@ -530,25 +534,25 @@ pub(crate) async fn proxy_handler(
         })
     };
 
-    // Decodificar y escanear, envolviendo la fase del motor en la política de
-    // fallo (fix P1 #2): fail_policy=Open → si el motor no puede decodificar/
-    // redactar se reenvía el body ORIGINAL intacto; Closed → 502.
+    // Decode and scan, wrapping the engine phase in the failure policy
+    // (fix P1 #2): fail_policy=Open → if the engine cannot decode/redact
+    // the ORIGINAL body is forwarded intact; Closed → 502.
     let content_type_hint = parts.headers.get("content-type").and_then(|v| v.to_str().ok());
     let decoded = decode(&body_bytes, content_type_hint);
-    // Fallo de decode: content-type declara JSON pero el body no es JSON válido.
+    // Decode failure: content-type declares JSON but the body is not valid JSON.
     let json_hint = content_type_hint.is_some_and(|h| h.to_ascii_lowercase().contains("json"));
     let decode_failed = json_hint && decoded.content_type != ContentType::Json;
     if decode_failed && fail_policy == FailPolicy::Closed {
         return json_status(StatusCode::BAD_GATEWAY, r#"{"error":"cannot decode"}"#);
     }
     if decode_failed {
-        // fail_policy=Open: no se puede escanear un body no decodificable; se
-        // reenvía intacto y se marca en el log.
+        // fail_policy=Open: a non-decodable body cannot be scanned; it is
+        // forwarded intact and marked in the log.
         tracing::warn!("decode failed for json content-type; fail_policy=open — forwarding original body");
     }
-    // Snapshot del engine para todo el request (hot-reload): se clona el Arc
-    // bajo el lock breve; scan+redact usan el mismo snapshot → ningún pack
-    // intercambiado a medias es visible en medio de un request.
+    // Snapshot of the engine for the whole request (hot-reload): the Arc is
+    // cloned under the brief lock; scan+redact use the same snapshot → no
+    // half-swapped pack is visible mid-request.
     let engine_snap = ctx.engine.read().unwrap_or_else(|p| p.into_inner()).clone();
     let scan_result = if decode_failed {
         ScanOutput {
@@ -557,7 +561,7 @@ pub(crate) async fn proxy_handler(
         }
     } else {
         let mut s = engine_snap.scan(&decoded.text);
-        // Allowlist (triage de falsos positivos) — aplicada en la ruta real (P0-5).
+        // Allowlist (false-positive triage) — applied in the real path (P0-5).
         apply_allowlist(ctx, &decoded.text, &mut s);
         s
     };
@@ -565,7 +569,7 @@ pub(crate) async fn proxy_handler(
     let mode_result = shadow::apply_mode(&scan_result, mode);
     let has_findings = !scan_result.findings.is_empty();
 
-    // Block (Enforce + crítico) — salvo bypass.
+    // Block (Enforce + critical) — unless bypass.
     let blocked = bypass_reason.is_none() && !mode_result.should_forward();
     if blocked {
         let flag = scan_result.findings.first().map_or("unknown", |f| f.flag.as_str());
@@ -574,7 +578,7 @@ pub(crate) async fn proxy_handler(
             &scan_result.findings,
             scan_result.action_overall,
         );
-        // Registrar evento en el store.
+        // Record event in the store.
         let provider = direct_upstream
             .as_ref()
             .map_or_else(|| provider_of(path.as_str(), ctx), |direct| direct.provider.clone());
@@ -587,11 +591,11 @@ pub(crate) async fn proxy_handler(
         return Ok(r);
     }
 
-    // Enforce: aplicar redacción (solo en enforce; shadow pasa intacto).
-    // Si la redacción interna falla, la política de fallo decide: Open →
-    // reenviar el body original (fail-open real); Closed → 502 (fix review v4
-    // #5: antes el error de `apply_redaction` se tragaba en json_redact y el
-    // secreto crudo pasaba aunque la JSON fallara).
+    // Enforce: apply redaction (only in enforce; shadow passes intact).
+    // If the internal redaction fails, the failure policy decides: Open →
+    // forward the original body (real fail-open); Closed → 502 (fix review v4
+    // #5: before the `apply_redaction` error was swallowed in json_redact and
+    // the raw secret passed through even though the JSON failed).
     let final_bytes = if matches!(mode_result, shadow::ModeResult::Enforce { .. })
         && mode_result.action() == cerberus_engine::rule::Action::Redact
     {
@@ -610,7 +614,7 @@ pub(crate) async fn proxy_handler(
         body_bytes.to_vec()
     };
 
-    // Log sec event (por tipo de intervención).
+    // Log sec event (by intervention type).
     let sec_event = if mode_result.action() == cerberus_engine::rule::Action::Block {
         SecurityEvent::Blocked
     } else if mode_result.action() == cerberus_engine::rule::Action::Redact {
@@ -622,15 +626,15 @@ pub(crate) async fn proxy_handler(
     };
     log_security_event(sec_event, &scan_result.findings, scan_result.action_overall);
 
-    // Registrar evento en el store si hay hallazgos (limpios no cuentan — P1-12).
+    // Record event in the store if there are findings (clean ones do not count — P1-12).
     let provider = direct_upstream
         .as_ref()
         .map_or_else(|| provider_of(path.as_str(), ctx), |direct| direct.provider.clone());
     if has_findings {
         let is_bypass = bypass_reason.is_some();
         if is_bypass {
-            // Break-glass auditado (revisión 2, P1 #6): la fuga autorizada se
-            // persiste como "bypass" con su motivo — no como un block falso.
+            // Audited break-glass (review 2, P1 #6): the authorized leak is
+            // persisted as "bypass" with its reason — not as a fake block.
             log_security_event(
                 SecurityEvent::Bypassed,
                 &scan_result.findings,
@@ -646,9 +650,9 @@ pub(crate) async fn proxy_handler(
         );
         if is_bypass {
             event.action_taken = "bypass".to_string();
-            // El motivo NUNCA se persiste crudo (fuga de secretos, fix P1):
-            // en `flags` solo va el marcador "bypass"; el motivo (trucado a
-            // 200 bytes) se guarda hasheado en `hashed_values` como
+            // The reason is NEVER persisted raw (secret leak, fix P1):
+            // `flags` only carries the "bypass" marker; the reason (truncated
+            // to 200 bytes) is stored hashed in `hashed_values` as
             // `bypass-hash:<sha256hex>`.
             event.flags.push("bypass".to_string());
             if let Some(reason) = &bypass_reason {
@@ -661,7 +665,7 @@ pub(crate) async fn proxy_handler(
         api::record_event(&ctx.api, event).await;
     }
 
-    // Resolver upstream (con stripping del prefijo de ruta).
+    // Resolve upstream (with path prefix stripping).
     let (base, rest_path) = direct_upstream.as_ref().map_or_else(
         || {
             let route = resolve_route(ctx, path.as_str());
@@ -680,10 +684,11 @@ pub(crate) async fn proxy_handler(
         .map_err(|e| format!("invalid upstream uri: {e}"))?;
 
     let mut builder = Request::builder().method(parts.method).uri(uri);
-    // Reenviar headers hop-by-hop de forma correcta: omitir los fijos y además
-    // los tokens declarados dinámicamente en "Connection" (revisión 2, P1 #10).
-    // El admin token (`X-Cerberus-Admin-Token`) NUNCA se reenvía al upstream
-    // (fix review v4 #2): es exclusivo del control plane / bypass.
+    // Forward hop-by-hop headers correctly: omit the fixed ones and also the
+    // tokens declared dynamically in "Connection" (review 2, P1 #10).
+    // The admin token (`X-Cerberus-Admin-Token`) is NEVER forwarded to the
+    // upstream (fix review v4 #2): it is exclusive to the control plane /
+    // bypass.
     let conn_tokens = connection_tokens(&parts.headers);
     for (name, value) in &parts.headers {
         let lower = name.as_str();
@@ -701,19 +706,19 @@ pub(crate) async fn proxy_handler(
         .body(Full::new(Bytes::from(final_bytes)))
         .map_err(|e| e.to_string())?;
 
-    // Timeout de upstream (revisión 2, P1 #10): 30s por request.
+    // Upstream timeout (review 2, P1 #10): 30s per request.
     //
-    // Semántica fail_policy en fallo de UPSTREAM (conexión/timeout): la
-    // política Open/Closed se aplica al fallo del MOTOR (decode/scan/redact,
-    // arriba). Para un upstream caído no hay forma de forwardear el request,
-    // así que ambos modos rechazan pero con distinta semántica de proxy:
-    // Closed → 503 (el proxy es parte de la cadena y decide rechazar);
-    // Open → 502 (bad gateway: el destino no respondió).
+    // fail_policy semantics on UPSTREAM failure (connection/timeout): the
+    // Open/Closed policy applies to the ENGINE failure (decode/scan/redact,
+    // above). For a down upstream there is no way to forward the request,
+    // so both modes reject but with different proxy semantics:
+    // Closed → 503 (the proxy is part of the chain and decides to reject);
+    // Open → 502 (bad gateway: the destination did not respond).
     let resp = match tokio::time::timeout(std::time::Duration::from_secs(30), client.request(up_req)).await {
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
-            // fail_policy Closed → 503 (fallo del proxy); Open → 502 y pasamos
-            // el error visible (revisión 2, P1 #7).
+            // fail_policy Closed → 503 (proxy failure); Open → 502 and we
+            // surface the visible error (review 2, P1 #7).
             let status = if fail_policy == crate::config::FailPolicy::Closed {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
@@ -731,9 +736,9 @@ pub(crate) async fn proxy_handler(
         }
     };
     let (resp_parts, resp_body) = resp.into_parts();
-    // Límite en la respuesta también (revisión 2, P1 #5). Si el upstream
-    // supera `max_body_bytes`, devolvemos 502 JSON en lugar de propagar el
-    // error y cortar la conexión (fix P1 #4).
+    // Limit on the response too (review 2, P1 #5). If the upstream exceeds
+    // `max_body_bytes`, we return a 502 JSON instead of propagating the
+    // error and cutting the connection (fix P1 #4).
     let resp_bytes = match collect_resp_body(resp_body, max_body).await {
         Ok(b) => b,
         Err(RespBodyError::TooLarge) => {
@@ -746,19 +751,19 @@ pub(crate) async fn proxy_handler(
 
     let mut response = Response::new(Full::new(resp_bytes));
     *response.status_mut() = resp_parts.status;
-    // Filtrar cabeceras hop-by-hop de la respuesta (fix P1 #6): tokens de
-    // `Connection` + lista fija (te, trailer, proxy-authenticate, ...).
+    // Filter hop-by-hop headers from the response (fix P1 #6): tokens from
+    // `Connection` + fixed list (te, trailer, proxy-authenticate, ...).
     *response.headers_mut() = filter_response_headers(&resp_parts.headers);
     add_feedback_headers(&mut response, &scan_result, bypass_reason.as_deref());
     Ok(response)
 }
 
-/// Filtrar findings cuyo valor está en la allowlist (elimina falsos positivos).
+/// Filter findings whose value is in the allowlist (removes false positives).
 ///
-/// La allowlist se lee de la config compartida (`policy.allowlist`, fix review
-/// v6.1): es la MISMA que persiste el control plane, así que un triage de FP
-/// desde el dashboard surte efecto en el siguiente request sin reiniciar y
-/// sobrevive al reinicio.
+/// The allowlist is read from the shared config (`policy.allowlist`, fix
+/// review v6.1): it is the SAME one the control plane persists, so an FP
+/// triage from the dashboard takes effect on the next request without
+/// restarting and survives restart.
 fn apply_allowlist(ctx: &ProxyContext, text: &str, scan: &mut ScanOutput) {
     let allow: Vec<String> = {
         let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
@@ -775,7 +780,7 @@ fn apply_allowlist(ctx: &ProxyContext, text: &str, scan: &mut ScanOutput) {
             true
         }
     });
-    // Recalcular la acción global con los findings que quedaron.
+    // Recalculate the overall action with the findings that remain.
     scan.action_overall = scan
         .findings
         .iter()
@@ -784,28 +789,28 @@ fn apply_allowlist(ctx: &ProxyContext, text: &str, scan: &mut ScanOutput) {
         .unwrap_or(cerberus_engine::rule::Action::Allow);
 }
 
-/// Proveedor del path (para tracking de stats). Consistente con el destino
-/// de reenvío (revisión 2, P1 #10): usa el MISMO orden que `resolve_route`.
+/// Provider of the path (for stats tracking). Consistent with the forward
+/// destination (review 2, P1 #10): uses the SAME order as `resolve_route`.
 fn provider_of(path: &str, ctx: &ProxyContext) -> String {
     resolve_route(ctx, path).provider
 }
 
-/// Ruta de reenvío determinista. Prioridad (longest-match primero):
-/// - `path_prefix` explícito
-/// - tabla built-in
-/// - upstream `default`
+/// Deterministic forward route. Priority (longest-match first):
+/// - explicit `path_prefix`
+/// - built-in table
+/// - `default` upstream
 ///
-/// El prefijo se quita antes del reenvío y el query string se conserva.
+/// The prefix is stripped before forwarding and the query string is preserved.
 fn resolve_route(ctx: &ProxyContext, path: &str) -> UpstreamRoute {
-    // Snapshot determinista de los upstreams (guarda drop del RwLock temprano).
+    // Deterministic snapshot of the upstreams (drop the RwLock early).
     let upstreams = {
         let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
         cfg.upstreams.clone()
     };
 
-    // 1) path_prefix explícito, longest-match primero (fix P1 #3): se ordena por
-    //    la longitud del PREFIX, no por la del nombre, con desempate
-    //    determinista por nombre.
+    // 1) explicit path_prefix, longest-match first (fix P1 #3): sorted by
+    //    the PREFIX length, not the name length, with a deterministic
+    //    tiebreak by name.
     let mut explicit: Vec<(&String, &crate::config::UpstreamConfig)> = upstreams.iter().collect();
     explicit.sort_by(|(a_name, a_up), (b_name, b_up)| {
         let a_len = a_up.path_prefix.as_deref().map_or(0, str::len);
@@ -815,9 +820,9 @@ fn resolve_route(ctx: &ProxyContext, path: &str) -> UpstreamRoute {
     for (name, up) in explicit {
         if let Some(prefix) = &up.path_prefix {
             if let Some(rest) = path.strip_prefix(prefix.as_str()) {
-                // Normalizar la barra inicial del resto: un prefijo con slash
-                // final (`/openai/`) deja `rest` sin `/` — siempre re-añadimos
-                // la suya para que el URI de reenvío sea correcto (P1 #7).
+                // Normalize the leading slash of the rest: a prefix with a trailing
+                // slash (`/openai/`) leaves `rest` without `/` — we always
+                // re-add it so the forward URI is correct (P1 #7).
                 let rest = rest.trim_start_matches('/');
                 return UpstreamRoute {
                     base: up.url.clone(),
@@ -828,7 +833,7 @@ fn resolve_route(ctx: &ProxyContext, path: &str) -> UpstreamRoute {
         }
     }
 
-    // 2) built-in prefixes hacia upstreams con el nombre correspondiente.
+    // 2) built-in prefixes to upstreams with the corresponding name.
     for (prefix, name) in BUILTIN_PREFIXES {
         if let Some(rest) = path.strip_prefix(prefix) {
             if let Some(up) = upstreams.get(*name) {
@@ -842,7 +847,7 @@ fn resolve_route(ctx: &ProxyContext, path: &str) -> UpstreamRoute {
         }
     }
 
-    // 3) fallback determinista: upstream llamado "default".
+    // 3) deterministic fallback: upstream named "default".
     if let Some(def) = upstreams.get("default") {
         return UpstreamRoute {
             base: def.url.clone(),
@@ -866,7 +871,7 @@ fn json_status(status: StatusCode, body: &str) -> Result<Response<Full<Bytes>>, 
         .map_err(|e| e.to_string())
 }
 
-/// Adjuntar headers de feedback/bypass a la respuesta.
+/// Attach feedback/bypass headers to the response.
 fn add_feedback_headers(response: &mut Response<Full<Bytes>>, scan: &ScanOutput, bypass: Option<&str>) {
     if !scan.findings.is_empty() {
         let feedback = RedactFeedback::from_findings(&scan.findings, scan.action_overall);
@@ -903,8 +908,8 @@ mod tests {
 
     #[test]
     fn https_connector_is_wired() {
-        // El proxy conecta a upstreams HTTPS vía rustls (webpki-roots).
-        // Este test comprueba que el conector TLS construye sin errores.
+        // The proxy connects to HTTPS upstreams via rustls (webpki-roots).
+        // This test checks that the TLS connector builds without errors.
         let https = HttpsConnectorBuilder::new()
             .with_webpki_roots()
             .https_or_http()
@@ -977,9 +982,9 @@ mod tests {
 
     #[test]
     fn routing_uses_longest_path_prefix() {
-        // P1 #3: ordenar por longitud del PREFIX (no del nombre). "short"
-        // tiene prefijo `/v1` y "longer" `/v1/admin`; con nombres cortos un
-        // sort por longitud del nombre rompía el longest-match.
+        // P1 #3: sort by the PREFIX length (not the name). "short"
+        // has prefix `/v1` and "longer" `/v1/admin`; with short names a
+        // sort by name length broke the longest-match.
         let mut upstreams = std::collections::HashMap::new();
         upstreams.insert(
             "short".to_string(),
@@ -1011,8 +1016,8 @@ mod tests {
 
     #[test]
     fn response_hop_by_hop_headers_filtered() {
-        // P1 #6: la respuesta debe filtrar los tokens de `Connection` y la
-        // lista hop-by-hop fija (connection, te, trailer, etc).
+        // P1 #6: the response must filter the `Connection` tokens and the
+        // fixed hop-by-hop list (connection, te, trailer, etc).
         let mut headers = hyper::HeaderMap::new();
         headers.insert("connection", hyper::http::HeaderValue::from_static("close"));
         headers.insert("te", hyper::http::HeaderValue::from_static("trailers"));
@@ -1058,8 +1063,8 @@ mod tests {
         let long = "x".repeat(500);
         let truncated = truncate_bypass_reason(&long);
         assert_eq!(truncated.len(), 200);
-        let short = "corto".to_string();
-        assert_eq!(truncate_bypass_reason(&short), "corto");
+        let short = "short".to_string();
+        assert_eq!(truncate_bypass_reason(&short), "short");
         // 150 multi-byte chars (e.g. ñ = 2 bytes) over 200 bytes → truncation keeps a char boundary.
         let utf8 = "ñ".repeat(150);
         let out = truncate_bypass_reason(&utf8);
@@ -1087,25 +1092,25 @@ mod tests {
 
     #[tokio::test]
     async fn non_loopback_listener_requires_strong_admin_token() {
-        // Review v4 #1: en interfaz no-loopback el control plane no puede
-        // quedar abierto. Sin token o con token < 24 bytes → Err al desplegar.
+        // Review v4 #1: on a non-loopback interface the control plane cannot
+        // be left open. No token or token < 24 bytes → Err on deploy.
         let non_loop: SocketAddr = "0.0.0.0:0".parse().unwrap();
 
-        // Sin token → Err.
+        // No token → Err.
         let ctx = Arc::new(test_ctx_with_admin_token(None));
         let err = spawn_proxy(non_loop, ctx).await.unwrap_err().to_string();
         assert!(err.contains("admin token"), "got: {err}");
 
-        // Token corto (14 chars, como "change-me") → Err en no-loopback.
+        // Short token (14 chars, like "change-me") → Err on non-loopback.
         let ctx = Arc::new(test_ctx_with_admin_token(Some("change-me-123")));
         let err = spawn_proxy(non_loop, ctx).await.unwrap_err().to_string();
         assert!(err.contains("too short"), "got: {err}");
 
-        // Token fuerte (≥24) → Ok.
+        // Strong token (≥24) → Ok.
         let ctx = Arc::new(test_ctx_with_admin_token(Some("012345678901234567890123456789")));
         let (_addr, _h) = spawn_proxy(non_loop, ctx).await.expect("strong token binds on 0.0.0.0");
 
-        // Loopback sin token (dev mode abierto, documentado) → Ok.
+        // Loopback without token (open dev mode, documented) → Ok.
         let ctx = Arc::new(test_ctx_with_admin_token(None));
         let loopback: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let (_addr, _h) = spawn_proxy(loopback, ctx).await.expect("loopback dev mode allowed");
@@ -1133,8 +1138,8 @@ mod tests {
 
     #[test]
     fn redact_failure_fail_closed_returns_502_without_raw_secret() {
-        // Review v4 #5: si la redacción falla y fail_policy=Closed, la
-        // respuesta es 502 JSON y el secreto crudo jamás va en el cuerpo.
+        // Review v4 #5: if redaction fails and fail_policy=Closed, the
+        // response is 502 JSON and the raw secret never goes in the body.
         let original = br#"{"content":"RAW-SECRET-DO-NOT-LEAK999"}"#;
         match decide_redact_result(Err("invalid span".to_string()), FailPolicy::Closed, original) {
             RedactDecision::Reject(status, body) => {
@@ -1148,8 +1153,8 @@ mod tests {
 
     #[test]
     fn redact_failure_fail_open_forwards_original() {
-        // Review v4 #5: fail_policy=Open → se reenvía el body ORIGINAL intacto
-        // (marcado warn) y un redact OK se reenvía tal cual.
+        // Review v4 #5: fail_policy=Open → the ORIGINAL body is forwarded intact
+        // (marked warn) and an OK redact is forwarded as is.
         let original = b"raw-original-bytes".to_vec();
         match decide_redact_result(Err("oops".to_string()), FailPolicy::Open, &original) {
             RedactDecision::Forward(b) => assert_eq!(b, original, "open forwards original"),

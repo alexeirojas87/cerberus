@@ -1,36 +1,36 @@
-//! Hook de feedback (§4.7 del build plan).
+//! Feedback hook (§4.7 of the build plan).
 //!
-//! Proporciona una señal estructurada de "qué se redactó/bloqueó" para que
-//! la capa de red la muestre al dev: notificación de escritorio, línea en
-//! el CLI y/o mensaje inyectado en la respuesta del LLM.
+//! Provides a structured signal of "what was redacted/blocked" so the
+//! network layer can show it to the dev: desktop notification, a line in
+//! the CLI and/or a message injected into the LLM response.
 //!
-//! La redacción silenciosa genera desconfianza. Esta señal permite que el
-//! dev **siempre se entere** de lo que Cerberus está protegiendo.
+//! Silent redaction breeds distrust. This signal lets the dev **always
+//! know** what Cerberus is protecting.
 
 use std::collections::HashMap;
 
 use crate::engine::Finding;
 use crate::rule::{Action, Category, Severity};
 
-/// Feedback estructurado sobre qué acciones tomó Cerberus en un scan.
+/// Structured feedback about what actions Cerberus took in a scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactFeedback {
-    /// Conteo por flag.
+    /// Count per flag.
     pub by_flag: HashMap<String, usize>,
-    /// Conteo por acción.
+    /// Count per action.
     pub by_action: HashMap<Action, usize>,
-    /// Conteo por categoría.
+    /// Count per category.
     pub by_category: HashMap<Category, usize>,
-    /// Severidad máxima encontrada.
+    /// Maximum severity found.
     pub max_severity: Severity,
-    /// Cantidad total de findings.
+    /// Total number of findings.
     pub total: usize,
-    /// Lista de mensajes legibles para el dev.
+    /// List of human-readable messages for the dev.
     pub messages: Vec<String>,
 }
 
 impl RedactFeedback {
-    /// Construir feedback a partir de findings y la acción global tomada.
+    /// Build feedback from findings and the global action taken.
     #[must_use]
     pub fn from_findings(findings: &[Finding], action_taken: Action) -> Self {
         let mut by_flag: HashMap<String, usize> = HashMap::new();
@@ -50,24 +50,24 @@ impl RedactFeedback {
 
         let total = findings.len();
 
-        // Generar mensajes legibles según la acción global
+        // Generate human-readable messages based on the global action
         match action_taken {
             Action::Block => {
                 let flags: Vec<&str> = by_flag.keys().map(String::as_str).collect();
                 messages.push(format!(
-                    "🔒 Cerberus bloqueó el request: {} detectado(s)",
+                    "🔒 Cerberus blocked the request: {} detected",
                     flags.join(", ")
                 ));
             }
             Action::Redact => {
                 let count = total;
-                messages.push(format!("✂️ Cerberus redactó {count} secreto(s) en este mensaje"));
+                messages.push(format!("✂️ Cerberus redacted {count} secret(s) in this message"));
             }
             Action::Warn => {
-                messages.push("⚠️ Cerberus advierte: se detectaron datos sensibles".to_string());
+                messages.push("⚠️ Cerberus warns: sensitive data detected".to_string());
             }
             Action::Allow => {
-                // No se necesita feedback para allow
+                // No feedback needed for allow
             }
         }
 
@@ -81,29 +81,29 @@ impl RedactFeedback {
         }
     }
 
-    /// ¿Hubo alguna intervención (block/redact/warn)?
+    /// Was there any intervention (block/redact/warn)?
     #[must_use]
     pub const fn has_intervention(&self) -> bool {
         self.total > 0
     }
 
-    /// Devuelve un resumen de una línea para CLI/logs.
+    /// Returns a one-line summary for CLI/logs.
     #[must_use]
     pub fn summary_line(&self) -> String {
         if self.total == 0 {
-            return "✓ Cerberus: sin datos sensibles detectados".to_string();
+            return "✓ Cerberus: no sensitive data detected".to_string();
         }
         let action_counts: Vec<String> = self.by_action.iter().map(|(a, c)| format!("{a}: {c}")).collect();
-        format!("Cerberus: {} hallazgo(s) [{}]", self.total, action_counts.join(", "))
+        format!("Cerberus: {} finding(s) [{}]", self.total, action_counts.join(", "))
     }
 }
 
-/// Opciones de configuración para el hook de feedback.
+/// Configuration options for the feedback hook.
 #[derive(Debug, Clone)]
 pub struct FeedbackOptions {
-    /// Si se genera feedback (puede desactivarse para tests/silencio).
+    /// Whether feedback is generated (can be disabled for tests/silence).
     pub enabled: bool,
-    /// Inyectar mensaje de feedback en el body de respuesta del LLM.
+    /// Inject the feedback message into the LLM response body.
     pub inject_response: bool,
 }
 
@@ -187,7 +187,7 @@ mod tests {
         )];
         let feedback = RedactFeedback::from_findings(&findings, Action::Block);
         assert!(!feedback.messages.is_empty());
-        assert!(feedback.messages[0].contains("bloqueó"));
+        assert!(feedback.messages[0].contains("blocked"));
     }
 
     #[test]
@@ -198,7 +198,7 @@ mod tests {
         ];
         let feedback = RedactFeedback::from_findings(&findings, Action::Redact);
         assert!(!feedback.messages.is_empty());
-        assert!(feedback.messages[0].contains("redactó"));
+        assert!(feedback.messages[0].contains("redacted"));
     }
 
     #[test]
@@ -206,7 +206,7 @@ mod tests {
         let findings = vec![make_finding("pii.email", Action::Warn, Category::Pii, Severity::Medium)];
         let feedback = RedactFeedback::from_findings(&findings, Action::Warn);
         assert!(!feedback.messages.is_empty());
-        assert!(feedback.messages[0].contains("advierte"));
+        assert!(feedback.messages[0].contains("warns"));
     }
 
     #[test]
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn feedback_summary_line_clean() {
         let feedback = RedactFeedback::from_findings(&[], Action::Allow);
-        assert!(feedback.summary_line().contains("sin datos sensibles"));
+        assert!(feedback.summary_line().contains("no sensitive data"));
     }
 
     #[test]
@@ -229,7 +229,7 @@ mod tests {
         ];
         let feedback = RedactFeedback::from_findings(&findings, Action::Block);
         let line = feedback.summary_line();
-        assert!(line.contains("hallazgo"));
+        assert!(line.contains("finding"));
         assert!(line.contains("block") || line.contains("redact"));
     }
 

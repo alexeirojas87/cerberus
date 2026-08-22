@@ -6,8 +6,8 @@ set -euo pipefail
 #
 # Implements §6.2 of CERBERUS_REVIEW_FINDINGS.md.
 #
-# Gate: el smoke test DEBE FALLAR en los puntos 3, 4 y 5
-# (documenta el estado roto antes de R1+R2 fixes).
+# Gate: the smoke test MUST FAIL on points 3, 4 and 5
+# (documents the broken state before R1+R2 fixes).
 #
 # Usage: ./tests/smoke-test.sh [--build] [--port PORT]
 #   --build    Build release binary before running (default: false)
@@ -209,8 +209,8 @@ else
     exit 1
 fi
 
-# ── TEST POINT 3: .env en MAYÚSCULAS (P0-1) ────────────────────────────
-log_section "STEP 5: TEST POINT 3 — .env en MAYÚSCULAS (P0-1)"
+# ── TEST POINT 3: .env in UPPERCASE (P0-1) ─────────────────────────────
+log_section "STEP 5: TEST POINT 3 — .env in UPPERCASE (P0-1)"
 
 SECRET_PAYLOAD='{"messages":[{"role":"user","content":"OPENAI_API_KEY=sk-abc123def456ghi789jkl012mno345"}]}'
 
@@ -227,10 +227,10 @@ else
     fail_check "P0-1: SECRET NOT DETECTED — 'OPENAI_API_KEY' in uppercase not caught"
 fi
 
-# ── TEST POINT 4: Pass-through limpio (P0-4, P0-5) ─────────────────────
-log_section "STEP 6: TEST POINT 4 — Pass-through limpio (P0-4, P0-5)"
+# ── TEST POINT 4: Clean pass-through (P0-4, P0-5) ─────────────────────
+log_section "STEP 6: TEST POINT 4 — Clean pass-through (P0-4, P0-5)"
 
-CLEAN_PAYLOAD='{"messages":[{"role":"user","content":"hola"}]}'
+CLEAN_PAYLOAD='{"messages":[{"role":"user","content":"hello"}]}'
 
 # Try to forward to the mock upstream
 HTTP_CODE=""
@@ -273,8 +273,8 @@ else
     fi
 fi
 
-# ── TEST POINT 5: Events persistidos con provider (P0-6) ────────────────
-log_section "STEP 7: TEST POINT 5 — Events persistidos con provider (P0-6)"
+# ── TEST POINT 5: Events persisted with provider (P0-6) ────────────────
+log_section "STEP 7: TEST POINT 5 — Events persisted with provider (P0-6)"
 
 EVENTS=$(curl -s -m 3 "http://127.0.0.1:${PORT}/api/events" 2>/dev/null || echo "[]")
 echo "  /api/events: $EVENTS" | tee -a "$TEST_LOG"
@@ -302,8 +302,8 @@ else
     fail_check "SQLite database file NOT created at ~/.cerberus/cerberus.db"
 fi
 
-# ── TEST POINT 6: Fuga cero ───────────────────────────────────────────
-log_section "STEP 8: TEST POINT 6 — Fuga cero (no raw secrets in logs/DB)"
+# ── TEST POINT 6: Zero leak ───────────────────────────────────────────
+log_section "STEP 8: TEST POINT 6 — Zero leak (no raw secrets in logs/DB)"
 
 RAW_SECRET="sk-abc123def456ghi789jkl012mno345"
 
@@ -321,7 +321,7 @@ else
 fi
 
 # ── Summary ─────────────────────────────────────────────────────────────
-log_section "RESULTADO DEL SMOKE TEST"
+log_section "SMOKE TEST RESULT"
 
 echo "  Pass: $PASS_COUNT" | tee -a "$TEST_LOG"
 echo "  Fail: $FAIL_COUNT" | tee -a "$TEST_LOG"
@@ -329,11 +329,11 @@ echo "  Log file: $TEST_LOG" | tee -a "$TEST_LOG"
 echo "" | tee -a "$TEST_LOG"
 
 if [ "$FAIL_COUNT" -eq 0 ]; then
-    echo "  ✅ TODO: Smoke test PASSED" | tee -a "$TEST_LOG"
+    echo "  ✅ ALL: Smoke test PASSED" | tee -a "$TEST_LOG"
     echo "═══════════════════════════════════════════════════════════════════" | tee -a "$TEST_LOG"
     EXIT_CODE=0
 else
-    echo "  ❌ FALLO: Smoke test tiene $FAIL_COUNT pruebas fallidas" | tee -a "$TEST_LOG"
+    echo "  ❌ FAIL: Smoke test has $FAIL_COUNT failed checks" | tee -a "$TEST_LOG"
     echo "═══════════════════════════════════════════════════════════════════" | tee -a "$TEST_LOG"
     EXIT_CODE=1
 fi

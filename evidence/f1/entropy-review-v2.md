@@ -1,45 +1,45 @@
-# Evidence Pack — Fase 1 · Unidad entropy-detector (v2)
+# Evidence Pack — Phase 1 · Unit entropy-detector (v2)
 
-**Fecha**: 2026-08-17  
+**Date**: 2026-08-17  
 **Worktree**: `cerberus-wt-f1-review-entropy-v2`  
-**Revisor**: REVISOR (v2)
+**Reviewer**: REVIEWER (v2)
 
 ---
 
-## Veredicto: PASS ✅
+## Verdict: PASS ✅
 
 ---
 
-## Criterios
+## Criteria
 
-| # | Criterio | Estado | Evidencia |
+| # | Criterion | Status | Evidence |
 |---|----------|--------|-----------|
-| 1 | `cargo build --workspace` sin errores | ✅ | `Finished dev profile` (0 errores, 0 warnings) |
-| 2 | `cargo test -p cerberus-engine` — 126 tests | ✅ | 115 unit + 11 integración + 0 doc-tests = **126 total** — 0 failed |
-| 3 | `cargo clippy -p cerberus-engine --all-targets -- -D warnings` | ✅ | 0 warnings, 0 errores |
-| 4 | `cargo fmt --check` | ✅ | Sin diferencias |
-| 5a | `validator.rs` usa `pub use crate::entropy::shannon_entropy;` | ✅ | Línea 185: re-export, no implementación duplicada |
-| 5b | `entropy.rs` tiene implementación char-level con HashMap | ✅ | `entropy.rs:47-64` — iteración sobre `text.chars()`, `HashMap<char, usize>`, `mul_add` |
-| 6 | Consistencia: `entropy::shannon_entropy` == `validator::shannon_entropy` | ✅ | Test `entropy_consistent` pasa: diff < 1e-12 para todos los casos. **Function pointer idéntico**: ambas rutas apuntan a la misma dirección |
-| 7 | UTF-8 multi-byte: "🔥🔥🔥🔥" → H ≈ 0.0 | ✅ | Entropía = 0.000000 (todos chars iguales). "🔥🌟⭐✨" → 2.0 (4 chars distintos) |
-| 8 | `detect_near_keywords` llama a la función unificada | ✅ | `entropy.rs:88` — `let ent = shannon_entropy(value);` |
+| 1 | `cargo build --workspace` without errors | ✅ | `Finished dev profile` (0 errors, 0 warnings) |
+| 2 | `cargo test -p cerberus-engine` — 126 tests | ✅ | 115 unit + 11 integration + 0 doc-tests = **126 total** — 0 failed |
+| 3 | `cargo clippy -p cerberus-engine --all-targets -- -D warnings` | ✅ | 0 warnings, 0 errors |
+| 4 | `cargo fmt --check` | ✅ | No differences |
+| 5a | `validator.rs` uses `pub use crate::entropy::shannon_entropy;` | ✅ | Line 185: re-export, no duplicated implementation |
+| 5b | `entropy.rs` has char-level implementation with HashMap | ✅ | `entropy.rs:47-64` — iteration over `text.chars()`, `HashMap<char, usize>`, `mul_add` |
+| 6 | Consistency: `entropy::shannon_entropy` == `validator::shannon_entropy` | ✅ | Test `entropy_consistent` passes: diff < 1e-12 for all cases. **Identical function pointer**: both routes point to the same address |
+| 7 | UTF-8 multi-byte: "🔥🔥🔥🔥" → H ≈ 0.0 | ✅ | Entropy = 0.000000 (all chars equal). "🔥🌟⭐✨" → 2.0 (4 distinct chars) |
+| 8 | `detect_near_keywords` calls the unified function | ✅ | `entropy.rs:88` — `let ent = shannon_entropy(value);` |
 
 ---
 
-## Confirmación de corrección del bug de duplicación
+## Confirmation of the duplication bug fix
 
-**Sí, el bug está completamente corregido.**
+**Yes, the bug is completely fixed.**
 
-- Antes: existían dos implementaciones separadas de `shannon_entropy` — una en `entropy.rs` y otra en `validator.rs` (duplicación, riesgo de divergencia).
-- Ahora: `validator.rs:185` hace `pub use crate::entropy::shannon_entropy;`. La función vive exclusivamente en `entropy.rs` como implementación char-level con `HashMap<char, usize>`.
-- La prueba de consistencia confirma que ambas rutas (`entropy::shannon_entropy` y `validator::shannon_entropy`) resuelven al mismo puntero de función y producen resultados idénticos.
-- La implementación char-level maneja correctamente caracteres multi-byte UTF-8 (emoji, Unicode), a diferencia de una implementación byte-level que los fragmentaría.
+- Before: there were two separate implementations of `shannon_entropy` — one in `entropy.rs` and another in `validator.rs` (duplication, divergence risk).
+- Now: `validator.rs:185` does `pub use crate::entropy::shannon_entropy;`. The function lives exclusively in `entropy.rs` as a char-level implementation with `HashMap<char, usize>`.
+- The consistency test confirms that both routes (`entropy::shannon_entropy` and `validator::shannon_entropy`) resolve to the same function pointer and produce identical results.
+- The char-level implementation correctly handles multi-byte UTF-8 characters (emoji, Unicode), unlike a byte-level implementation that would fragment them.
 
 ---
 
-## Resumen técnico
+## Technical summary
 
-- **Archivo fuente único**: `entropy.rs` contiene `shannon_entropy`, `detect_near_keywords`, y `extract_value`.
-- **Re-export**: `validator.rs` re-exporta `shannon_entropy` sin duplicar lógica.
-- **Tests**: 17 tests internos en entropy.rs + 126 tests globales del crate pasan sin fallos.
-- **UTF-8**: La implementación itera sobre `char` (no `u8`), garantizando entropía correcta para texto Unicode.
+- **Single source file**: `entropy.rs` contains `shannon_entropy`, `detect_near_keywords`, and `extract_value`.
+- **Re-export**: `validator.rs` re-exports `shannon_entropy` without duplicating logic.
+- **Tests**: 17 internal tests in entropy.rs + 126 global crate tests pass without failures.
+- **UTF-8**: The implementation iterates over `char` (not `u8`), guaranteeing correct entropy for Unicode text.

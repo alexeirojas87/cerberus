@@ -1,24 +1,24 @@
-//! Provider-agnostic body decoder (§4.2 del build plan).
+//! Provider-agnostic body decoder (§4.2 of the build plan).
 //!
-//! Decodifica el body del request (JSON/text) y extrae todo
-//! el contenido textual para escanear. Es agnóstico por construcción:
-//! funciona con cualquier proveedor LLM.
+//! Decodes the request body (JSON/text) and extracts all the textual
+//! content for scanning. It is agnostic by construction: it works with any
+//! LLM provider.
 
 use bytes::Bytes;
 
-/// Resultado de decodificar un body.
+/// Result of decoding a body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedBody {
-    /// Todo el contenido textual extraído para escaneo.
+    /// All the textual content extracted for scanning.
     pub text: String,
-    /// Tipo de contenido detectado.
+    /// Detected content type.
     pub content_type: ContentType,
 }
 
-/// Tipo de contenido del body.
+/// Body content type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentType {
-    /// JSON body (más común en APIs LLM).
+    /// JSON body (most common in LLM APIs).
     Json,
     /// Plain text.
     Text,
@@ -33,13 +33,13 @@ impl std::fmt::Display for ContentType {
     }
 }
 
-/// Decodificar un body en `DecodedBody`.
+/// Decode a body into a `DecodedBody`.
 ///
-/// Estrategia (§4.2):
-/// 1. Si es JSON, serializar todo el JSON a string (esto extrae todos los
-///    campos de texto, independientemente del esquema del proveedor).
-/// 2. Si no es JSON, tratarlo como texto plano.
-/// 3. El texto extraído se pasa al motor de detección.
+/// Strategy (§4.2):
+/// 1. If it is JSON, serialize the whole JSON to a string (this extracts all
+///    the text fields, regardless of the provider's schema).
+/// 2. If it is not JSON, treat it as plain text.
+/// 3. The extracted text is passed to the detection engine.
 #[must_use]
 pub fn decode(body: &Bytes, _content_type_hint: Option<&str>) -> DecodedBody {
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
@@ -57,7 +57,7 @@ pub fn decode(body: &Bytes, _content_type_hint: Option<&str>) -> DecodedBody {
     }
 }
 
-/// Extraer todo el texto de un JSON Value de forma recursiva.
+/// Recursively extract all the text from a JSON Value.
 fn json_to_string(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),

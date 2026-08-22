@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# macos-notarize.sh — firma (codesign) y notarización macOS del binario `cerberus`.
+# macos-notarize.sh — codesign and macOS notarization of the `cerberus` binary.
 #
-#   Uso:
-#     tools/release/macos-notarize.sh <ruta-al-artefacto>   # cerberus-*.tar.gz o binario desnudo
+#   Usage:
+#     tools/release/macos-notarize.sh <path-to-artifact>   # cerberus-*.tar.gz or bare binary
 #
-#   Con credenciales (en CI, inyectadas como secrets) ejecuta la FIRMA REAL:
-#     APPLE_IDENTITY="Developer ID Application: Your Name"   # nombre del certificado instalado
+#   With credentials (in CI, injected as secrets) it runs the REAL signing:
+#     APPLE_IDENTITY="Developer ID Application: Your Name"   # name of the installed certificate
 #     APPLE_ID="dev@cerberus.dev"
 #     APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx"
 #     APPLE_TEAM_ID="TT12345678"
-#   Sin credenciales entra en DRY-RUN: imprime la secuencia exacta que ejecutaría
-#   CI y sale 0 (no falla). Es el modo por defecto en local.
+#   Without credentials it enters DRY-RUN: prints the exact sequence that CI
+#   would run and exits 0 (does not fail). This is the default mode locally.
 #
-#   Para un artefacto cerberus-*.tar.gz: extrae, firma el binario del interior,
-#   re-empaqueta con el MISMO nombre (raíz plana) y regenera su entrada en
+#   For a cerberus-*.tar.gz artifact: extracts it, signs the binary inside,
+#   re-packages it with the SAME name (flat root) and regenerates its entry in
 #   SHA256SUMS.
 
 set -euo pipefail
@@ -22,8 +22,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 ART="${1:-}"
-[ -n "$ART" ] || { echo "uso: $0 <artefacto.tar.gz|binario>" >&2; exit 1; }
-[ -f "$ART" ] || { echo "error: no existe $ART" >&2; exit 1; }
+[ -n "$ART" ] || { echo "usage: $0 <artifact.tar.gz|binary>" >&2; exit 1; }
+[ -f "$ART" ] || { echo "error: $ART does not exist" >&2; exit 1; }
 
 IDENTITY="${APPLE_IDENTITY:-Developer ID Application: Your Name}"
 
@@ -36,7 +36,7 @@ sha_cmd() {
   if command -v sha256sum >/dev/null 2>&1; then printf '%s\n' "sha256sum"; else printf '%s\n' "shasum -a 256"; fi
 }
 
-# Regenera la línea del artefacto en su SHA256SUMS (override del checksum anterior).
+# Regenerates the artifact's line in its SHA256SUMS (overrides the previous checksum).
 regen_sha256() {
   local art shop sums_dir file
   art="$1"
@@ -44,12 +44,12 @@ regen_sha256() {
   file="$(basename "$art")"
   sums="$sums_dir/SHA256SUMS"
   (cd "$sums_dir" && "$(sha_cmd)" "$file" > "$sums")
-  echo "==> SHA256SUMS regenerado ($file)"
+  echo "==> SHA256SUMS regenerated ($file)"
 }
 
 dry_run_print() {
-  echo "[DRY-RUN] Sin APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID;"
-  echo "          CI importará estas credenciales y ejecutará literalmente:"
+  echo "[DRY-RUN] No APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID;"
+  echo "          CI will import these credentials and run literally:"
   echo
   echo "  codesign --force --options runtime --timestamp --sign \"$IDENTITY\" <cerberus>"
   echo "  ditto -c -k --keepParent <cerberus> cerberus-notarize.zip"
@@ -60,7 +60,7 @@ dry_run_print() {
   echo "  codesign --verify --deep --strict --verbose=2 <cerberus>"
   echo "  spctl --assess --type execute --verbose=4 <cerberus>"
   echo
-  echo "[dry-run] OK — no se modificó ninguna credencial ni ningún artefacto."
+  echo "[dry-run] OK — no credentials and no artifacts were modified."
 }
 
 notarize() {
@@ -84,7 +84,7 @@ notarize() {
   echo "==> stapler staple"
   xcrun stapler staple "$out_art" 2>/dev/null || true
 
-  echo "==> verificación"
+  echo "==> verification"
   codesign --verify --deep --strict --verbose=2 "$bin_path"
   spctl --assess --type execute --verbose=4 "$bin_path"
 }
@@ -99,7 +99,7 @@ main() {
       mkdir -p "$tmp/src"
       tar xzf "$ART" -C "$tmp/src"
       bin_path="$tmp/src/cerberus"
-      [ -f "$bin_path" ] || { echo "error: el tar no contiene 'cerberus' en la raiza" >&2; exit 1; }
+      [ -f "$bin_path" ] || { echo "error: the tar does not contain 'cerberus' at its root" >&2; exit 1; }
       out_art="$ART"
       ;;
     *)
@@ -116,12 +116,12 @@ main() {
   notarize "$bin_path" "$out_art"
 
   if [ "$out_art" = "$ART" ]; then
-    # Re-empaqueta el tar con el binario firmaa (misma raiz plana) y refresca sumas.
+    # Re-packages the tar with the signed binary (same flat root) and refreshes the sums.
     tar -czf "$REPO_ROOT/$ART" -C "$tmp/src" "cerberus"
     regen_sha256 "$REPO_ROOT/$ART"
   fi
 
-  echo "✔  Firmado + notarizado: $out_art"
+  echo "✔  Signed + notarized: $out_art"
 }
 
 main "$@"

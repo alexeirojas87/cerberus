@@ -195,7 +195,7 @@ impl CompiledEngine {
 
     /// Scan the given text and return all findings.
     ///
-    /// Corregido (review P0-4):
+    /// Fixed (review P0-4):
     /// - AC is only a *presence* prefilter: every regex under a present prefix
     ///   is evaluated on the **full text** with `find_iter`, so overlapping
     ///   prefixes (`sk-` vs `sk-ant-`) no longer shadow each other.
@@ -207,12 +207,12 @@ impl CompiledEngine {
         self.scan_with_context(text, text)
     }
 
-    /// Escanear `text` evaluando las constraints de contexto (contextKeywords,
-    /// allowed examples) contra `context`.
+    /// Scan `text` evaluating the context constraints (contextKeywords,
+    /// allowed examples) against `context`.
     ///
-    /// Fija la regresión de la revisión 2 (P0): al redactar JSON leaf a leaf,
-    /// los keywords de contexto viven en otros campos. Este método permite
-    /// escanear el valor de un leaf usando el body completo como contexto.
+    /// Fixes review 2 regression (P0): when redacting JSON leaf by leaf,
+    /// context keywords live in other fields. This method allows scanning
+    /// a leaf's value using the full body as context.
     #[must_use]
     pub fn scan_with_context(&self, text: &str, context: &str) -> ScanOutput {
         let mut findings: Vec<Finding> = Vec::new();
@@ -281,8 +281,8 @@ impl CompiledEngine {
         }
 
         // Generic entropy-based detection (virtual rule, always active). For
-        // leaf scans (context != text) el vecino de keywords lo busca en el
-        // propio valor, que es lo correcto para warn/redact por leaf.
+        // leaf scans (context != text) the neighboring keyword lookup searches
+        // the value itself, which is correct for per-leaf warn/redact.
         for f in crate::entropy::detect_near_keywords(text, self.entropy_threshold, self.payload_secret.as_deref()) {
             if seen.insert((f.flag.clone(), f.start, f.end)) {
                 findings.push(f);
@@ -830,7 +830,7 @@ mod tests {
             Action::Warn,
         )];
         let engine = EngineBuilder::new(&rules).build().unwrap();
-        let result = engine.scan("escribe a juan@example.com o a maria@example.com");
+        let result = engine.scan("write to juan@example.com or to maria@example.com");
         let emails = result.findings.iter().filter(|f| f.flag == "pii.email").count();
         assert_eq!(emails, 2, "both email occurrences must be reported");
     }
@@ -853,7 +853,7 @@ mod tests {
     fn no_findings_yields_allow() {
         let rules = vec![make_rule("r", &["never-matches"], Action::Block)];
         let engine = EngineBuilder::new(&rules).build().unwrap();
-        assert_eq!(engine.scan("hola mundo sin secretos").action_overall, Action::Allow);
+        assert_eq!(engine.scan("hello world without secrets").action_overall, Action::Allow);
     }
 
     #[test]

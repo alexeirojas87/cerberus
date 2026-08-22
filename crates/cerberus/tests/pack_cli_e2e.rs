@@ -1,15 +1,15 @@
-//! Integration test: `cerberus pack` (F7) extremo a extremo contra el binario.
+//! Integration test: `cerberus pack` (F7) end-to-end against the binary.
 //!
-//! Valida el flujo completo SIN tocar `proxy.rs`:
-//!   1. Se genera una licencia Pro firmada y un rule pack firmado.
-//!   2. `cerberus pack install` fusiona las reglas del pack en el engine
-//!      (salida "reglas del engine N → M") — gate de licencia Pro.
-//!   3. A nivel librería, el engine del `PackManager` detecta el marcador del
-//!      pack (el pack queda conectado al engine que el proxy usa en el arranque
-//!      cuando el pack está en `~/.cerberus/packs` antes de `start`).
-//!   4. `cerberus pack list` muestra el pack con firma válida.
-//!   5. `cerberus pack rollback` revierte al engine anterior.
-//!   6. Sin licencia Pro, `pack install` falla con mensaje de gating.
+//! Validates the full flow WITHOUT touching `proxy.rs`:
+//!   1. A signed Pro license and a signed rule pack are generated.
+//!   2. `cerberus pack install` merges the pack's rules into the engine
+//!      (output "engine rules N → M") — Pro license gate.
+//!   3. At the library level, the `PackManager` engine detects the pack's
+//!      marker (the pack stays connected to the engine the proxy uses at boot
+//!      when the pack is in `~/.cerberus/packs` before `start`).
+//!   4. `cerberus pack list` shows the pack with a valid signature.
+//!   5. `cerberus pack rollback` reverts to the previous engine.
+//!   6. Without a Pro license, `pack install` fails with a gating message.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -32,7 +32,7 @@ fn temp_dir(prefix: &str) -> PathBuf {
     d.canonicalize().unwrap_or(d)
 }
 
-/// Escribe una licencia Pro firmada en `dir/license.json`; devuelve la root.
+/// Writes a signed Pro license to `dir/license.json`; returns the root.
 fn write_pro_license(dir: &std::path::Path) -> String {
     let license = cerberus_packs::license::License {
         tier: cerberus_packs::license::LicenseTier::Pro,
@@ -55,7 +55,7 @@ fn write_pro_license(dir: &std::path::Path) -> String {
     hex::encode(keypair.verifying_key().as_bytes())
 }
 
-/// Escribe un rule pack firmado con un marcador único; devuelve el root.
+/// Writes a signed rule pack with a unique marker; returns the root.
 fn write_signed_pack(path: &std::path::Path, marker: &str) -> String {
     let rule = cerberus_engine::rule::Rule {
         flag: "pack.e2e.marker".to_string(),
@@ -74,7 +74,7 @@ fn write_signed_pack(path: &std::path::Path, marker: &str) -> String {
         metadata: cerberus_packs::pack::PackMetadata {
             name: "e2e-pack".to_string(),
             version: "1.0.0".to_string(),
-            description: "Pack de prueba E2E F7".to_string(),
+            description: "E2E F7 test pack".to_string(),
             author: "Cerberus".to_string(),
             published: "2026-08-20T00:00:00Z".to_string(),
             min_engine_version: "0.1.0".to_string(),
@@ -102,7 +102,7 @@ fn pack_cli_install_list_rollback_e2e() {
     let pack_file = dir.join("pack.json");
     let pack_root = write_signed_pack(&pack_file, &marker);
 
-    // 2) install: exit 0, el engine crece (N → N+1).
+    // 2) install: exit 0, the engine grows (N → N+1).
     let out = Command::new(binary())
         .arg("pack")
         .arg("install")
@@ -120,11 +120,11 @@ fn pack_cli_install_list_rollback_e2e() {
         Some(0),
         "pack install exit 0 — stderr: {stderr}\nstdout: {stdout}"
     );
-    assert!(stdout.contains("instalado"), "stdout: {stdout}");
-    assert!(stdout.contains("reglas del engine"), "stdout: {stdout}");
+    assert!(stdout.contains("installed"), "stdout: {stdout}");
+    assert!(stdout.contains("engine rules"), "stdout: {stdout}");
 
-    // 3) El pack QUEDA conectado al engine: el motor instalado detecta el
-    //    marcador (la misma instalación que el daemon hace en el arranque).
+    // 3) The pack STAYS connected to the engine: the installed engine detects
+    //    the marker (the same install the daemon does at boot).
     let found = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(async {
@@ -134,13 +134,13 @@ fn pack_cli_install_list_rollback_e2e() {
             mgr.install_with_root(signed, &pack_root).await?;
             let engine = mgr.engine();
             let guard = engine.lock().await;
-            let findings = guard.scan(&format!("payload {marker} llegó al upstream"));
+            let findings = guard.scan(&format!("payload {marker} reached the upstream"));
             Ok::<bool, String>(!findings.findings.is_empty())
         })
         .expect("pack engine proof");
-    assert!(found, "el engine instalado debe detectar el marcador del pack E2E");
+    assert!(found, "the installed engine must detect the E2E pack marker");
 
-    // 4) list: el pack figura con firma válida frente al trust root.
+    // 4) list: the pack appears with a valid signature against the trust root.
     let out = Command::new(binary())
         .arg("pack")
         .arg("list")
@@ -152,12 +152,12 @@ fn pack_cli_install_list_rollback_e2e() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
     assert!(
-        stdout.contains("e2e-pack") && stdout.contains("firma válida"),
-        "pack list debe mostrar el pack verificado:\n{stdout}"
+        stdout.contains("e2e-pack") && stdout.contains("valid signature"),
+        "pack list must show the verified pack:\n{stdout}"
     );
 
-    // 5) rollback: revierte al engine anterior. (Hallazgo v6: rollback es
-    //    Pro-gated en modo local; este e2e corre con licencia Pro del paso 2.)
+    // 5) rollback: reverts to the previous engine. (Finding v6: rollback is
+    //    Pro-gated in local mode; this e2e runs with a Pro license from step 2.)
     let out = Command::new(binary())
         .arg("pack")
         .arg("rollback")
@@ -182,7 +182,7 @@ fn pack_install_requires_pro_license() {
     let pack_file = dir.join("pack.json");
     let pack_root = write_signed_pack(&pack_file, marker);
 
-    // Sin licencia entrenada ni trust root de licencia: default → tier Free.
+    // Without a trained license nor license trust root: default → Free tier.
     let out = Command::new(binary())
         .arg("pack")
         .arg("install")
@@ -198,18 +198,18 @@ fn pack_install_requires_pro_license() {
     assert_ne!(
         out.status.code(),
         Some(0),
-        "el CLI debe bloquear pack install sin Pro — stdout: {stdout}"
+        "the CLI must block pack install without Pro — stdout: {stdout}"
     );
     assert!(
-        stderr.contains("Pro") || stderr.contains("open-core") || stderr.contains("licencia"),
-        "mensaje de gating esperado — stderr: {stderr}"
+        stderr.contains("Pro") || stderr.contains("open-core") || stderr.contains("license"),
+        "expected gating message — stderr: {stderr}"
     );
 
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Hallazgo v6: `pack rollback` en modo local (sin daemon) también debe estar
-/// gated por licencia Pro — bajo Free debe fallar antes de rehidratar packs.
+/// Finding v6: `pack rollback` in local mode (without daemon) must also be
+/// gated by a Pro license — under Free it must fail before rehydrating packs.
 #[test]
 #[allow(clippy::significant_drop_tightening)]
 fn pack_rollback_requires_pro_license() {
@@ -218,7 +218,7 @@ fn pack_rollback_requires_pro_license() {
     let pack_file = dir.join("pack.json");
     let pack_root = write_signed_pack(&pack_file, marker);
 
-    // Primero instalar con una licencia Pro para dejar manifest/historial.
+    // First install with a Pro license to leave manifest/history.
     let license_root = write_pro_license(&dir);
     let install = Command::new(binary())
         .arg("pack")
@@ -230,9 +230,9 @@ fn pack_rollback_requires_pro_license() {
         .env("CERBERUS_PACK_TRUST_ROOT", &pack_root)
         .output()
         .expect("install with pro");
-    assert_eq!(install.status.code(), Some(0), "install con Pro debe pasar");
+    assert_eq!(install.status.code(), Some(0), "install with Pro must pass");
 
-    // Ahora rollback SIN Pro (quitar licencia) → debe fallar con gating.
+    // Now rollback WITHOUT Pro (remove license) → must fail with gating.
     let out = Command::new(binary())
         .arg("pack")
         .arg("rollback")
@@ -247,11 +247,11 @@ fn pack_rollback_requires_pro_license() {
     assert_ne!(
         out.status.code(),
         Some(0),
-        "el CLI debe bloquear pack rollback sin Pro — stdout: {stdout}"
+        "the CLI must block pack rollback without Pro — stdout: {stdout}"
     );
     assert!(
-        stderr.contains("Pro") || stderr.contains("open-core") || stderr.contains("licencia"),
-        "mensaje de gating esperado — stderr: {stderr}"
+        stderr.contains("Pro") || stderr.contains("open-core") || stderr.contains("license"),
+        "expected gating message — stderr: {stderr}"
     );
 
     std::fs::remove_dir_all(&dir).ok();

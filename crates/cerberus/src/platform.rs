@@ -1,20 +1,20 @@
-//! Soporte multiplataforma (macOS, Linux, Windows).
+//! Cross-platform support (macOS, Linux, Windows).
 //!
-//! Paths, detección y gestión de procesos específicos por plataforma para el
-//! daemon local. Fuente de verdad única de rutas y de lifecycle de procesos:
-//! el daemon delega aquí `config_dir()`, `process_alive()` y la detención
-//! cooperativa (`stop_process_graceful()`).
+//! Platform-specific paths, process detection, and management for the local
+//! daemon. Single source of truth for paths and process lifecycle:
+//! the daemon delegates `config_dir()`, `process_alive()`, and cooperative
+//! stop (`stop_process_graceful()`) here.
 //!
-//! `config_dir()` mantiene la convención ya existente del daemon en
-//! macOS/Linux (`~/.cerberus`) —varios tests y tools dependen de esa ruta
-//! bajo `HOME`— y usa `%APPDATA%\Cerberus` en Windows.
+//! `config_dir()` keeps the existing daemon convention on
+//! macOS/Linux (`~/.cerberus`) —several tests and tools depend on that path
+//! under `HOME`— and uses `%APPDATA%\Cerberus` on Windows.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
 
-/// Obtener el directorio de configuración del usuario según la plataforma.
+/// Get the user's configuration directory by platform.
 #[must_use]
 pub(crate) fn config_dir() -> PathBuf {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -35,13 +35,13 @@ pub(crate) fn config_dir() -> PathBuf {
     }
 }
 
-/// Obtener el directorio de logs según la plataforma.
+/// Get the log directory by platform.
 #[must_use]
 pub(crate) fn log_dir() -> PathBuf {
     config_dir().join("logs")
 }
 
-/// Nombre del binario del daemon según la plataforma.
+/// Daemon binary name by platform.
 #[must_use]
 pub(crate) const fn daemon_binary_name() -> &'static str {
     #[cfg(windows)]
@@ -54,11 +54,12 @@ pub(crate) const fn daemon_binary_name() -> &'static str {
     }
 }
 
-/// ¿El proceso con `pid` sigue vivo?
+/// Is the process with `pid` still alive?
 ///
-/// unix: `kill -0` (existe el proceso). Windows: `tasklist /FI "PID eq N"` y
-/// se verifica que la salida contenga un token de PID como tal (la línea
-/// "INFO: No tasks..." de stdout no debe confundirse con un proceso vivo).
+/// unix: `kill -0` (process exists). Windows: `tasklist /FI "PID eq N"` and
+/// verifying that the output contains a PID token as such (the
+/// "INFO: No tasks..." line from stdout must not be confused with a live
+/// process).
 #[must_use]
 pub(crate) fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
@@ -91,20 +92,21 @@ pub(crate) fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// Detener un proceso de forma cooperativa y esperar a que salga.
+/// Cooperatively stop a process and wait for it to exit.
 ///
-/// Centraliza el shutdown loop de `cerberus stop` por plataforma:
-/// - unix: SIGTERM (`kill -TERM`) → espera ≤5 s → SIGKILL si sigue vivo.
-/// - windows: `taskkill /PID <pid>` **sin** `/F` (cierre cooperativo, el daemon
-///   hace flush del store) → espera ≤ 5 s → `taskkill /PID <pid> /F` si sigue.
+/// Centralizes the `cerberus stop` shutdown loop per platform:
+/// - unix: SIGTERM (`kill -TERM`) → wait ≤5 s → SIGKILL if still alive.
+/// - windows: `taskkill /PID <pid>` **without** `/F` (cooperative close, the
+///   daemon flushes the store) → wait ≤ 5 s → `taskkill /PID <pid> /F` if
+///   still alive.
 ///
 /// # Errors
 ///
-/// Devuelve error si no se puede enviar la señal de parada ni forzar la salida.
+/// Returns an error if the stop signal cannot be sent nor the exit forced.
 pub(crate) fn stop_process_graceful(pid: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
-        // SIGTERM → graceful shutdown (flush de auditoría) en el daemon.
+        // SIGTERM → graceful shutdown (audit flush) in the daemon.
         let result = StdCommand::new("kill").args(["-TERM", &pid.to_string()]).output();
         if let Err(e) = result {
             return Err(format!("cannot send SIGTERM: {e}"));
@@ -113,7 +115,7 @@ pub(crate) fn stop_process_graceful(pid: u32) -> Result<(), String> {
         wait_for_process_exit(pid);
 
         if process_alive(pid) {
-            // Fallback: SIGKILL (kill por defecto).
+            // Fallback: SIGKILL (default kill).
             let kill = StdCommand::new("kill").arg(pid.to_string()).output();
             if matches!(kill, Ok(o) if !o.status.success()) {
                 return Err(format!("cannot force-kill daemon (PID {pid})"));
@@ -123,8 +125,9 @@ pub(crate) fn stop_process_graceful(pid: u32) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        // Graceful primero: taskkill SIN /F pide cierre cooperativo (el daemon
-        // hace flush del store). Solo si sigue vivo tras la espera se fuerza /F.
+        // Graceful first: taskkill WITHOUT /F asks for cooperative close (the
+        // daemon flushes the store). Only if still alive after the wait is /F
+        // forced.
         let graceful = StdCommand::new("taskkill").args(["/PID", &pid.to_string()]).output();
         let _ = graceful;
 
@@ -149,8 +152,8 @@ pub(crate) fn stop_process_graceful(pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Esperar (hasta ~5 s) a que el proceso salga. Loop de apagado compartido por
-/// las ramas unix/windows de `stop_process_graceful`.
+/// Wait (up to ~5 s) for the process to exit. Shared shutdown loop for the
+/// unix/windows branches of `stop_process_graceful`.
 fn wait_for_process_exit(pid: u32) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while process_alive(pid) && Instant::now() < deadline {
@@ -163,7 +166,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Guard para serializar los tests que mutan `std::env` (global del proceso).
+    /// Guard to serialize tests that mutate `std::env` (process-global).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -185,21 +188,21 @@ mod tests {
         assert!(!name.is_empty());
     }
 
-    /// En Windows el binario del daemon se reporta con extensión `.exe`.
+    /// On Windows the daemon binary is reported with the `.exe` extension.
     #[cfg(target_os = "windows")]
     #[test]
     fn daemon_binary_name_reports_exe_on_windows() {
         assert_eq!(daemon_binary_name(), "cerberus.exe");
     }
 
-    /// En macOS/Linux el binario se reporta sin extensión.
+    /// On macOS/Linux the binary is reported without an extension.
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn daemon_binary_name_without_extension_on_unix_like() {
         assert_eq!(daemon_binary_name(), "cerberus");
     }
 
-    /// Windows: la config dir debe vivir bajo `%APPDATA%\Cerberus`.
+    /// Windows: the config dir must live under `%APPDATA%\Cerberus`.
     #[cfg(target_os = "windows")]
     #[test]
     fn config_dir_windows_uses_appdata() {
@@ -214,13 +217,13 @@ mod tests {
         }
     }
 
-    /// Un PID imposible nunca es "vivo" en ninguna de las 3 plataformas.
+    /// An impossible PID is never "alive" on any of the 3 platforms.
     #[test]
     fn process_alive_false_for_garbage_pid() {
         assert!(!process_alive(u32::MAX));
     }
 
-    /// El proceso actual siempre está vivo (smoke del `tasklist`/`kill -0`).
+    /// The current process is always alive (smoke test of `tasklist`/`kill -0`).
     #[test]
     fn process_alive_true_for_current_process() {
         assert!(process_alive(std::process::id()));

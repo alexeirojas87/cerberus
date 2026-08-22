@@ -1,26 +1,26 @@
-# Evidence Pack — Fase 4 / cerberus-init
-- Intento: 1    Revisor: Builder    Veredicto: PASS
+# Evidence Pack — Phase 4 / cerberus-init
+- Attempt: 1    Reviewer: Builder    Verdict: PASS
 
-## Criterios de aceptación
-| Criterio | Comando ejecutado | Salida | Resultado |
+## Acceptance criteria
+| Criterion | Command executed | Output | Result |
 |----------|-------------------|--------|-----------|
 | `cargo test --workspace` | `cargo test --workspace` | 285 passed; 0 failed | ✅ |
-| Detecta agentes conocidos | `test::detect_agents_returns_vec` | len >= 4 | ✅ |
-| scan_text sin secretos → clean | `test::scan_empty_text_returns_clean` | "No se detectaron" | ✅ |
-| scan_text con API key → findings | `test::scan_with_skey_detects` | "Hallazgos" | ✅ |
-| scan_file inexistente → error | `test::scan_nonexistent_file_returns_error` | is_err | ✅ |
-| `cerberus init` crea config dir + yaml | `run_init("/tmp/cerberus-test")` | Report + archivos | ✅ |
-| `cerberus test <text>` escanea inline | `scan_text()` | Findings o clean | ✅ |
-| `cerberus scan <file>` escanea archivo | `scan_file()` | Findings o error | ✅ |
+| Detects known agents | `test::detect_agents_returns_vec` | len >= 4 | ✅ |
+| scan_text without secrets → clean | `test::scan_empty_text_returns_clean` | "None detected" | ✅ |
+| scan_text with API key → findings | `test::scan_with_skey_detects` | "Findings" | ✅ |
+| scan_file nonexistent → error | `test::scan_nonexistent_file_returns_error` | is_err | ✅ |
+| `cerberus init` creates config dir + yaml | `run_init("/tmp/cerberus-test")` | Report + files | ✅ |
+| `cerberus test <text>` scans inline | `scan_text()` | Findings or clean | ✅ |
+| `cerberus scan <file>` scans file | `scan_file()` | Findings or error | ✅ |
 
-## Casos adversariales probados
-- init sin agentes instalados → reporta con tips de config manual
-- agentes configurados → detecta y marca como listo
-- archivo inexistente → error claro
-- texto sin secretos → mensaje clean (no findings)
+## Adversarial cases tested
+- init without installed agents → reports with manual config tips
+- configured agents → detects and marks as ready
+- nonexistent file → clear error
+- text without secrets → clean message (no findings)
 
-## Archivos
-- `crates/cerberus/src/init.rs` (nuevo)
+## Files
+- `crates/cerberus/src/init.rs` (new)
 
-## Desviaciones del plan
-Ninguna. Autodetección de Claude Code, Codex, opencode, pi, Continue/Cursor.
+## Deviations from plan
+None. Autodetection of Claude Code, Codex, opencode, pi, Continue/Cursor.

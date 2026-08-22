@@ -1,75 +1,75 @@
-//! Free/Pro entitlement system for Cerberus (§7 del build plan).
+//! Free/Pro entitlement system for Cerberus (§7 of the build plan).
 //!
-//! El motor y el modo local básico quedan libres (Free). Features Pro
-//! (dashboard avanzado, reglas premium, alertas, etc.) se activan via
-//! archivo de licencia.
+//! The engine and the basic local mode remain free (Free). Pro features
+//! (advanced dashboard, premium rules, alerts, etc.) are activated via a
+//! license file.
 
 use serde::{Deserialize, Serialize};
 
-/// Tier de licencia.
+/// License tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LicenseTier {
-    /// Free (open-core): motor básico, proxy local, rule packs básicos.
+    /// Free (open-core): basic engine, local proxy, basic rule packs.
     #[default]
     Free,
-    /// Pro: packs premium, dashboard, alertas, políticas por equipo.
+    /// Pro: premium packs, dashboard, alerts, per-team policies.
     Pro,
 }
 
-/// Información de una licencia.
+/// Information about a license.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct License {
-    /// Tier de la licencia.
+    /// License tier.
     pub tier: LicenseTier,
-    /// Email del titular.
+    /// Holder email.
     pub email: String,
-    /// Identificador de licencia.
+    /// License identifier.
     pub license_id: String,
-    /// Fecha de expiración `ISO 8601` (None = perpetua).
+    /// Expiration date `ISO 8601` (None = perpetual).
     pub expires_at: Option<String>,
-    /// Features habilitadas adicionales.
+    /// Additional enabled features.
     pub features: Vec<String>,
 }
 
-/// Licencia firmada (firma Ed25519 del emisor sobre el JSON de la licencia).
+/// Signed license (Ed25519 signature of the issuer over the license JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedLicense {
-    /// JSON serializado de la licencia (lo que se firma).
+    /// Serialized license JSON (what is signed).
     pub license_json: String,
-    /// Firma Ed25519 en hex.
+    /// Ed25519 signature in hex.
     pub signature_hex: String,
-    /// Clave pública del firmante en hex.
+    /// Signer public key in hex.
     pub signer_public_key_hex: String,
-    /// Clave del titular, SOLO como metadata (P0: no es trust root).
+    /// Holder key, ONLY as metadata (P0: it is not a trust root).
     ///
-    /// Lo que pone el atacante aquí SIEMPRE debe ignorarse a la hora de
-    /// verificar: el trust root solo puede venir de `CERBERUS_LICENSE_PUBLIC_KEY`,
-    /// de `CERBERUS_EMBEDDED_LICENSE_KEY` (build time) o de
+    /// What the attacker puts here MUST always be ignored when verifying:
+    /// the trust root can only come from `CERBERUS_LICENSE_PUBLIC_KEY`,
+    /// from `CERBERUS_EMBEDDED_LICENSE_KEY` (build time) or from
     /// [`LicenseManager::from_file_with_root`].
     #[serde(default)]
     pub owner_public_key_hex: Option<String>,
 }
 
-/// Clave pública raíz embebida en build time (opcional).
+/// Root public key embedded at build time (optional).
 ///
-/// Se fija compilando con `CERBERUS_EMBEDDED_LICENSE_KEY=<hex>`. Mientras no
-/// se defina en build time, esta constante es `None` y `from_file` solo
-/// confiará en `CERBERUS_LICENSE_PUBLIC_KEY`.
+/// It is set by compiling with `CERBERUS_EMBEDDED_LICENSE_KEY=<hex>`. As long
+/// as it is not defined at build time, this constant is `None` and
+/// `from_file` will only trust `CERBERUS_LICENSE_PUBLIC_KEY`.
 pub const EMBEDDED_LICENSE_PUBLIC_KEY: Option<&'static str> = option_env!("CERBERUS_EMBEDDED_LICENSE_KEY");
 
 impl SignedLicense {
-    /// Verificar la firma de la licencia contra la clave pública indicada.
+    /// Verify the license signature against the given public key.
     ///
-    /// La clave indicada debe provenir de una fuente de confianza EXTERNA:
-    /// env de despliegue, clave embebida en build time o un parámetro
-    /// explícito de [`LicenseManager::from_file_with_root`].
-    /// NUNCA se debe usar `owner_public_key_hex` del propio archivo como root
-    /// (P0: licencia autofirmada por el atacante).
+    /// The given key must come from an EXTERNAL trust source:
+    /// deployment env, a build-time embedded key, or an explicit parameter
+    /// of [`LicenseManager::from_file_with_root`].
+    /// `owner_public_key_hex` from the file itself MUST NEVER be used as root
+    /// (P0: self-signed license by the attacker).
     ///
     /// # Errors
     ///
-    /// Devuelve error si la firma no es válida o la clave no coincide.
+    /// Returns an error if the signature is invalid or the key does not match.
     pub fn verify(&self, expected_public_key_hex: &str) -> Result<(), String> {
         if !self.signer_public_key_hex.eq_ignore_ascii_case(expected_public_key_hex) {
             return Err("license signer key mismatch".to_string());
@@ -91,41 +91,41 @@ impl SignedLicense {
         Ok(())
     }
 
-    /// Parsear la licencia firmada de vuelta a [`License`].
+    /// Parse the signed license back into a [`License`].
     ///
     /// # Errors
     ///
-    /// Devuelve error si el JSON no es válido.
+    /// Returns an error if the JSON is invalid.
     pub fn license(&self) -> Result<License, String> {
         serde_json::from_str(&self.license_json).map_err(|e| format!("invalid license json: {e}"))
     }
 }
 
-/// Features disponibles en cada tier.
+/// Features available in each tier.
 #[derive(Debug, Clone)]
 pub enum Feature {
-    /// Dashboard con históricos y estadísticas.
+    /// Dashboard with history and statistics.
     Dashboard,
-    /// Alertas Slack/Teams/webhook.
+    /// Slack/Teams/webhook alerts.
     Alerts,
-    /// Rule packs premium auto-actualizados.
+    /// Auto-updated premium rule packs.
     PremiumPacks,
-    /// Editor visual de reglas.
+    /// Visual rule editor.
     RuleEditor,
-    /// Políticas por equipo y SSO.
+    /// Per-team policies and SSO.
     TeamPolicies,
-    /// Alertas multi-canal.
+    /// Multi-channel alerts.
     MultiChannelAlerts,
 }
 
 impl Feature {
-    /// Verificar si un feature está disponible en el tier dado.
+    /// Check whether a feature is available in the given tier.
     #[must_use]
     pub fn available_in(&self, tier: LicenseTier) -> bool {
         tier == LicenseTier::Pro
     }
 
-    /// Obtener el nombre del feature.
+    /// Get the feature name.
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
@@ -139,10 +139,10 @@ impl Feature {
     }
 }
 
-/// Gestor de licencias.
+/// License manager.
 #[derive(Debug, Clone)]
 pub struct LicenseManager {
-    /// Licencia activa.
+    /// Active license.
     license: License,
 }
 
@@ -153,7 +153,7 @@ impl Default for LicenseManager {
 }
 
 impl LicenseManager {
-    /// Crear un `LicenseManager` con tier Free.
+    /// Create a `LicenseManager` with Free tier.
     #[must_use]
     pub fn free() -> Self {
         Self {
@@ -167,23 +167,23 @@ impl LicenseManager {
         }
     }
 
-    /// Crear un `LicenseManager` desde un archivo de licencia firmada.
+    /// Create a `LicenseManager` from a signed license file.
     ///
-    /// La firma SIEMPRE se verifica contra un trust root externo:
-    /// `CERBERUS_LICENSE_PUBLIC_KEY` (env, recomendado) o, si no está
-    /// definida, la clave embebida en build time via
-    /// `CERBERUS_EMBEDDED_LICENSE_KEY` (ver [`EMBEDDED_LICENSE_PUBLIC_KEY`]).
-    /// El campo `owner_public_key_hex` del propio archivo NUNCA se usa como
-    /// trust root (P0: licencia autofirmada por el atacante). Sin ningún
-    /// root configurado la licencia se rechaza (fail-closed). Un JSON plano
-    /// también se rechaza. (Regresión revisión 2, P1 #3.)
+    /// The signature is ALWAYS verified against an external trust root:
+    /// `CERBERUS_LICENSE_PUBLIC_KEY` (env, recommended) or, if not set, the
+    /// build-time embedded key via `CERBERUS_EMBEDDED_LICENSE_KEY` (see
+    /// [`EMBEDDED_LICENSE_PUBLIC_KEY`]).
+    /// The `owner_public_key_hex` field of the file itself is NEVER used as a
+    /// trust root (P0: self-signed license by the attacker). With no root
+    /// configured the license is rejected (fail-closed). A plain JSON is
+    /// also rejected. (Review 2 regression, P1 #3.)
     ///
-    /// Para un root explícito, usar [`Self::from_file_with_root`].
+    /// For an explicit root, use [`Self::from_file_with_root`].
     ///
     /// # Errors
     ///
-    /// Devuelve error si el archivo no existe, no hay trust root configurado,
-    /// o la firma no es válida.
+    /// Returns an error if the file does not exist, no trust root is
+    /// configured, or the signature is invalid.
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
         let root = std::env::var("CERBERUS_LICENSE_PUBLIC_KEY")
             .ok()
@@ -202,15 +202,15 @@ impl LicenseManager {
         Self::from_file_with_root(path, &root)
     }
 
-    /// Crear un `LicenseManager` desde un archivo de licencia firmada usando
-    /// una clave raíz de confianza EXPLÍCITA. Esta es la vía a usar por
-    /// callers que ya tienen el root resuelto desde su propia config confiable
-    /// (sin depender del entorno del proceso).
+    /// Create a `LicenseManager` from a signed license file using an
+    /// EXPLICIT trust root key. This is the path to use for callers that
+    /// already have the root resolved from their own trusted config (without
+    /// depending on the process environment).
     ///
     /// # Errors
     ///
-    /// Devuelve error si el archivo no existe, la firma no es válida o no
-    /// coincide con `root_hex`.
+    /// Returns an error if the file does not exist, the signature is invalid,
+    /// or it does not match `root_hex`.
     pub fn from_file_with_root(path: impl AsRef<std::path::Path>, root_hex: &str) -> Result<Self, String> {
         let content = std::fs::read_to_string(path.as_ref()).map_err(|e| format!("cannot read license: {e}"))?;
         let signed: SignedLicense =
@@ -222,35 +222,35 @@ impl LicenseManager {
         Ok(Self { license })
     }
 
-    /// Obtener el tier actual.
+    /// Get the current tier.
     #[must_use]
     pub const fn tier(&self) -> LicenseTier {
         self.license.tier
     }
 
-    /// Verificar si un feature está disponible.
+    /// Check whether a feature is available.
     ///
-    /// Una licencia expirada NO habilita ningún feature (P1-9).
+    /// An expired license does NOT enable any feature (P1-9).
     #[must_use]
     pub fn has_feature(&self, feature: &Feature) -> bool {
         if self.is_expired() {
             return false;
         }
-        // Verificar feature por tier
+        // Check feature by tier
         if feature.available_in(self.license.tier) {
             return true;
         }
-        // Verificar feature en lista de features adicionales
+        // Check feature in the additional features list
         self.license.features.iter().any(|f| f == feature.name())
     }
 
-    /// Verificar si la licencia es Pro (y no está expirada).
+    /// Check whether the license is Pro (and not expired).
     #[must_use]
     pub fn is_pro(&self) -> bool {
         !self.is_expired() && matches!(self.license.tier, LicenseTier::Pro)
     }
 
-    /// Verificar si la licencia ha expirado.
+    /// Check whether the license has expired.
     #[must_use]
     pub fn is_expired(&self) -> bool {
         if let Some(ref expires) = self.license.expires_at {
@@ -261,14 +261,14 @@ impl LicenseManager {
         false
     }
 
-    /// Generar un reporte de estado de licencia.
+    /// Generate a license status report.
     #[must_use]
     pub fn report(&self) -> String {
         let tier_str = match self.license.tier {
             LicenseTier::Free => "Free (open-core)",
             LicenseTier::Pro => "Pro",
         };
-        let expiry = self.license.expires_at.as_deref().unwrap_or("perpetua");
+        let expiry = self.license.expires_at.as_deref().unwrap_or("perpetual");
         let features: Vec<&str> = [
             Feature::Dashboard,
             Feature::Alerts,
@@ -283,7 +283,7 @@ impl LicenseManager {
         .collect();
 
         format!(
-            "Licencia: {tier_str}\nEmail: {}\nID: {}\nExpira: {expiry}\nFeatures: {}",
+            "License: {tier_str}\nEmail: {}\nID: {}\nExpires: {expiry}\nFeatures: {}",
             self.license.email,
             self.license.license_id,
             features.join(", ")
@@ -297,8 +297,8 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::NamedTempFile;
 
-    /// Guard para serializar los tests que mutan el entorno del proceso.
-    /// `std::env` es global: con `--test-threads=N` hay carrera entre tests.
+    /// Guard to serialize tests that mutate the process environment.
+    /// `std::env` is global: with `--test-threads=N` there is a race between tests.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -359,7 +359,7 @@ mod tests {
             features: vec!["custom_feature".to_string()],
         };
         let tmp = NamedTempFile::new().unwrap();
-        // JSON plano (sin firma) → rechazado (P1-9).
+        // Plain JSON (no signature) → rejected (P1-9).
         std::fs::write(tmp.path(), serde_json::to_string(&license).unwrap()).unwrap();
         assert!(LicenseManager::from_file(tmp.path()).is_err());
     }
@@ -367,8 +367,8 @@ mod tests {
     #[test]
     fn license_without_trust_root_rejected() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Regresión revisión 2 (P1 #3): sin ningún trust root externo, la
-        // licencia "firmada" NO debe pasar.
+        // Review 2 regression (P1 #3): with no external trust root, the
+        // "signed" license MUST NOT pass.
         let license = License {
             tier: LicenseTier::Pro,
             email: "dev@cerberus.dev".to_string(),
@@ -378,11 +378,11 @@ mod tests {
         };
         let tmp = NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), signed_license_json(&license)).unwrap();
-        // Sin env ni clave embebida en build time → error.
+        // Without env or build-time embedded key → error.
         std::env::remove_var("CERBERUS_LICENSE_PUBLIC_KEY");
         assert!(
             LicenseManager::from_file(tmp.path()).is_err(),
-            "sin trust root no debe pasar"
+            "without a trust root it must not pass"
         );
     }
 
@@ -401,7 +401,7 @@ mod tests {
 
         let root_hex = hex::encode(test_keypair().verifying_key().as_bytes());
         std::env::set_var("CERBERUS_LICENSE_PUBLIC_KEY", &root_hex);
-        // Sanidad: la root explícita coincide con la del env.
+        // Sanity: the explicit root matches the env one.
         assert!(LicenseManager::from_file_with_root(tmp.path(), &root_hex).is_ok());
         let mgr = LicenseManager::from_file(tmp.path()).unwrap();
         assert!(mgr.is_pro());
@@ -411,9 +411,9 @@ mod tests {
     #[test]
     fn license_rejects_owner_key_as_untrusted_root() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // P0: ataque de licencia autofirmada. El atacante genera su clave,
-        // firma una License Pro y pone ESA MISMA clave como signer y como
-        // owner_public_key_hex. Nada de eso puede servir de trust root.
+        // P0: self-signed license attack. The attacker generates their key,
+        // signs a Pro License and puts THAT SAME key as signer and as
+        // owner_public_key_hex. None of that can serve as a trust root.
         let license = License {
             tier: LicenseTier::Pro,
             email: "attacker@evil.dev".to_string(),
@@ -434,13 +434,13 @@ mod tests {
         std::fs::write(tmp.path(), serde_json::to_string(&signed).unwrap()).unwrap();
         std::env::remove_var("CERBERUS_LICENSE_PUBLIC_KEY");
 
-        // owner_public_key_hex del archivo NO es trust root → rechazo.
+        // owner_public_key_hex from the file is NOT a trust root → rejected.
         assert!(
             LicenseManager::from_file(tmp.path()).is_err(),
-            "owner key del propio archivo no debe ser trust root"
+            "owner key from the file itself must not be a trust root"
         );
 
-        // Con el root EXPLÍCITO correcto (la misma clave, vía param) → acepta.
+        // With the correct EXPLICIT root (the same key, via param) → accepted.
         let mgr =
             LicenseManager::from_file_with_root(tmp.path(), &hex::encode(keypair.verifying_key().as_bytes())).unwrap();
         assert!(mgr.is_pro());
@@ -456,7 +456,7 @@ mod tests {
             features: Vec::new(),
         };
         let mut signed: SignedLicense = serde_json::from_str(&signed_license_json(&license)).expect("parse signed");
-        // Firmado por otra clave (attacker).
+        // Signed by another key (attacker).
         let other = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
         signed.signer_public_key_hex = hex::encode(other.verifying_key().as_bytes());
         let tmp = NamedTempFile::new().unwrap();
@@ -464,7 +464,7 @@ mod tests {
         let root_hex = hex::encode(test_keypair().verifying_key().as_bytes());
         assert!(
             LicenseManager::from_file_with_root(tmp.path(), &root_hex).is_err(),
-            "clave del atacante no debe pasar"
+            "attacker key must not pass"
         );
     }
 
@@ -480,7 +480,7 @@ mod tests {
         let mgr = LicenseManager { license };
         assert!(
             !mgr.is_pro(),
-            "licencia expirada no debe contar como Pro (revisión 2, P1 #3)"
+            "expired license must not count as Pro (review 2, P1 #3)"
         );
     }
 
@@ -519,7 +519,7 @@ mod tests {
         let mgr = LicenseManager::free();
         let report = mgr.report();
         assert!(report.contains("Free"));
-        assert!(report.contains("perpetua"));
+        assert!(report.contains("perpetual"));
     }
 
     #[test]

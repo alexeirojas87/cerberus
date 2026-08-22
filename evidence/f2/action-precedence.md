@@ -1,37 +1,37 @@
-# Evidence Pack — Fase 2 / action-precedence
-- Intento: 1    Revisor: Builder    Veredicto: PASS
+# Evidence Pack — Phase 2 / action-precedence
+- Attempt: 1    Reviewer: Builder    Verdict: PASS
 
-## Criterios de aceptación
-| Criterio | Comando ejecutado | Salida | Resultado |
+## Acceptance criteria
+| Criterion | Command executed | Output | Result |
 |----------|-------------------|--------|-----------|
 | `cargo build --workspace` | `cargo build --workspace` | 0 errors | ✅ |
 | `cargo test -p cerberus-engine` | `cargo test -p cerberus-engine` | 180 passed; 0 failed | ✅ |
 | `cargo clippy --all-targets -- -D warnings` | `cargo clippy --all-targets -- -D warnings` | No issues found | ✅ |
 | `cargo fmt --check` | `cargo fmt --check` | No diffs | ✅ |
-| Block > Redact > Warn > Allow en spans solapados | `test::full_precedence_chain_block_over_redact_over_warn_over_allow` | Pass | ✅ |
-| Redact gana sobre Warn+Allow en overlap | `test::redact_wins_over_warn_and_allow_span_overlap` | Pass | ✅ |
-| resolve_spans ordena por precedencia | `test::resolve_spans_ordered_by_precedence` | Pass | ✅ |
-| Spans no solapados se conservan todos | `test::resolve_non_overlapping_spans_all_kept` | Pass | ✅ |
-| resolve_spans es pública y documentada | `pub fn resolve_spans` con `#[must_use]` | Pass | ✅ |
+| Block > Redact > Warn > Allow on overlapping spans | `test::full_precedence_chain_block_over_redact_over_warn_over_allow` | Pass | ✅ |
+| Redact wins over Warn+Allow on overlap | `test::redact_wins_over_warn_and_allow_span_overlap` | Pass | ✅ |
+| resolve_spans sorts by precedence | `test::resolve_spans_ordered_by_precedence` | Pass | ✅ |
+| Non-overlapping spans all kept | `test::resolve_non_overlapping_spans_all_kept` | Pass | ✅ |
+| resolve_spans is public and documented | `pub fn resolve_spans` with `#[must_use]` | Pass | ✅ |
 
-## Casos adversariales probados
-- 4 acciones solapadas (Block > Redact > Warn > Allow) → Block gana
-- Redact + Warn + Allow solapados → Redact gana (más severa sin Block)
-- Dos Allow solapados → primero se conserva (misma acción)
-- Spans disjuntos → ambos se conservan
-- Block global siempre se aplica antes de resolver spans (apply_redaction check)
+## Adversarial cases tested
+- 4 overlapping actions (Block > Redact > Warn > Allow) → Block wins
+- Redact + Warn + Allow overlapping → Redact wins (most severe without Block)
+- Two overlapping Allow → first is kept (same action)
+- Disjoint spans → both kept
+- Global Block always applied before resolving spans (apply_redaction check)
 
-## NFR aplicables
-- N/A (no aplica latencia/seguridad para esta unidad)
+## Applicable NFRs
+- N/A (no latency/security applies to this unit)
 
-## Archivos modificados
-- `crates/cerberus-engine/src/redact.rs` (resolve_spans/y action_severity públicos + tests)
-- No se añadieron nuevas dependencias
+## Modified files
+- `crates/cerberus-engine/src/redact.rs` (resolve_spans/y action_severity public + tests)
+- No new dependencies added
 
 ## SHAs
 ```
-TODO: sha256sum de archivos modificados
+TODO: sha256sum of modified files
 ```
 
-## Desviaciones del plan
-Ninguna. La precedencia sigue exactamente el diseño: Block > Redact > Warn > Allow, con resolve_spans como API pública para que otros módulos la usen.
+## Deviations from plan
+None. The precedence follows the design exactly: Block > Redact > Warn > Allow, with resolve_spans as the public API for other modules to use.

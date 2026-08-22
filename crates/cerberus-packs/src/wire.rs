@@ -1,98 +1,96 @@
-//! Contrato de cable (`wire`) del control plane de rule packs — v6.1.
+//! Wire contract for the rule pack control plane — v6.1.
 //!
-//! Este módulo es el ÚNICO lugar donde vive la forma de los mensajes que el
-//! CLI (`cerberus pack …`) envía al control plane del daemon y de los datos
-//! auxiliares que ambos comparten:
+//! This module is the ONLY place where the shape of the messages the CLI
+//! (`cerberus pack …`) sends to the daemon's control plane lives, and of the
+//! auxiliary data both share:
 //!
-//! * [`PackInstallRequest`]: install **por bytes del pack firmado**, nunca por
-//!   path. El diseño anterior mandaba `{"path": "..."}`: el daemon abría ese
-//!   path con SU cwd y SU usuario, lo que (a) rompía en cuanto CLI y daemon no
-//!   compartían filesystem/cwd (Docker, remoto, `sudo`), y (b) convertía al
-//!   control plane en un lector de archivos arbitrarios del host. El pack va
-//!   ahora dentro del body y el daemon NUNCA interpreta rutas del cliente.
-//! * [`ControlPlaneEndpoint`]: descriptor del endpoint efectivo que el daemon
-//!   publica (`endpoint.json`) para que el CLI lo descubra sin adivinar el
-//!   puerto. El CLI siempre habla contra loopback.
+//! * [`PackInstallRequest`]: install **by signed pack bytes**, never by path.
+//!   The previous design sent `{"path": "..."}`: the daemon opened that path
+//!   with ITS cwd and ITS user, which (a) broke as soon as CLI and daemon did
+//!   not share filesystem/cwd (Docker, remote, `sudo`), and (b) turned the
+//!   control plane into an arbitrary file reader on the host. The pack now
+//!   travels inside the body and the daemon NEVER interprets client paths.
+//! * [`ControlPlaneEndpoint`]: descriptor of the effective endpoint the daemon
+//!   publishes (`endpoint.json`) so the CLI can discover it without guessing
+//!   the port. The CLI always talks to loopback.
 //!
-//! Todos los parsers son *fail-safe*: un body vacío, demasiado grande, no
-//! UTF-8, con versión de wire desconocida o con la forma legada `{"path":…}`
-//! se rechaza con un [`PackWireError`] explícito, jamás con un default
-//! silencioso.
+//! All parsers are *fail-safe*: an empty, too-large, non-UTF-8 body, with an
+//! unknown wire version or with the legacy `{"path":…}` shape is rejected
+//! with an explicit [`PackWireError`], never with a silent default.
 
 use serde::{Deserialize, Serialize};
 
 use crate::pack::SignedRulePack;
 
-/// Ruta del control plane que lista packs (GET).
+/// Control plane route that lists packs (GET).
 pub const PACK_LIST_PATH: &str = "/api/packs";
-/// Ruta del control plane que instala un pack (POST, body [`PackInstallRequest`]).
+/// Control plane route that installs a pack (POST, body [`PackInstallRequest`]).
 pub const PACK_INSTALL_PATH: &str = "/api/packs/install";
-/// Ruta del control plane que revierte la última activación (POST, sin body).
+/// Control plane route that reverts the last activation (POST, no body).
 pub const PACK_ROLLBACK_PATH: &str = "/api/packs/rollback";
 
-/// Versión del contrato de install. `1` era el legado por path (retirado); `2`
-/// transporta los bytes del pack firmado.
+/// Install contract version. `1` was the legacy by-path one (retired); `2`
+/// carries the signed pack bytes.
 pub const PACK_WIRE_VERSION: u32 = 2;
 
-/// Tamaño máximo del body HTTP wire v2 (1 MiB), compartido con el control
-/// plane para que ambos lados apliquen exactamente la misma cota.
+/// Maximum HTTP wire v2 body size (1 MiB), shared with the control plane so
+/// both sides apply exactly the same bound.
 pub const MAX_PACK_BODY_BYTES: usize = 1 << 20;
 
-/// Tamaño máximo aceptado para el JSON del pack firmado (511.5 KiB).
+/// Maximum accepted size for the signed pack JSON (511.5 KiB).
 ///
-/// Se reserva 1 KiB para los campos del envelope y se presupuestan hasta dos
-/// bytes de envelope por byte del JSON firmado. La relación se vigila en los
-/// tests del control plane: incluso el envelope máximo cabe en
-/// [`MAX_PACK_BODY_BYTES`].
+/// 1 KiB is reserved for envelope fields and up to two envelope bytes per
+/// byte of signed JSON are budgeted. The ratio is monitored in the control
+/// plane tests: even the maximum envelope fits in [`MAX_PACK_BODY_BYTES`].
 pub const MAX_PACK_BYTES: usize = (MAX_PACK_BODY_BYTES - 1024) / 2;
 
-/// Longitud máxima del nombre de origen informativo.
+/// Maximum length of the informative origin name.
 pub const MAX_ORIGIN_NAME_LEN: usize = 128;
 
-/// Nombre del archivo donde el daemon publica su endpoint efectivo, dentro del
-/// directorio de configuración (`~/.cerberus/endpoint.json`).
+/// Name of the file where the daemon publishes its effective endpoint, inside
+/// the config directory (`~/.cerberus/endpoint.json`).
 pub const ENDPOINT_FILE: &str = "endpoint.json";
 
-/// Fallo al construir o parsear un mensaje del contrato de packs.
+/// Failure to build or parse a pack contract message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackWireError {
-    /// El body o el pack venía vacío.
+    /// The body or pack was empty.
     Empty,
-    /// Excede el máximo permitido.
+    /// Exceeds the allowed maximum.
     TooLarge {
-        /// Bytes recibidos.
+        /// Bytes received.
         got: usize,
-        /// Máximo admitido.
+        /// Maximum accepted.
         max: usize,
     },
-    /// Los bytes no son UTF-8 válido (un pack firmado siempre es JSON UTF-8).
+    /// The bytes are not valid UTF-8 (a signed pack is always UTF-8 JSON).
     NotUtf8,
-    /// JSON inválido o campos inesperados (detalle adjunto).
+    /// Invalid JSON or unexpected fields (detail attached).
     Malformed(String),
-    /// Request legada `{"path": …}`: el control plane ya no resuelve rutas del
-    /// cliente. El CLI debe enviar los bytes del pack.
+    /// Legacy `{"path": …}` request: the control plane no longer resolves
+    /// client paths. The CLI must send the pack bytes.
     LegacyPathRequest,
-    /// Versión de wire no soportada por este binario.
+    /// Wire version not supported by this binary.
     UnsupportedVersion(u32),
 }
 
 impl std::fmt::Display for PackWireError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Empty => write!(f, "pack payload vacío"),
+            Self::Empty => write!(f, "pack payload empty"),
             Self::TooLarge { got, max } => {
-                write!(f, "pack payload demasiado grande: {got} bytes (máximo {max})")
+                write!(f, "pack payload too large: {got} bytes (maximum {max})")
             }
-            Self::NotUtf8 => write!(f, "pack payload no es UTF-8 válido"),
-            Self::Malformed(detail) => write!(f, "pack payload inválido: {detail}"),
+            Self::NotUtf8 => write!(f, "pack payload is not valid UTF-8"),
+            Self::Malformed(detail) => write!(f, "pack payload invalid: {detail}"),
             Self::LegacyPathRequest => write!(
                 f,
-                "install por path retirado (wire v1): el control plane no abre rutas del cliente; \
-                 envía los bytes del pack firmado en el campo 'pack' (wire v{PACK_WIRE_VERSION})"
+                "install by path retired (wire v1): the control plane does not open client paths; \
+                 send the signed pack bytes in the 'pack' field (wire v{PACK_WIRE_VERSION})"
             ),
             Self::UnsupportedVersion(v) => write!(
                 f,
-                "versión de wire no soportada: {v} (este binario habla v{PACK_WIRE_VERSION})"
+                "unsupported wire version: {v} (this binary speaks v{PACK_WIRE_VERSION})"
             ),
         }
     }
@@ -100,40 +98,40 @@ impl std::fmt::Display for PackWireError {
 
 impl std::error::Error for PackWireError {}
 
-/// Versión por defecto cuando el campo falta (clientes v6.1 tempranos).
+/// Default version when the field is missing (early v6.1 clients).
 const fn default_wire_version() -> u32 {
     PACK_WIRE_VERSION
 }
 
-/// Request de `POST /api/packs/install`: los **bytes** del `SignedRulePack`.
+/// `POST /api/packs/install` request: the **bytes** of the `SignedRulePack`.
 ///
-/// `pack` es el JSON completo del pack firmado (el mismo contenido que el
-/// archivo `.json` que el usuario pasó por CLI). `origin_name` es SOLO
-/// informativo (logs/telemetría): es un basename saneado, sin separadores de
-/// ruta, y el daemon NUNCA lo usa para abrir nada.
+/// `pack` is the full JSON of the signed pack (the same content as the `.json`
+/// file the user passed on the CLI). `origin_name` is ONLY informative
+/// (logs/telemetry): it is a sanitized basename, without path separators, and
+/// the daemon NEVER uses it to open anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackInstallRequest {
-    /// Versión del contrato (véase [`PACK_WIRE_VERSION`]).
+    /// Contract version (see [`PACK_WIRE_VERSION`]).
     #[serde(default = "default_wire_version")]
     pub wire_version: u32,
-    /// JSON del `SignedRulePack` a instalar.
+    /// JSON of the `SignedRulePack` to install.
     pub pack: String,
-    /// Basename informativo del archivo de origen (nunca una ruta).
+    /// Informative basename of the source file (never a path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_name: Option<String>,
 }
 
 impl PackInstallRequest {
-    /// Construir la request desde los bytes leídos por el CLI.
+    /// Build the request from the bytes read by the CLI.
     ///
-    /// Valida tamaño, UTF-8 y que el contenido sea un `SignedRulePack`
-    /// estructuralmente válido (la firma la verifica el daemon contra SU trust
-    /// root: el cliente no es autoridad de confianza).
+    /// Validates size, UTF-8 and that the content is a structurally valid
+    /// `SignedRulePack` (the signature is verified by the daemon against ITS
+    /// trust root: the client is not a trust authority).
     ///
     /// # Errors
     ///
-    /// [`PackWireError`] si está vacío, excede [`MAX_PACK_BYTES`], no es UTF-8
-    /// o no parsea como pack firmado.
+    /// [`PackWireError`] if it is empty, exceeds [`MAX_PACK_BYTES`], is not
+    /// UTF-8 or does not parse as a signed pack.
     pub fn from_pack_bytes(bytes: &[u8], origin_name: Option<&str>) -> Result<Self, PackWireError> {
         if bytes.is_empty() {
             return Err(PackWireError::Empty);
@@ -153,29 +151,29 @@ impl PackInstallRequest {
         })
     }
 
-    /// Serializar la request al body HTTP.
+    /// Serialize the request to the HTTP body.
     ///
     /// # Errors
     ///
-    /// [`PackWireError::Malformed`] si la serialización falla.
+    /// [`PackWireError::Malformed`] if serialization fails.
     pub fn to_body(&self) -> Result<String, PackWireError> {
         serde_json::to_string(self).map_err(|e| PackWireError::Malformed(e.to_string()))
     }
 
-    /// Parsear el body recibido por el control plane (lado servidor).
+    /// Parse the body received by the control plane (server side).
     ///
-    /// Fail-safe: rechaza vacío, oversize, no-UTF-8, la forma legada
-    /// `{"path": …}` y versiones de wire desconocidas.
+    /// Fail-safe: rejects empty, oversize, non-UTF-8, the legacy
+    /// `{"path": …}` shape and unknown wire versions.
     ///
     /// # Errors
     ///
-    /// [`PackWireError`] con la causa exacta del rechazo.
+    /// [`PackWireError`] with the exact rejection reason.
     pub fn parse_body(body: &[u8]) -> Result<Self, PackWireError> {
         if body.is_empty() {
             return Err(PackWireError::Empty);
         }
-        // El envelope JSON escapa el pack; la cota compartida también es la
-        // que aplica el colector HTTP antes de llegar a este parser.
+        // The JSON envelope escapes the pack; the shared bound is also the
+        // one applied by the HTTP collector before reaching this parser.
         if body.len() > MAX_PACK_BODY_BYTES {
             return Err(PackWireError::TooLarge {
                 got: body.len(),
@@ -187,12 +185,12 @@ impl PackInstallRequest {
             serde_json::from_str(text).map_err(|e| PackWireError::Malformed(e.to_string()))?;
         let obj = value
             .as_object()
-            .ok_or_else(|| PackWireError::Malformed("se esperaba un objeto JSON".to_string()))?;
+            .ok_or_else(|| PackWireError::Malformed("expected a JSON object".to_string()))?;
         if !obj.contains_key("pack") {
             if obj.contains_key("path") {
                 return Err(PackWireError::LegacyPathRequest);
             }
-            return Err(PackWireError::Malformed("falta el campo 'pack'".to_string()));
+            return Err(PackWireError::Malformed("missing 'pack' field".to_string()));
         }
         let req: Self = serde_json::from_value(value).map_err(|e| PackWireError::Malformed(e.to_string()))?;
         if req.wire_version != PACK_WIRE_VERSION {
@@ -210,7 +208,7 @@ impl PackInstallRequest {
         if let Some(origin) = req.origin_name.as_deref() {
             if sanitize_origin_name(origin).as_deref() != Some(origin) {
                 return Err(PackWireError::Malformed(
-                    "origin_name debe ser un basename sin separadores de ruta".to_string(),
+                    "origin_name must be a basename without path separators".to_string(),
                 ));
             }
         }
@@ -218,38 +216,38 @@ impl PackInstallRequest {
         Ok(req)
     }
 
-    /// Deserializar el pack firmado transportado.
+    /// Deserialize the transported signed pack.
     ///
     /// # Errors
     ///
-    /// [`PackWireError::Malformed`] si el JSON no es un `SignedRulePack`.
+    /// [`PackWireError::Malformed`] if the JSON is not a `SignedRulePack`.
     pub fn signed_pack(&self) -> Result<SignedRulePack, PackWireError> {
         serde_json::from_str::<SignedRulePack>(&self.pack).map_err(|e| PackWireError::Malformed(e.to_string()))
     }
 
-    /// Etiqueta para logs: el origen saneado o `<inline>`.
+    /// Label for logs: the sanitized origin or `<inline>`.
     #[must_use]
     pub fn origin_label(&self) -> &str {
         self.origin_name.as_deref().unwrap_or("<inline>")
     }
 }
 
-/// Validar que `json` es un `SignedRulePack` estructuralmente correcto.
+/// Validate that `json` is a structurally correct `SignedRulePack`.
 fn validate_signed_pack(json: &str) -> Result<(), PackWireError> {
     let signed = serde_json::from_str::<SignedRulePack>(json).map_err(|e| PackWireError::Malformed(e.to_string()))?;
     if signed.pack_json.is_empty() || signed.signature_hex.is_empty() || signed.signer_public_key_hex.is_empty() {
         return Err(PackWireError::Malformed(
-            "pack firmado incompleto (pack_json/signature_hex/signer_public_key_hex)".to_string(),
+            "incomplete signed pack (pack_json/signature_hex/signer_public_key_hex)".to_string(),
         ));
     }
     Ok(())
 }
 
-/// Reducir un nombre de archivo (posiblemente una ruta completa del cliente) a
-/// un basename informativo seguro, o `None` si no queda nada usable.
+/// Reduce a file name (possibly a full client path) to a safe informative
+/// basename, or `None` if nothing usable remains.
 ///
-/// Elimina toda semántica de ruta: separadores unix y windows, `.`/`..`, bytes
-/// de control y nombres excesivamente largos.
+/// Strips all path semantics: unix and windows separators, `.`/`..`, control
+/// bytes and overly long names.
 #[must_use]
 pub fn sanitize_origin_name(raw: &str) -> Option<String> {
     let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
@@ -265,37 +263,37 @@ pub fn sanitize_origin_name(raw: &str) -> Option<String> {
     Some(base.to_string())
 }
 
-/// Puerto de un `listen` con forma `host:port` (soporta `[::1]:8787`).
+/// Port of a `listen` with the form `host:port` (supports `[::1]:8787`).
 #[must_use]
 pub fn port_from_listen(listen: &str) -> Option<u16> {
     listen.trim().rsplit(':').next()?.trim().parse::<u16>().ok()
 }
 
-/// Endpoint efectivo del control plane, publicado por el daemon.
+/// Effective control plane endpoint, published by the daemon.
 ///
-/// El daemon puede ligar en `0.0.0.0` (Docker) o en un puerto efímero; el CLI
-/// necesita el puerto REAL, no el configurado. Este descriptor se escribe
-/// atómicamente junto al pid file y el CLI lo lee; el `host` publicado es
-/// informativo, la URL que usa el CLI es SIEMPRE loopback.
+/// The daemon may bind on `0.0.0.0` (Docker) or on an ephemeral port; the CLI
+/// needs the REAL port, not the configured one. This descriptor is written
+/// atomically alongside the pid file and the CLI reads it; the published
+/// `host` is informative, the URL the CLI uses is ALWAYS loopback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlPlaneEndpoint {
-    /// `listen` tal como el daemon lo ligó (informativo).
+    /// `listen` as the daemon bound it (informative).
     pub listen: String,
-    /// Puerto efectivo del control plane.
+    /// Effective control plane port.
     pub port: u16,
-    /// PID del daemon dueño de este endpoint (para detectar descriptores rancios).
+    /// PID of the daemon owning this endpoint (to detect stale descriptors).
     pub pid: u32,
 }
 
 impl ControlPlaneEndpoint {
-    /// Construir el descriptor a partir del `listen` real y el pid del daemon.
+    /// Build the descriptor from the real `listen` and the daemon pid.
     ///
     /// # Errors
     ///
-    /// [`PackWireError::Malformed`] si `listen` no contiene un puerto válido.
+    /// [`PackWireError::Malformed`] if `listen` does not contain a valid port.
     pub fn new(listen: &str, pid: u32) -> Result<Self, PackWireError> {
         let port = port_from_listen(listen)
-            .ok_or_else(|| PackWireError::Malformed(format!("listen sin puerto válido: {listen}")))?;
+            .ok_or_else(|| PackWireError::Malformed(format!("listen without valid port: {listen}")))?;
         Ok(Self {
             listen: listen.trim().to_string(),
             port,
@@ -303,32 +301,32 @@ impl ControlPlaneEndpoint {
         })
     }
 
-    /// Serializar a JSON para `endpoint.json`.
+    /// Serialize to JSON for `endpoint.json`.
     ///
     /// # Errors
     ///
-    /// [`PackWireError::Malformed`] si la serialización falla.
+    /// [`PackWireError::Malformed`] if serialization fails.
     pub fn to_json(&self) -> Result<String, PackWireError> {
         serde_json::to_string(self).map_err(|e| PackWireError::Malformed(e.to_string()))
     }
 
-    /// Parsear `endpoint.json` (fail-safe: puerto 0 se rechaza).
+    /// Parse `endpoint.json` (fail-safe: port 0 is rejected).
     ///
     /// # Errors
     ///
-    /// [`PackWireError`] si el JSON es inválido o el puerto es 0.
+    /// [`PackWireError`] if the JSON is invalid or the port is 0.
     pub fn from_json(json: &str) -> Result<Self, PackWireError> {
         if json.trim().is_empty() {
             return Err(PackWireError::Empty);
         }
         let ep: Self = serde_json::from_str(json).map_err(|e| PackWireError::Malformed(e.to_string()))?;
         if ep.port == 0 {
-            return Err(PackWireError::Malformed("puerto 0 en endpoint.json".to_string()));
+            return Err(PackWireError::Malformed("port 0 in endpoint.json".to_string()));
         }
         Ok(ep)
     }
 
-    /// URL base para el CLI: siempre loopback, nunca el host publicado.
+    /// Base URL for the CLI: always loopback, never the published host.
     #[must_use]
     pub fn loopback_base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
@@ -339,8 +337,8 @@ impl ControlPlaneEndpoint {
 mod tests {
     use super::*;
 
-    /// `SignedRulePack` mínimo válido estructuralmente (firma ficticia: la
-    /// verificación criptográfica es del daemon, no del cliente).
+    /// Minimal structurally valid `SignedRulePack` (dummy signature: the
+    /// cryptographic verification is the daemon's, not the client's).
     fn sample_signed_pack() -> String {
         serde_json::json!({
             "pack_json": r#"{"metadata":{"name":"demo","version":"1.0.0","description":"d","author":"a","published":"2026-01-01","min_engine_version":"0.1.0"},"rules":[]}"#,
@@ -354,14 +352,14 @@ mod tests {
     fn install_request_roundtrips_bytes() {
         let pack = sample_signed_pack();
         let req = PackInstallRequest::from_pack_bytes(pack.as_bytes(), Some("/home/u/packs/demo.json"))
-            .expect("request se construye");
+            .expect("request builds");
         assert_eq!(req.wire_version, PACK_WIRE_VERSION);
-        assert_eq!(req.origin_name.as_deref(), Some("demo.json"), "solo basename");
+        assert_eq!(req.origin_name.as_deref(), Some("demo.json"), "basename only");
 
-        let body = req.to_body().expect("serializa");
-        let parsed = PackInstallRequest::parse_body(body.as_bytes()).expect("parsea");
+        let body = req.to_body().expect("serializes");
+        let parsed = PackInstallRequest::parse_body(body.as_bytes()).expect("parses");
         assert_eq!(parsed, req);
-        let signed = parsed.signed_pack().expect("pack firmado");
+        let signed = parsed.signed_pack().expect("signed pack");
         assert!(signed.pack_json.contains("demo"));
     }
 
@@ -370,7 +368,7 @@ mod tests {
         let pack = sample_signed_pack();
         for raw in ["..", ".", "/", "   ", "a/../"] {
             let req = PackInstallRequest::from_pack_bytes(pack.as_bytes(), Some(raw)).expect("request");
-            assert!(req.origin_name.is_none(), "origen inseguro no debe viajar: {raw:?}");
+            assert!(req.origin_name.is_none(), "unsafe origin must not travel: {raw:?}");
         }
         let traversal =
             PackInstallRequest::from_pack_bytes(pack.as_bytes(), Some("../../../etc/shadow.json")).expect("request");
@@ -384,8 +382,8 @@ mod tests {
             PackInstallRequest::parse_body(body.as_bytes()),
             Err(PackWireError::LegacyPathRequest)
         );
-        // Mensaje accionable para el operador.
-        assert!(PackWireError::LegacyPathRequest.to_string().contains("bytes del pack"));
+        // Actionable message for the operator.
+        assert!(PackWireError::LegacyPathRequest.to_string().contains("pack bytes"));
     }
 
     #[test]
@@ -455,7 +453,7 @@ mod tests {
         let json = ep.to_json().expect("json");
         assert_eq!(ControlPlaneEndpoint::from_json(&json).expect("parse"), ep);
 
-        assert!(ControlPlaneEndpoint::new("sin-puerto", 1).is_err());
+        assert!(ControlPlaneEndpoint::new("no-port", 1).is_err());
         assert_eq!(ControlPlaneEndpoint::from_json("   "), Err(PackWireError::Empty));
         assert!(matches!(
             ControlPlaneEndpoint::from_json(r#"{"listen":"x:0","port":0,"pid":1}"#),

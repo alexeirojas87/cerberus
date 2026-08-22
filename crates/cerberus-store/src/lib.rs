@@ -1,7 +1,7 @@
-//! Cerberus persistence, audit and telemetry — Fase 5 del build plan.
+//! Cerberus persistence, audit and telemetry — Phase 5 of the build plan.
 //!
-//! Almacenamiento local `SQLite` con escritura async no bloqueante,
-//! retención configurable y garantía de fuga cero de secretos.
+//! Local `SQLite` storage with non-blocking async writes,
+//! configurable retention and a zero-leak secret guarantee.
 
 pub mod event;
 pub mod stats;

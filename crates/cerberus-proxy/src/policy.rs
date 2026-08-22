@@ -1,21 +1,20 @@
-//! Política fail-open / fail-closed (§4.7 del build plan).
+//! Fail-open / fail-closed policy (§4.7 of the build plan).
 //!
-//! Si el motor falla (error de compilación, regex, etc.), ¿se bloquea
-//! el request (fail-closed, seguro) o se deja pasar (fail-open,
-//! disponible)?
+//! If the engine fails (compilation error, regex, etc.), is the request
+//! blocked (fail-closed, safe) or let through (fail-open, available)?
 
 use crate::config::FailPolicy;
 
-/// Resultado de evaluar la política de fallo.
+/// Result of evaluating the failure policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyDecision {
-    /// Rechazar el request (fail-closed).
+    /// Reject the request (fail-closed).
     Reject,
-    /// Dejar pasar el request (fail-open).
+    /// Let the request through (fail-open).
     Allow,
 }
 
-/// Evaluar la política de fallo.
+/// Evaluate the failure policy.
 #[must_use]
 pub const fn evaluate(policy: FailPolicy, _error: &str) -> PolicyDecision {
     match policy {

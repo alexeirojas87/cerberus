@@ -1,123 +1,123 @@
 # Evidence Pack — f0/budget-validation-review-security-v2
-- Rol: **REVISOR 3 (Security)**
-- Unidad: **presupuesto-latencia** (segundo intento)
-- Documentos auditados: `evidence/f0/budget-validation.md`, `evidence/f0/decision-motor-matching.md`
-- Código verificado: `crates/spike-scan/src/main.rs:80-87`
-- Veredicto: **PASS** ✅
+- Role: **REVIEWER 3 (Security)**
+- Unit: **latency-budget** (second attempt)
+- Audited documents: `evidence/f0/budget-validation.md`, `evidence/f0/decision-motor-matching.md`
+- Verified code: `crates/spike-scan/src/main.rs:80-87`
+- Verdict: **PASS** ✅
 
-## Resumen
+## Summary
 
-Se verifican las 5 correcciones de seguridad solicitadas + 2 criterios adicionales.
-Todas las correcciones obligatorias están presentes y correctas. 1 observación no
-bloqueante sobre la documentación cuantitativa de la amplificación superlineal.
-
----
-
-## 1. Correcciones de seguridad verificadas
-
-### 1.1 "Fuga cero" → `⏭️ DIFIERE a F1/F5`
-
-| Estado | Detalle |
-|--------|---------|
-| **Criterio** | La fila §5 #6 no debe ser PASS, debe diferir |
-| **Doc** | `budget-validation.md:13` → `⏭️ DIFIERE a F1/F5 — validación cuando el pipeline maneje secretos reales` |
-| **Código** | `spike-proxy-security.md:98-109` confirma 0 `println!` de datos, 0 `dbg!` |
-| **Veredicto** | ✅ **CORRECTO** |
-
-### 1.2 SSRF en tabla de riesgos → F3
-
-| Estado | Detalle |
-|--------|---------|
-| **Criterio** | El hallazgo SSRF de `spike-proxy-security.md:159-166` debe estar en la tabla de propagación |
-| **Doc** | `budget-validation.md:60` → `Upstream configurable sin restricción → SSRF potencial | 🟢 Info | spike-proxy-security.md:159-166 | F3` |
-| **Veredicto** | ✅ **CORRECTO** — propagado a F3 con severidad 🟢 Info y origen |
-
-### 1.3 `--engine invalid` stale eliminado/actualizado
-
-| Estado | Detalle |
-|--------|---------|
-| **Criterio** | El `--engine invalid` con fallback silencioso a Hybrid debe estar corregido o actualizado |
-| **Doc** | `budget-validation.md:24` → `error 'invalid engine 'X' (expected 'regex' or 'hybrid')' + exit(1) (main.rs:80-87). Fix ya aplicado en spike-escaneo-fix; sin fallback silencioso.` |
-| **Código** | `main.rs:80-87` → `eprintln!("invalid engine '{other}' (expected 'regex' or 'hybrid')"); std::process::exit(1);` — sin catch-all, sin fallback silencioso |
-| **Veredicto** | ✅ **CORRECTO** — el stale está eliminado; el código confirma el fix |
-
-### 1.4 Ventana regex no acotada → 🟠 Medium, acción F1
-
-| Estado | Detalle |
-|--------|---------|
-| **Criterio** | Severidad 🟠 Medium, acción F1: fuzzing prefijado + ventana acotada 128-1024 B |
-| **Doc** | `budget-validation.md:61` → `🟠 Medium | spike-escaneo-performance-v2.md:36-39, engine_hybrid.rs:115-117 | F1 — expandir fuzzing ReDoS con patrones prefijados + payloads sin match; acotar ventana post-AC a 128–1024 bytes` |
-| **Veredicto** | ✅ **CORRECTO** — severidad, origen, acción y destino correctos |
+The 5 requested security corrections + 2 additional criteria are verified.
+All mandatory corrections are present and correct. 1 non-blocking observation
+on the quantitative documentation of superlinear amplification.
 
 ---
 
-## 2. Criterio Sin ReDoS — honestidad del registro
+## 1. Verified security corrections
 
-| Subcriterio | Doc | Veredicto |
+### 1.1 "Zero leakage" → `⏭️ DEFERRED to F1/F5`
+
+| Status | Detail |
+|--------|---------|
+| **Criterion** | The §5 #6 row must not be PASS, it must defer |
+| **Doc** | `budget-validation.md:13` → `⏭️ DEFERRED to F1/F5 — validation when the pipeline handles real secrets` |
+| **Code** | `spike-proxy-security.md:98-109` confirms 0 data `println!`, 0 `dbg!` |
+| **Verdict** | ✅ **CORRECT** |
+
+### 1.2 SSRF in risks table → F3
+
+| Status | Detail |
+|--------|---------|
+| **Criterion** | The SSRF finding from `spike-proxy-security.md:159-166` must be in the propagation table |
+| **Doc** | `budget-validation.md:60` → `Configurable upstream without restriction → potential SSRF \| 🟢 Info \| spike-proxy-security.md:159-166 \| F3` |
+| **Verdict** | ✅ **CORRECT** — propagated to F3 with severity 🟢 Info and origin |
+
+### 1.3 `--engine invalid` stale removed/updated
+
+| Status | Detail |
+|--------|---------|
+| **Criterion** | The `--engine invalid` with silent fallback to Hybrid must be corrected or updated |
+| **Doc** | `budget-validation.md:24` → `error 'invalid engine 'X' (expected 'regex' or 'hybrid')' + exit(1) (main.rs:80-87). Fix already applied in spike-escaneo-fix; no silent fallback.` |
+| **Code** | `main.rs:80-87` → `eprintln!("invalid engine '{other}' (expected 'regex' or 'hybrid')"); std::process::exit(1);` — no catch-all, no silent fallback |
+| **Verdict** | ✅ **CORRECT** — the stale is removed; the code confirms the fix |
+
+### 1.4 Unbounded regex window → 🟠 Medium, F1 action
+
+| Status | Detail |
+|--------|---------|
+| **Criterion** | Severity 🟠 Medium, F1 action: prefixed fuzzing + bounded window 128-1024 B |
+| **Doc** | `budget-validation.md:61` → `🟠 Medium \| spike-escaneo-performance-v2.md:36-39, engine_hybrid.rs:115-117 \| F1 — expand ReDoS fuzzing with prefixed patterns + non-matching payloads; bound post-AC window to 128–1024 bytes` |
+| **Verdict** | ✅ **CORRECT** — severity, origin, action, and destination correct |
+
+---
+
+## 2. No ReDoS criterion — honesty of the record
+
+| Subcriterion | Doc | Verdict |
 |---|---|---|
-| Reconoce que F0 no cubrió la ruta híbrida prefijada | `budget-validation.md:32` → `Caveat: la ruta híbrida prefijada con ventana no acotada puede amplificar superlinealmente (riesgo propagado a F1, ver tabla)`. El spike (`spike-escaneo-security-v2.md:36`) confirma: los 3 patrones ReDoS testeados tienen `extract_prefix() = None` → solo cubren ruta unprefixed. | ✅ **SÍ** — caveat explícito, con referencia a la tabla de propagación |
-| Amplificación superlineal como 🟠 Medium a expandir en F1 | `budget-validation.md:61` → riesgo con `O(N_hits × L_payload)`, 🟠 Medium, F1 con fuzzing prefijado + ventana acotada | ✅ **SÍ** — cualitativamente correcto |
-| Números específicos (3.3 ms @100KB, 337 ms @1MB) | **No aparecen** en `budget-validation.md` ni en `spike-escaneo-performance-v2.md` ni en ningún archivo del worktree. | ⚠️ **NO** — los números no están registrados |
+| Acknowledges that F0 did not cover the prefixed hybrid route | `budget-validation.md:32` → `Caveat: the prefixed hybrid route with unbounded window can amplify superlinearly (risk propagated to F1, see table)`. The spike (`spike-escaneo-security-v2.md:36`) confirms: the 3 ReDoS patterns tested have `extract_prefix() = None` → they only cover the unprefixed route. | ✅ **YES** — explicit caveat, with reference to the propagation table |
+| Superlinear amplification as 🟠 Medium to expand in F1 | `budget-validation.md:61` → risk with `O(N_hits × L_payload)`, 🟠 Medium, F1 with prefixed fuzzing + bounded window | ✅ **YES** — qualitatively correct |
+| Specific numbers (3.3 ms @100KB, 337 ms @1MB) | **Do not appear** in `budget-validation.md` nor in `spike-escaneo-performance-v2.md` nor in any file in the worktree. | ⚠️ **NO** — the numbers are not recorded |
 
-**Observación**: El registro del riesgo es honesto en cuanto a la existencia, severidad,
-mecanismo (`O(N_hits × L_payload)`) y propagación, pero omite la evidencia cuantitativa
-de la amplificación. Los números 3.3 ms @100KB y 337 ms @1MB no figuran en ningún
-documento del worktree. Esto no invalida el veredicto, pero la trazabilidad cuantitativa
-quedaría fortalecida si se incluyeran.
+**Observation**: The risk record is honest regarding existence, severity,
+mechanism (`O(N_hits × L_payload)`), and propagation, but omits the quantitative
+evidence of the amplification. The numbers 3.3 ms @100KB and 337 ms @1MB do not
+appear in any document in the worktree. This does not invalidate the verdict, but
+quantitative traceability would be strengthened if they were included.
 
 ---
 
-## 3. Decisión del motor — sin riesgo nuevo
+## 3. Engine decision — no new risk
 
-| Aspecto | Detalle | Veredicto |
+| Aspect | Detail | Verdict |
 |---------|---------|-----------|
-| Motor seleccionado | `regex` crate + Aho-Corasick prefilter (Plan B) | — |
-| Riesgo nuevo introducido | Ninguno. El riesgo de ventana no acotada en la ruta híbrida prefijada ya está documentado en `budget-validation.md:61` y propagado a F1 | ✅ **SIN RIESGO NUEVO** |
-| Vectorscan | Descartado por falta de cmake, queda como optimización futura | — |
-| Decisión clara | `decision-motor-matching.md:48-54` → tabla con estados y motivos | ✅ **SÍ** |
+| Selected engine | `regex` crate + Aho-Corasick prefilter (Plan B) | — |
+| New risk introduced | None. The unbounded window risk in the prefixed hybrid route is already documented in `budget-validation.md:61` and propagated to F1 | ✅ **NO NEW RISK** |
+| Vectorscan | Discarded due to lack of cmake, remains a future optimization | — |
+| Clear decision | `decision-motor-matching.md:48-54` → table with statuses and reasons | ✅ **YES** |
 
 ---
 
-## 4. Propagación de riesgos — tabla completa
+## 4. Risk propagation — complete table
 
-| Hallazgo origen | Riesgo | Severidad | Propagar | En doc | Veredicto |
+| Origin finding | Risk | Severity | Propagate | In doc | Verdict |
 |---|---|---|---|---|---|
-| `spike-proxy-correctness.md:41-51` | Proxy sin 502 ante upstream caído | 🔴 Debe corregirse | F3 | `budget-validation.md:56` | ✅ |
-| `spike-proxy-security.md:134-139` | Sin límite de body → DoS por memoria | 🟠 Medium | F3 | `budget-validation.md:57` | ✅ |
-| `spike-proxy-security.md:141-148` | Sin timeouts → socket leak | 🟠 Medium | F3 | `budget-validation.md:58` | ✅ |
-| `spike-proxy-security.md:150-157` | Headers reenviados sin sanitizar | 🟡 Low | F3 | `budget-validation.md:59` | ✅ |
-| `spike-proxy-security.md:159-166` | Upstream sin restricción → SSRF | 🟢 Info | F3 | `budget-validation.md:60` | ✅ |
-| `spike-escaneo-performance-v2.md:36-39` | Ventana regex no acotada → amplificación superlineal | 🟠 Medium | F1 | `budget-validation.md:61` | ✅ |
+| `spike-proxy-correctness.md:41-51` | Proxy without 502 on upstream down | 🔴 Must fix | F3 | `budget-validation.md:56` | ✅ |
+| `spike-proxy-security.md:134-139` | No body limit → memory DoS | 🟠 Medium | F3 | `budget-validation.md:57` | ✅ |
+| `spike-proxy-security.md:141-148` | No timeouts → socket leak | 🟠 Medium | F3 | `budget-validation.md:58` | ✅ |
+| `spike-proxy-security.md:150-157` | Headers forwarded without sanitization | 🟡 Low | F3 | `budget-validation.md:59` | ✅ |
+| `spike-proxy-security.md:159-166` | Upstream without restriction → SSRF | 🟢 Info | F3 | `budget-validation.md:60` | ✅ |
+| `spike-escaneo-performance-v2.md:36-39` | Unbounded regex window → superlinear amplification | 🟠 Medium | F1 | `budget-validation.md:61` | ✅ |
 
-**Todos los hallazgos del spike-proxy (5) y del spike-escaneo (1) están propagados.** ✅
+**All findings from spike-proxy (5) and spike-escaneo (1) are propagated.** ✅
 
 ---
 
-## 5. Hallazgos adicionales
+## 5. Additional findings
 
-| # | Hallazgo | Severidad | Archivo |
+| # | Finding | Severity | File |
 |---|---|---|---|
-| 1 | Números de amplificación superlineal (3.3 ms @100KB, 337 ms @1MB) no registrados en ningún doc del worktree — la evidencia cuantitativa del riesgo 🟠 Medium queda incompleta | 🟢 Info (observación) | `budget-validation.md:61` |
-| 2 | `budget-validation.md` dice "Intento: 1" pero el task indica que es el segundo intento — inconsistencia cosmética en el encabezado | 🟢 Info | `budget-validation.md:2` |
+| 1 | Superlinear amplification numbers (3.3 ms @100KB, 337 ms @1MB) not recorded in any doc in the worktree — the quantitative evidence of the 🟠 Medium risk remains incomplete | 🟢 Info (observation) | `budget-validation.md:61` |
+| 2 | `budget-validation.md` says "Attempt: 1" but the task indicates it is the second attempt — cosmetic inconsistency in the header | 🟢 Info | `budget-validation.md:2` |
 
 ---
 
-## Veredicto final
+## Final verdict
 
-**PASS** ✅ — Las 5 correcciones de seguridad requeridas están presentes y correctas:
+**PASS** ✅ — The 5 required security corrections are present and correct:
 
-| Criterio | Resultado |
+| Criterion | Result |
 |---|---|
-| 1. Fuga cero → DIFIERE a F1/F5 | ✅ |
-| 2. SSRF en tabla de riesgos → F3 | ✅ |
-| 3. `--engine invalid` stale eliminado/actualizado | ✅ (código confirma fix) |
-| 4. Ventana regex no acotada 🟠 Medium, acción F1 (fuzzing prefijado + ventana 128-1024 B) | ✅ |
-| 5. Sin ReDoS — registro honesto del caveat (ruta prefijada no cubierta por fuzzing F0) | ✅ (con observación: faltan números 3.3/337 ms) |
-| 6. Decisión del motor sin riesgo nuevo | ✅ |
-| 7. Propagación de riesgos completa (6 hallazgos, 6 filas) | ✅ |
+| 1. Zero leakage → DEFERRED to F1/F5 | ✅ |
+| 2. SSRF in risks table → F3 | ✅ |
+| 3. `--engine invalid` stale removed/updated | ✅ (code confirms fix) |
+| 4. Unbounded regex window 🟠 Medium, F1 action (prefixed fuzzing + window 128-1024 B) | ✅ |
+| 5. No ReDoS — honest record of the caveat (prefixed route not covered by F0 fuzzing) | ✅ (with observation: 3.3/337 ms numbers missing) |
+| 6. Engine decision with no new risk | ✅ |
+| 7. Complete risk propagation (6 findings, 6 rows) | ✅ |
 
-**Cierre**: El documento `budget-validation.md` y `decision-motor-matching.md` cumplen
-los criterios de seguridad del Gauntlet. El riesgo de amplificación superlineal por
-ventana no acotada está correctamente identificado, severizado 🟠 Medium, y propagado
-a F1 con acción concreta. La omisión de los números cuantitativos (3.3/337 ms) es una
-observación no bloqueante que no afecta la validez del veredicto.
+**Closure**: The documents `budget-validation.md` and `decision-motor-matching.md` meet
+the Gauntlet's security criteria. The risk of superlinear amplification due to
+an unbounded window is correctly identified, classified as 🟠 Medium, and propagated
+to F1 with a concrete action. The omission of the quantitative numbers (3.3/337 ms) is a
+non-blocking observation that does not affect the validity of the verdict.

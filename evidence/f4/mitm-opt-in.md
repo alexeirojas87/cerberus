@@ -1,129 +1,129 @@
 # Evidence Pack — F4/mitm-opt-in
 
-- Fecha: 2026-08-21
-- Intento: 6 — FIX loop del P1 de admisión/shutdown reproducido por el review Codex
-- Builder/verificación ejecutada: Orca task `task_0d3e85ca25d6`
-- Veredicto del FIX focalizado: **PASS del builder**
-- Gate Gauntlet: **pendiente de nueva verificación independiente**; este FIX no cierra la unidad ni reemplaza las evidencias de los revisores
+- Date: 2026-08-21
+- Attempt: 6 — FIX loop of the admission/shutdown P1 reproduced by the Codex review
+- Builder/verification executed: Orca task `task_0d3e85ca25d6`
+- Focused FIX verdict: **builder PASS**
+- Gauntlet gate: **pending new independent verification**; this FIX does not close the unit nor replace the reviewers' evidence
 
-## Evidencia del FIX loop — intento 6
+## FIX loop evidence — attempt 6
 
-| Punto corregido/diagnosticado | Comando ejecutado | Salida citada | Resultado |
+| Corrected/diagnosed point | Command executed | Quoted output | Result |
 |---|---|---|---|
-| Reproducción con el test original de 128 sockets y backlog implícito de Tokio/mio (128) | loop `rtk cargo test -p cerberus-proxy connection_limit_covers_active_connect_tunnels_and_recovers_capacity` ×50 | `BASELINE_SUMMARY runs=50 failures=2`; iteración 37: `CONNECT 60/128 ETIMEDOUT`, snapshot `accepted=permits_acquired=jobs_enqueued=jobs_started=60`, `permits_available=68`; iteración 38: índice 117 y 11 permisos libres | ❌ reproducido |
-| Hipótesis backlog | `TcpSocket::listen(256)` + mismo test original ×100 | `FIX_SUMMARY runs=100 failures=5` (35/37/67/74/80); en cada fallo `accepted == permits == enqueued == started == índice` y quedaban permisos | ❌ backlog 256 por sí solo no resuelve el loop; no era la causa del ETIMEDOUT |
-| Causa validada y test corregido sin ocultar cobertura | lifecycle repetible reserva 112 permits en proceso y ejercita 16 CONNECT reales; stress separado abre 128 CONNECT reales simultáneos con `Barrier` | el fallo siempre ocurre antes de `accept`, nunca por límite/jobs; reducir sólo el churn por corrida elimina el patrón: lifecycle `100/100`, mientras el stress nominal real pasa `10/10` | ✅ |
-| Admisión nominal real y backlog explícito | `rtk cargo test -p cerberus-proxy nominal_connect_capacity_is_admitted_under_concurrent_stress` ×10 | `STRESS_SUMMARY runs=10 failures=0`; por corrida `accepted=permits_acquired=jobs_enqueued=jobs_started=active_tunnels=128`, `permits_available=0`; al cerrar, 128 permisos disponibles | ✅ |
-| Barrera determinista `send(job) → encolado/no iniciado → shutdown` | `rtk cargo test -p cerberus-proxy shutdown_drains_a_tunnel_job_enqueued_before_it_can_start` ×50 | `SHUTDOWN_SUMMARY runs=50 failures=0`; pre-shutdown `enqueued=1`, `started=completed=0`, `active=1`, 127 permisos; post-shutdown `started=completed=1`, `active=0`, 128 permisos y EOF | ✅ |
-| Forward/MITM focal | `rtk cargo test -p cerberus-proxy forward::tests --no-fail-fast`; `rtk cargo test -p cerberus --bin cerberus mitm::tests` | `20 passed, 155 filtered out`; `8 passed, 48 filtered out` | ✅ |
-| Suite proxy | `rtk cargo test -p cerberus-proxy --no-fail-fast` | `175 passed (3 suites)` | ✅ |
-| Suite binario/daemon | `rtk cargo test -p cerberus --no-fail-fast` | `69 passed (5 suites)` | ✅ |
-| Workspace | `rtk cargo test --workspace --no-fail-fast` | corrida final: `585 passed (33 suites, 40.96s)` | ✅ |
-| Build/fmt/clippy | `rtk cargo build --workspace --locked`; `rtk cargo fmt --all -- --check`; `rtk cargo clippy --workspace --all-targets -- -D warnings`; `rtk git diff --check` | build exit 0; fmt/diff-check sin salida; clippy `No issues found` | ✅ |
+| Reproduction with the original 128-socket test and Tokio/mio implicit backlog (128) | loop `rtk cargo test -p cerberus-proxy connection_limit_covers_active_connect_tunnels_and_recovers_capacity` ×50 | `BASELINE_SUMMARY runs=50 failures=2`; iteration 37: `CONNECT 60/128 ETIMEDOUT`, snapshot `accepted=permits_acquired=jobs_enqueued=jobs_started=60`, `permits_available=68`; iteration 38: index 117 and 11 free permits | ❌ reproduced |
+| Backlog hypothesis | `TcpSocket::listen(256)` + same original test ×100 | `FIX_SUMMARY runs=100 failures=5` (35/37/67/74/80); on each failure `accepted == permits == enqueued == started == index` and permits remained | ❌ backlog 256 alone does not resolve the loop; it was not the cause of the ETIMEDOUT |
+| Validated cause and corrected test without hiding coverage | repeatable lifecycle reserves 112 permits in-process and exercises 16 real CONNECTs; separate stress opens 128 simultaneous real CONNECTs with a `Barrier` | the failure always occurs before `accept`, never due to limit/jobs; reducing only the churn per run eliminates the pattern: lifecycle `100/100`, while the real nominal stress passes `10/10` | ✅ |
+| Real nominal admission and explicit backlog | `rtk cargo test -p cerberus-proxy nominal_connect_capacity_is_admitted_under_concurrent_stress` ×10 | `STRESS_SUMMARY runs=10 failures=0`; per run `accepted=permits_acquired=jobs_enqueued=jobs_started=active_tunnels=128`, `permits_available=0`; on close, 128 permits available | ✅ |
+| Deterministic barrier `send(job) → enqueued/not started → shutdown` | `rtk cargo test -p cerberus-proxy shutdown_drains_a_tunnel_job_enqueued_before_it_can_start` ×50 | `SHUTDOWN_SUMMARY runs=50 failures=0`; pre-shutdown `enqueued=1`, `started=completed=0`, `active=1`, 127 permits; post-shutdown `started=completed=1`, `active=0`, 128 permits and EOF | ✅ |
+| Forward/MITM focus | `rtk cargo test -p cerberus-proxy forward::tests --no-fail-fast`; `rtk cargo test -p cerberus --bin cerberus mitm::tests` | `20 passed, 155 filtered out`; `8 passed, 48 filtered out` | ✅ |
+| Proxy suite | `rtk cargo test -p cerberus-proxy --no-fail-fast` | `175 passed (3 suites)` | ✅ |
+| Binary/daemon suite | `rtk cargo test -p cerberus --no-fail-fast` | `69 passed (5 suites)` | ✅ |
+| Workspace | `rtk cargo test --workspace --no-fail-fast` | final run: `585 passed (33 suites, 40.96s)` | ✅ |
+| Build/fmt/clippy | `rtk cargo build --workspace --locked`; `rtk cargo fmt --all -- --check`; `rtk cargo clippy --workspace --all-targets -- -D warnings`; `rtk git diff --check` | build exit 0; fmt/diff-check no output; clippy `No issues found` | ✅ |
 
-### Causa y diseño comprobable del intento 6
+### Cause and verifiable design of attempt 6
 
-- La instrumentación `índice/accept/permits/jobs` descartó el owner loop: en todos los ETIMEDOUT, el último índice aceptado coincidía exactamente con permits adquiridos, jobs encolados e iniciados, y quedaban entre 4 y 97 permits. El SYN fallido nunca alcanzó `listener.accept()`.
-- El test anterior creaba 130 sockets loopback por proceso y el loop adversarial los repetía sin pausa. En macOS ese churn acaba sufriendo throttling/presión TCP local y devuelve ETIMEDOUT aunque el listener y sus permits estén sanos. Los A/B con backlog 256, `SO_REUSEADDR`, zero-linger y puertos fuente fijos siguieron fallando alrededor de las iteraciones 23/37; esos experimentos temporales se retiraron. El A/B que sí elimina el fallo es separar lifecycle repetible (18 conexiones reales por corrida, 100/100) de admisión nominal (128 reales concurrentes, 10/10).
-- El listener de producción sí queda endurecido con `TcpSocket::listen(256)`, margen explícito mayor que `MAX_CONNECTIONS=128`. No se atribuye falsamente a este cambio el arreglo del loop; el stress concurrente demuestra que admite los 128 nominales.
-- `ForwardTestState` es sólo `cfg(test)` y registra accepts, permits y estados enqueued/started/completed. La barrera pausa el branch receptor del canal sin sleeps; shutdown cierra el receiver, señala cancelación, drena conexiones, arranca el job ya encolado dentro del `JoinSet` y espera su finalización. No queda job detached.
-- Se eliminó `ForwardState::tunnel_done`, estado muerto que no tenía lecturas ni participaba en el drain.
+- The `index/accept/permits/jobs` instrumentation ruled out the owner loop: in all ETIMEDOUTs, the last accepted index exactly matched permits acquired, jobs enqueued and started, and between 4 and 97 permits remained. The failed SYN never reached `listener.accept()`.
+- The previous test created 130 loopback sockets per process and the adversarial loop repeated them without pause. On macOS that churn eventually suffers local TCP throttling/pressure and returns ETIMEDOUT even though the listener and its permits are healthy. The A/B tests with backlog 256, `SO_REUSEADDR`, zero-linger and fixed source ports kept failing around iterations 23/37; those temporary experiments were removed. The A/B that does eliminate the failure is separating repeatable lifecycle (18 real connections per run, 100/100) from nominal admission (128 real concurrent, 10/10).
+- The production listener is indeed hardened with `TcpSocket::listen(256)`, an explicit margin greater than `MAX_CONNECTIONS=128`. The loop fix is not falsely attributed to this change; the concurrent stress demonstrates it admits the 128 nominal ones.
+- `ForwardTestState` is `cfg(test)` only and records accepts, permits and enqueued/started/completed states. The barrier pauses the channel's receiving branch without sleeps; shutdown closes the receiver, signals cancellation, drains connections, starts the already-enqueued job within the `JoinSet` and waits for its completion. No job remains detached.
+- `ForwardState::tunnel_done` was removed — dead state that had no reads and did not participate in the drain.
 
-### Estado Gauntlet del intento 6
+### Gauntlet status of attempt 6
 
-- Este es un Evidence Pack del builder/fixer. El P1 reproducido queda corregido y verificado localmente, pero la unidad **no se declara cerrada**.
-- Falta un re-review adversarial independiente que repita los comandos y emita su propio PASS/FAIL. Los archivos de evidencia de revisores permanecen intactos.
+- This is a builder/fixer Evidence Pack. The reproduced P1 is corrected and verified locally, but the unit **is not declared closed**.
+- An independent adversarial re-review that repeats the commands and issues its own PASS/FAIL is still missing. The reviewer evidence files remain untouched.
 
-## Evidencia histórica del segundo FIX — intento 5
+## Historical evidence of the second FIX — attempt 5
 
-| Punto corregido | Comando ejecutado | Salida citada | Resultado |
+| Corrected point | Command executed | Quoted output | Result |
 |---|---|---|---|
-| PEM estricto: un único `CERTIFICATE`, una única `PRIVATE KEY`, sólo whitespace fuera; rechaza duplicados/chain/tags incorrectos/garbage/DER/random/non-CA | `rtk cargo test -p cerberus-proxy ca_loader_consumes_exactly_one_pem_block_and_rejects_garbage` + `... ca_loader_rejects_non_ca_and_cross_algorithm_mismatches` | ambos PASS; suite `forward::tests`: `18 passed, 155 filtered out` | ✅ |
-| Mismatch de clave, incluido EC-cert/RSA-key y RSA-cert/EC-key; comparación de SPKI DER completa | mismos tests + `mismatched_ca_pair_fails_closed_before_listener_bind` | fixture RSA válida como control; ambos cruces devuelven `does not match`; mismatch falla con puerto ocupado antes del bind | ✅ |
-| `status`, `enable` y config efectiva del daemon rechazan material extra antes de arrancar | `rtk cargo test -p cerberus --bin cerberus mitm::tests` | `8 passed, 48 filtered out`; `strict_ca_material_is_rejected_by_status_enable_and_daemon_runtime` PASS | ✅ |
-| CA importada no se re-firma: `rcgen 0.14.9` usa `Issuer::from_ca_cert_der` y leaf `CertificateParams::signed_by` | `rtk cargo tree -i rcgen --locked` + suite TLS | una sola versión `rcgen v0.14.9`; TLS CONNECT firmado por la identidad persistida PASS | ✅ |
-| Toolchain/lock | `rtk rustc --version`; `rtk cargo info rcgen@0.14.9`; `rtk cargo metadata --locked --no-deps --format-version 1`; `rtk cargo tree -i x509-parser --locked` | Rust `1.97.1`; rcgen declara MSRV `1.88`; repo/CI usa `stable`; lock resuelve `rcgen 0.14.9` y una única `x509-parser 0.18.1` | ✅ |
-| Límite real durante toda la vida del CONNECT/TLS/HTTP; 129.º no recibe 200 y capacidad vuelve al liberar uno | `rtk cargo test -p cerberus-proxy connection_limit_covers_active_connect_tunnels_and_recovers_capacity` ×20 | `20/20`: cada corrida `1 passed`; sin sleeps | ✅ |
-| Shutdown cancela cliente estancado antes de ClientHello y supervisa túneles hasta finalizar | `rtk cargo test -p cerberus-proxy shutdown_cancels_connect_stalled_before_client_hello` ×20 | `20/20`: cada corrida `1 passed`; `shutdown(500 ms)` devuelve `Ok` y el socket queda EOF | ✅ |
-| Shadow CONNECT+TLS: pass-through byte-a-byte + evento sin secreto | `rtk cargo test -p cerberus-proxy connect_tls_` ×10 | `10/10`, cinco E2E TLS por corrida; shadow recibió body original y `events.len() == 1`, `no_raw_values == true` | ✅ |
-| JSON inválido y fallo real de redacción bajo Closed/Open | mismo filtro ×10 | Closed → 502 y upstream sin request; Open → 200 y upstream recibe body original; respuestas/audit no contienen valores crudos | ✅ |
-| Suite proxy | `rtk cargo test -p cerberus-proxy --no-fail-fast` | `173 passed (3 suites)` | ✅ |
-| Suite binario/daemon | `rtk cargo test -p cerberus --no-fail-fast` | re-run limpio: `69 passed (5 suites)` | ✅ |
+| Strict PEM: a single `CERTIFICATE`, a single `PRIVATE KEY`, only whitespace outside; rejects duplicates/chain/incorrect tags/garbage/DER/random/non-CA | `rtk cargo test -p cerberus-proxy ca_loader_consumes_exactly_one_pem_block_and_rejects_garbage` + `... ca_loader_rejects_non_ca_and_cross_algorithm_mismatches` | both PASS; suite `forward::tests`: `18 passed, 155 filtered out` | ✅ |
+| Key mismatch, including EC-cert/RSA-key and RSA-cert/EC-key; full SPKI DER comparison | same tests + `mismatched_ca_pair_fails_closed_before_listener_bind` | valid RSA fixture as control; both crosses return `does not match`; mismatch fails with port busy before bind | ✅ |
+| `status`, `enable` and effective daemon config reject extra material before booting | `rtk cargo test -p cerberus --bin cerberus mitm::tests` | `8 passed, 48 filtered out`; `strict_ca_material_is_rejected_by_status_enable_and_daemon_runtime` PASS | ✅ |
+| Imported CA is not re-signed: `rcgen 0.14.9` uses `Issuer::from_ca_cert_der` and leaf `CertificateParams::signed_by` | `rtk cargo tree -i rcgen --locked` + TLS suite | a single `rcgen v0.14.9` version; TLS CONNECT signed by the persisted identity PASS | ✅ |
+| Toolchain/lock | `rtk rustc --version`; `rtk cargo info rcgen@0.14.9`; `rtk cargo metadata --locked --no-deps --format-version 1`; `rtk cargo tree -i x509-parser --locked` | Rust `1.97.1`; rcgen declares MSRV `1.88`; repo/CI uses `stable`; lock resolves `rcgen 0.14.9` and a single `x509-parser 0.18.1` | ✅ |
+| Real limit throughout the CONNECT/TLS/HTTP lifetime; the 129th does not get a 200 and capacity returns when one is released | `rtk cargo test -p cerberus-proxy connection_limit_covers_active_connect_tunnels_and_recovers_capacity` ×20 | `20/20`: each run `1 passed`; no sleeps | ✅ |
+| Shutdown cancels a stalled client before ClientHello and supervises tunnels until completion | `rtk cargo test -p cerberus-proxy shutdown_cancels_connect_stalled_before_client_hello` ×20 | `20/20`: each run `1 passed`; `shutdown(500 ms)` returns `Ok` and the socket is EOF | ✅ |
+| Shadow CONNECT+TLS: byte-by-byte pass-through + event without secret | `rtk cargo test -p cerberus-proxy connect_tls_` ×10 | `10/10`, five E2E TLS per run; shadow received original body and `events.len() == 1`, `no_raw_values == true` | ✅ |
+| Invalid JSON and real redaction failure under Closed/Open | same filter ×10 | Closed → 502 and upstream without request; Open → 200 and upstream receives original body; responses/audit do not contain raw values | ✅ |
+| Proxy suite | `rtk cargo test -p cerberus-proxy --no-fail-fast` | `173 passed (3 suites)` | ✅ |
+| Binary/daemon suite | `rtk cargo test -p cerberus --no-fail-fast` | clean re-run: `69 passed (5 suites)` | ✅ |
 | Workspace | `rtk cargo test --workspace --no-fail-fast` | `583 passed (33 suites, 38.84s)` | ✅ |
-| Build/fmt/clippy | `rtk cargo build -p cerberus-proxy -p cerberus --locked`; `rtk cargo fmt --all -- --check`; `rtk cargo clippy -p cerberus-proxy -p cerberus --all-targets -- -D warnings`; `rtk git diff --check` | build exit 0; fmt/diff-check sin salida; clippy `No issues found` | ✅ |
-| Presupuesto p99 | `rtk proxy cargo test --release --test load_test -- --nocapture` | `7 passed`; peor p99 `1.313 ms` (decode+scan), resto `0.667–1.086 ms`, presupuesto `<5 ms` | ✅ |
+| Build/fmt/clippy | `rtk cargo build -p cerberus-proxy -p cerberus --locked`; `rtk cargo fmt --all -- --check`; `rtk cargo clippy -p cerberus-proxy -p cerberus --all-targets -- -D warnings`; `rtk git diff --check` | build exit 0; fmt/diff-check no output; clippy `No issues found` | ✅ |
+| p99 budget | `rtk proxy cargo test --release --test load_test -- --nocapture` | `7 passed`; worst p99 `1.313 ms` (decode+scan), rest `0.667–1.086 ms`, budget `<5 ms` | ✅ |
 
-### Diseño comprobable del intento 5
+### Verifiable design of attempt 5
 
-- El loader recorta sólo whitespace exterior, exige los delimitadores exactos y consume el primer end marker como final del archivo; cualquier byte no-whitespace, segundo bloque o tag distinto falla.
-- El X.509 único debe tener `BasicConstraints CA:TRUE`. La clave única debe ser PKCS#8 `PRIVATE KEY` soportada por el backend ring de rcgen. Se compara `SubjectPublicKeyInfo.raw` del certificado con `PublicKeyData::subject_public_key_info()` de la clave, incluidos `AlgorithmIdentifier` y bit string.
-- `LocalCa` ya no contiene un `Certificate` reemitido ni llama `self_signed` al importar. Contiene `Issuer<'static, KeyPair>` creado directamente desde el DER persistido; sólo las leaf efímeras se generan y firman.
-- Cada accept adquiere un `OwnedSemaphorePermit`. Un CONNECT válido lo toma de la conexión y lo guarda en `TunnelGuard`; un request inválido lo conserva hasta cerrar esa conexión. Así no existe doble conteo ni liberación al terminar el upgrade Hyper.
-- Los túneles se entregan por canal al `JoinSet` propietario del listener. El shutdown cierra el canal, señala cancelación, drena conexiones, agenda jobs ya encolados y espera todos los túneles; TLS accept selecciona señal de shutdown y timeout de 10 s.
-- Se mantienen los controles previos: listener loopback, authority exacto, CONNECT sólo a 443, destino fijado por allowlist, `DirectUpstream` impide exposición del control plane y ninguna operación confía la CA automáticamente.
+- The loader trims only outer whitespace, requires exact delimiters and consumes the first end marker as the file's end; any non-whitespace byte, second block, or different tag fails.
+- The single X.509 must have `BasicConstraints CA:TRUE`. The single key must be PKCS#8 `PRIVATE KEY` supported by rcgen's ring backend. The certificate's `SubjectPublicKeyInfo.raw` is compared against the key's `PublicKeyData::subject_public_key_info()`, including `AlgorithmIdentifier` and bit string.
+- `LocalCa` no longer contains a reissued `Certificate` nor calls `self_signed` on import. It contains an `Issuer<'static, KeyPair>` created directly from the persisted DER; only ephemeral leaves are generated and signed.
+- Each accept acquires an `OwnedSemaphorePermit`. A valid CONNECT takes it from the connection and stores it in `TunnelGuard`; an invalid request keeps it until that connection closes. Thus there is no double counting or release when the Hyper upgrade ends.
+- Tunnels are delivered by channel to the `JoinSet` that owns the listener. Shutdown closes the channel, signals cancellation, drains connections, schedules already-enqueued jobs and waits for all tunnels; TLS accept selects on the shutdown signal and a 10 s timeout.
+- Previous controls are kept: loopback listener, exact authority, CONNECT only to 443, destination fixed by allowlist, `DirectUpstream` prevents control plane exposure, and no operation trusts the CA automatically.
 
-### Observaciones del Gauntlet
+### Gauntlet observations
 
-- La primera corrida de `rtk cargo test -p cerberus --no-fail-fast` tuvo un fallo aislado fuera del cambio en `platform::tests::process_alive_true_for_current_process`; el test focal pasó 10/10 inmediatamente y la suite completa posterior pasó `69/69`. La corrida workspace posterior también pasó `583/583`.
-- Se eliminó `.scratch/mitm-recheck` (156 KiB) tras confirmar en el re-review OpenCode que era HOME/material temporal de esa revisión; contenía únicamente CAs/logs/probe del reviewer, no datos de usuario. No existía `.tmp-f4*`.
-- Los archivos de evidencia de revisores no se editaron. El siguiente paso obligatorio es un VERIFY adversarial fresco según §8B; hasta entonces el gate sigue pendiente.
+- The first run of `rtk cargo test -p cerberus --no-fail-fast` had an isolated failure outside the change in `platform::tests::process_alive_true_for_current_process`; the focused test passed 10/10 immediately and the full subsequent suite passed `69/69`. The subsequent workspace run also passed `583/583`.
+- `.scratch/mitm-recheck` (156 KiB) was removed after confirming in the OpenCode re-review that it was that review's temporary HOME/material; it contained only reviewer CAs/logs/probes, no user data. No `.tmp-f4*` existed.
+- The reviewer evidence files were not edited. The mandatory next step is a fresh adversarial VERIFY per §8B; until then the gate remains pending.
 
-## Evidencia histórica del FIX — intento 4
+## Historical FIX evidence — attempt 4
 
-| P1 corregido | Comando ejecutado | Salida citada | Resultado |
+| Corrected P1 | Command executed | Quoted output | Result |
 |---|---|---|---|
-| Certificado CA A + clave privada CA B se rechazan en `validate_ca_files` y en `spawn_forward_proxy` antes del bind | `rtk cargo test -p cerberus-proxy mismatched_ca_pair_fails_closed_before_listener_bind` | `1 passed, 166 filtered out (2 suites, 0.05s)` | ✅ |
-| Límite de conexiones sincronizado por `watch`, sin `sleep(50 ms)` | `rtk cargo test -p cerberus-proxy connection_limit_drops_excess_client` | `1 passed, 166 filtered out (2 suites, 0.04s)` | ✅ |
-| Regresión focalizada forward completa | `rtk cargo test -p cerberus-proxy forward::tests` | `12 passed, 155 filtered out (2 suites, 0.08s)` | ✅ |
-| Caminos CLI MITM que consumen `validate_ca_files` | `rtk cargo test -p cerberus mitm` | `6 passed, 42 filtered out (4 suites, 0.02s)` | ✅ |
-| Calidad | `rtk cargo clippy -p cerberus-proxy -p cerberus --all-targets -- -D warnings` | `No issues found` | ✅ |
-| Formato | `rtk cargo fmt --all -- --check` | exit 0, sin diff | ✅ |
+| CA certificate A + CA private key B are rejected in `validate_ca_files` and in `spawn_forward_proxy` before bind | `rtk cargo test -p cerberus-proxy mismatched_ca_pair_fails_closed_before_listener_bind` | `1 passed, 166 filtered out (2 suites, 0.05s)` | ✅ |
+| Connection limit synchronized by `watch`, no `sleep(50 ms)` | `rtk cargo test -p cerberus-proxy connection_limit_drops_excess_client` | `1 passed, 166 filtered out (2 suites, 0.04s)` | ✅ |
+| Focused forward regression complete | `rtk cargo test -p cerberus-proxy forward::tests` | `12 passed, 155 filtered out (2 suites, 0.08s)` | ✅ |
+| MITM CLI paths that consume `validate_ca_files` | `rtk cargo test -p cerberus mitm` | `6 passed, 42 filtered out (4 suites, 0.02s)` | ✅ |
+| Quality | `rtk cargo clippy -p cerberus-proxy -p cerberus --all-targets -- -D warnings` | `No issues found` | ✅ |
+| Format | `rtk cargo fmt --all -- --check` | exit 0, no diff | ✅ |
 
-## Criterios de aceptación
+## Acceptance criteria
 
-| Criterio | Comando ejecutado | Salida citada | Resultado |
+| Criterion | Command executed | Quoted output | Result |
 |---|---|---|---|
-| Forward proxy CONNECT/TLS + certificados por host firmados por CA | `rtk cargo test -p cerberus-proxy forward::tests` | `12 passed, 155 filtered out` | ✅ |
-| Allowlist exacta; deniega subdominio, puerto distinto de 443 y HTTP plano | mismo comando | casos `connect_rejects_unlisted_host_wrong_port_and_plain_http` PASS | ✅ |
-| Redacción antes del upstream, target fijado por CONNECT y sin exposición de `/api/*` local | mismo comando | `connect_tls_redacts_before_forwarding_and_audit_has_no_raw_secret` PASS; el upstream de captura recibió el body redactado aunque el request interior usó `/api/stats` y `Host: attacker.invalid` | ✅ |
-| Block fail-closed sin secreto en la respuesta | mismo comando | `connect_tls_uses_host_certificate_and_blocks_without_leaking_secret` PASS (`403`, secreto ausente) | ✅ |
-| CA sólo por acción explícita, sin overwrite/trust automático | mismo comando + `rtk cargo test -p cerberus mitm` | `12 passed`; `6 passed` dentro de la suite de `cerberus` (config ausente → disabled/None, CA create-new) | ✅ |
-| Clave privada y material CA defensivos | mismo comando | 0600 en Unix; permisos 0644, symlink, missing CA, archivos >1 MiB y cert/key de CAs distintas fallan antes del bind | ✅ |
-| Reverse proxy sigue default y config MITM disabled no puede bloquearlo | `rtk cargo test -p cerberus mitm::tests` | config ausente no crea/require CA; config disabled inválido se sanea y produce `None` | ✅ |
-| Integración CLI/daemon y shutdown drenado | `rtk cargo test -p cerberus` | `48 passed (4 suites)` | ✅ |
-| Regresión completa proxy | `rtk cargo test -p cerberus-proxy` | `166 passed (3 suites)` | ✅ |
-| Calidad | `rtk cargo clippy -p cerberus-proxy -p cerberus --all-targets -- -D warnings` | `No issues found` | ✅ |
-| Formato | `rtk cargo fmt --all -- --check` | exit 0, sin diff | ✅ |
-| Build optimizado | `rtk cargo build -p cerberus --release` | `Finished release profile` | ✅ |
-| Presupuesto hot-path p99 < 5 ms | `rtk proxy cargo test --release --test load_test -- --nocapture` | 7/7 PASS; peor p99 observado `0.857 ms` (100 KiB clean), scan+redact `0.795 ms` | ✅ |
-| CLI deja inequívoco el opt-in | `rtk proxy ./target/release/cerberus mitm --help` | `init-ca` dice `NO la instala ni confía`; `enable` exige hosts; `trust-instructions` sólo imprime pasos | ✅ |
+| Forward proxy CONNECT/TLS + per-host certificates signed by CA | `rtk cargo test -p cerberus-proxy forward::tests` | `12 passed, 155 filtered out` | ✅ |
+| Exact allowlist; denies subdomain, port other than 443 and plain HTTP | same command | `connect_rejects_unlisted_host_wrong_port_and_plain_http` cases PASS | ✅ |
+| Redaction before upstream, target fixed by CONNECT and no exposure of local `/api/*` | same command | `connect_tls_redacts_before_forwarding_and_audit_has_no_raw_secret` PASS; the capture upstream received the redacted body even though the inner request used `/api/stats` and `Host: attacker.invalid` | ✅ |
+| Block fail-closed without secret in the response | same command | `connect_tls_uses_host_certificate_and_blocks_without_leaking_secret` PASS (`403`, secret absent) | ✅ |
+| CA only by explicit action, no overwrite/auto-trust | same command + `rtk cargo test -p cerberus mitm` | `12 passed`; `6 passed` within the `cerberus` suite (missing config → disabled/None, CA create-new) | ✅ |
+| Defensive private key and CA material | same command | 0600 on Unix; 0644 permissions, symlink, missing CA, files >1 MiB and cert/key from different CAs fail before bind | ✅ |
+| Reverse proxy remains default and disabled MITM config cannot block it | `rtk cargo test -p cerberus mitm::tests` | missing config does not create/require CA; invalid disabled config is sanitized and produces `None` | ✅ |
+| CLI/daemon integration and drained shutdown | `rtk cargo test -p cerberus` | `48 passed (4 suites)` | ✅ |
+| Complete proxy regression | `rtk cargo test -p cerberus-proxy` | `166 passed (3 suites)` | ✅ |
+| Quality | `rtk cargo clippy -p cerberus-proxy -p cerberus --all-targets -- -D warnings` | `No issues found` | ✅ |
+| Format | `rtk cargo fmt --all -- --check` | exit 0, no diff | ✅ |
+| Optimized build | `rtk cargo build -p cerberus --release` | `Finished release profile` | ✅ |
+| Hot-path p99 budget < 5 ms | `rtk proxy cargo test --release --test load_test -- --nocapture` | 7/7 PASS; worst observed p99 `0.857 ms` (100 KiB clean), scan+redact `0.795 ms` | ✅ |
+| CLI makes the opt-in unambiguous | `rtk proxy ./target/release/cerberus mitm --help` | `init-ca` says `does NOT install or trust`; `enable` requires hosts; `trust-instructions` only prints steps | ✅ |
 
-## Casos adversariales probados
+## Adversarial cases tested
 
-- `CONNECT api.hardcoded.test:443` + TLS confiando únicamente la CA temporal → handshake PASS y certificado SAN válido para ese host.
-- Body con `SUPERSECRET-12345678` y regla `block` → HTTP 403; el secreto no aparece en la respuesta.
-- Body con `TOKEN-12345678` y regla `redact` → upstream local recibe body distinto y sin token crudo; evento de auditoría pasa `no_raw_values`.
-- Request TLS interior intenta `Host: attacker.invalid` → no se reenvía ese Host y el destino continúa fijado por el authority autorizado del CONNECT.
-- Request TLS interior usa `/api/stats` → se envía al upstream autorizado; no alcanza el control plane local.
-- Subdominio no allowlisted, `CONNECT :8443` y request forward HTTP plano → 403/400/405 respectivamente, sin túnel.
-- Listener no-loopback, allowlist vacía, wildcard, IP, URL, credenciales/path/port y más de 64 hosts → validación rechaza.
-- CA ausente, clave legible por grupo/otros o ruta symlink → arranque fail-closed antes de escuchar.
-- Certificado de CA A combinado con clave privada de CA B → comparación SPKI falla tanto en validación como en spawn; el test mantiene el puerto ocupado para demostrar que el error de mismatch ocurre antes de intentar bind.
-- Más de 128 conexiones simultáneas → límite por semaphore; el test espera una marca `watch` emitida por el accept loop al adquirir los 128 permits, sin sleeps ni carreras temporales.
-- Shutdown → cierra admisión y notifica/cancela túneles antes de cerrar el audit store.
+- `CONNECT api.hardcoded.test:443` + TLS trusting only the temp CA → handshake PASS and certificate SAN valid for that host.
+- Body with `SUPERSECRET-12345678` and `block` rule → HTTP 403; the secret does not appear in the response.
+- Body with `TOKEN-12345678` and `redact` rule → local upstream receives a different body without the raw token; audit event passes `no_raw_values`.
+- Inner TLS request tries `Host: attacker.invalid` → that Host is not forwarded and the destination remains fixed by the CONNECT authorized authority.
+- Inner TLS request uses `/api/stats` → sent to the authorized upstream; does not reach the local control plane.
+- Non-allowlisted subdomain, `CONNECT :8443` and plain HTTP forward request → 403/400/405 respectively, no tunnel.
+- Non-loopback listener, empty allowlist, wildcard, IP, URL, credentials/path/port and more than 64 hosts → validation rejects.
+- Missing CA, group/other-readable key or symlink path → fail-closed boot before listening.
+- CA certificate A combined with CA private key B → SPKI comparison fails both in validation and spawn; the test keeps the port busy to show the mismatch error occurs before attempting bind.
+- More than 128 simultaneous connections → limit by semaphore; the test waits for a `watch` mark emitted by the accept loop upon acquiring the 128 permits, without sleeps or time races.
+- Shutdown → closes admission and notifies/cancels tunnels before closing the audit store.
 
-## Diseño/archivos
+## Design/files
 
-- `crates/cerberus-proxy/src/forward.rs`: CA, validación, certificados por host, CONNECT/TLS, límites y lifecycle.
-- `crates/cerberus-proxy/src/proxy.rs`: destino directo inyectado por el CONNECT; reutiliza scan/redact/fail-policy/audit sin aceptar target desde headers internos.
-- `crates/cerberus/src/mitm.rs`: estado/config opt-in, comandos de CA/enable/disable/status e instrucciones manuales.
-- `crates/cerberus/src/main.rs`: CLI `cerberus mitm ...`.
-- `crates/cerberus/src/daemon.rs`: listener forward opcional junto al reverse default y shutdown coordinado.
+- `crates/cerberus-proxy/src/forward.rs`: CA, validation, per-host certificates, CONNECT/TLS, limits and lifecycle.
+- `crates/cerberus-proxy/src/proxy.rs`: direct destination injected by the CONNECT; reuses scan/redact/fail-policy/audit without accepting target from inner headers.
+- `crates/cerberus/src/mitm.rs`: opt-in state/config, CA/enable/disable/status commands and manual instructions.
+- `crates/cerberus/src/main.rs`: `cerberus mitm ...` CLI.
+- `crates/cerberus/src/daemon.rs`: optional forward listener alongside the default reverse and coordinated shutdown.
 
-## Límites y gaps declarados
+## Declared limits and gaps
 
-- La nueva verificación independiente exigida por §8B sigue pendiente; este artefacto documenta el FIX y evidencia reproducible del builder, no cierra el gate de unidad.
-- En esta máquina sólo está instalado el target `aarch64-apple-darwin`; la matriz macOS/Linux/Windows pertenece también a la unidad F4 `windows-support` y no se ejecutó aquí. Rustls/rcgen son portables; en Windows la clave hereda la DACL del perfil del usuario, mientras Unix se valida explícitamente a 0600.
-- No se modifica ningún trust store. Confiar la CA y configurar `HTTPS_PROXY` en la tool son pasos humanos deliberados; una tool que ignore ambos sigue siendo la limitación documentada por el plan.
-- No se llamó a proveedores externos: las pruebas TLS usan upstreams locales deterministas y una ruta bloqueada que nunca debe salir a red.
-- Gap de tooling: TokenSave 7.8.1 marcó `unwrap()` dentro de `#[cfg(test)] mod tests` como `in_test: false` aun con `exclude_tests=true`. Conviene abrir un issue en <https://github.com/aovestdipaperino/tokensave> describiendo esa clasificación; quitar primero cualquier código sensible o propietario del reporte.
+- The new independent verification required by §8B remains pending; this artifact documents the FIX and reproducible builder evidence, it does not close the unit gate.
+- Only the `aarch64-apple-darwin` target is installed on this machine; the macOS/Linux/Windows matrix also belongs to the F4 `windows-support` unit and was not run here. Rustls/rcgen are portable; on Windows the key inherits the user profile's DACL, while Unix is explicitly validated to 0600.
+- No trust store is modified. Trusting the CA and configuring `HTTPS_PROXY` in the tool are deliberate human steps; a tool that ignores both remains the documented plan limitation.
+- No external providers were called: TLS tests use deterministic local upstreams and a blocked route that must never reach the network.
+- Tooling gap: TokenSave 7.8.1 flagged `unwrap()` inside `#[cfg(test)] mod tests` as `in_test: false` even with `exclude_tests=true`. It is worth opening an issue at <https://github.com/aovestdipaperino/tokensave> describing that classification; first remove any sensitive or proprietary code from the report.

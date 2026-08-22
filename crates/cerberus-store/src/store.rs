@@ -13,34 +13,34 @@ use rusqlite::Connection;
 
 use crate::event::AuditEvent;
 
-/// Intervalo mínimo entre purgas de retención (por tiempo, no por conteo).
+/// Minimum interval between retention purges (by time, not by count).
 const PURGE_INTERVAL_SECS: u64 = 60;
 
-/// Capacidad por defecto del canal de escritura (backpressure mitigado):
-/// por encima no se bloquea el hot path, pero se descartan eventos con WARN.
+/// Default capacity of the write channel (backpressure mitigated):
+/// above this the hot path does not block, but events are dropped with WARN.
 const DEFAULT_WRITE_CHANNEL_CAPACITY: usize = 16_384;
 
-/// Timeout por defecto para `flush`/`close`. Cubre la operación COMPLETA:
-/// el *enqueue* de la barrera en el canal bounded MÁS la espera del ACK del
-/// writer (fix review v6.1: antes `send` era bloqueante e ilimitado, así que
-/// un writer atascado con el canal lleno colgaba el shutdown para siempre).
+/// Default timeout for `flush`/`close`. Covers the COMPLETE operation:
+/// enqueuing the barrier into the bounded channel PLUS waiting for the writer
+/// ACK (fix review v6.1: before, `send` was blocking and unbounded, so a
+/// stuck writer with a full channel hung the shutdown forever).
 const DEFAULT_STORE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Espera entre reintentos de `try_send` mientras el canal está lleno durante
-/// el enqueue de una barrera (flush/close). Acotado por el deadline global.
+/// Wait between `try_send` retries while the channel is full during the
+/// enqueue of a barrier (flush/close). Bounded by the global deadline.
 const ENQUEUE_RETRY_BACKOFF: Duration = Duration::from_millis(2);
 
-/// Estado del store (`AuditStore::state`, `AtomicU8`). Las transiciones son
-/// monótonas y atómicas: nunca se vuelve a un estado anterior.
+/// Store state (`AuditStore::state`, `AtomicU8`). Transitions are
+/// monotonic and atomic: it never goes back to a previous state.
 ///
 /// `ACCEPTING` → `CLOSING` → `SHUTDOWN_SENT` → `CLOSED`
 ///
-/// * `ACCEPTING`: admite eventos y barreras.
-/// * `CLOSING`: NO admite eventos nuevos (drenaje ordenado en curso), pero el
-///   writer sigue vivo y `flush` sigue siendo válido.
-/// * `SHUTDOWN_SENT`: la barrera de cierre ya fue emitida por un `close()`;
-///   ningún otro `close`/`flush` puede emitir barreras.
-/// * `CLOSED`: el writer terminó.
+/// * `ACCEPTING`: accepts events and barriers.
+/// * `CLOSING`: does NOT accept new events (orderly drain in progress), but
+///   the writer is still alive and `flush` is still valid.
+/// * `SHUTDOWN_SENT`: the close barrier has already been emitted by a
+///   `close()`; no other `close`/`flush` can emit barriers.
+/// * `CLOSED`: the writer has terminated.
 mod state {
     pub(super) const ACCEPTING: u8 = 0;
     pub(super) const CLOSING: u8 = 1;
@@ -60,17 +60,17 @@ mod state {
 /// Message sent to the writer thread.
 enum WriteMsg {
     Event(Box<AuditEvent>),
-    /// Durability barrier (fix review v4 #6): el writer responde `ack` solo
-    /// después de haber persistido todos los `Event` anteriores (la cola es
-    /// FIFO). Si algún `INSERT` falló desde el último flush, la ack es `Err`
-    /// con el mensaje de error de `SQLite`.
+    /// Durability barrier (fix review v4 #6): the writer replies `ack` only
+    /// after persisting all previous `Event`s (the queue is FIFO). If some
+    /// `INSERT` failed since the last flush, the ack is `Err` with the
+    /// `SQLite` error message.
     Flush {
         ack: mpsc::SyncSender<Result<(), String>>,
     },
-    /// Cierre ordenado del writer (fix review v4 #6b). El ACK transporta el
-    /// último error de persistencia pendiente (fix review v5): si hubo un
-    /// INSERT fallido sin consumir, se entrega como `Err` — `close()` ya no
-    /// confirma éxito cuando se perdió auditoría.
+    /// Orderly writer shutdown (fix review v4 #6b). The ACK carries the
+    /// last pending persistence error (fix review v5): if there was an
+    /// unconsumed failed INSERT, it is delivered as `Err` — `close()` no
+    /// longer confirms success when audit data was lost.
     Shutdown {
         ack: mpsc::SyncSender<Result<(), String>>,
     },
@@ -107,16 +107,16 @@ impl std::fmt::Debug for QueryResult {
     }
 }
 
-/// Resultado (honesto) de un intento de escritura en el hot path.
-/// Los callers pueden ignorarlo; los tests y las métricas lo usan para
-/// distinguir pérdida por disco lento de rechazo por cierre.
+/// (Honest) result of a write attempt on the hot path.
+/// Callers may ignore it; tests and metrics use it to distinguish loss due
+/// to a slow disk from rejection due to shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOutcome {
-    /// Encolado para el writer: se persistirá antes de que `close()` retorne.
+    /// Enqueued for the writer: will be persisted before `close()` returns.
     Queued,
-    /// Descartado por backpressure (canal lleno, writer vivo).
+    /// Dropped by backpressure (full channel, writer alive).
     DroppedBackpressure,
-    /// Rechazado porque el store ya no admite eventos (cierre iniciado).
+    /// Rejected because the store no longer accepts events (shutdown started).
     RejectedClosed,
 }
 
@@ -125,29 +125,30 @@ pub enum WriteOutcome {
 pub struct AuditStore {
     write_tx: mpsc::SyncSender<WriteMsg>,
     query_tx: mpsc::Sender<QueryMsg>,
-    /// Eventos descartados por backpressure (canal lleno). El hot path nunca
-    /// bloquea: si el canal está lleno se descarta el evento y se contabiliza
-    /// aquí (fix review v5 #4 — crecimiento de memoria acotado).
+    /// Events dropped by backpressure (full channel). The hot path never
+    /// blocks: if the channel is full the event is dropped and counted here
+    /// (fix review v5 #4 — bounded memory growth).
     dropped_events: std::sync::atomic::AtomicU64,
-    /// Drops ya informados y "consumidos" por un `flush`/`close` anterior.
-    /// El siguiente `flush` solo reporta drops nuevos (total - acknowledged),
-    /// para que un flush Ok no vuelva a fallar por drops ya notificados
+    /// Drops already reported and "consumed" by a previous `flush`/`close`.
+    /// The next `flush` only reports new drops (total - acknowledged),
+    /// so a successful flush does not fail again for already-notified drops
     /// (fix review v6 P1).
     dropped_acknowledged: std::sync::atomic::AtomicU64,
-    /// Eventos RECHAZADOS porque el store ya había iniciado el cierre (o el
-    /// writer terminó). Se contabilizan aparte de `dropped_events`: no son
-    /// backpressure de disco lento, son escrituras post-cierre — mezclarlos
-    /// producía errores deshonestos (fix review v6.1).
+    /// Events REJECTED because the store had already started shutdown (or the
+    /// writer terminated). Counted separately from `dropped_events`: these are
+    /// not slow-disk backpressure, they are post-close writes — mixing them
+    /// produced dishonest errors (fix review v6.1).
     rejected_after_close: std::sync::atomic::AtomicU64,
-    /// Rechazos ya informados por un `flush`/`close` anterior.
+    /// Rejections already reported by a previous `flush`/`close`.
     rejected_acknowledged: std::sync::atomic::AtomicU64,
-    /// Estado atómico accepting/closing/closed (ver módulo [`state`]).
+    /// Atomic state accepting/closing/closed (see [`state`] module).
     state: std::sync::atomic::AtomicU8,
-    /// Escrituras del hot path que ya pasaron la puerta de estado pero aún no
-    /// han terminado su `try_send`. `close()` espera a que llegue a 0 antes de
-    /// emitir la barrera de cierre; combinado con el orden `SeqCst` esto hace
-    /// IMPOSIBLE que un evento ya encolado se pierda al cerrar (fix v6.1:
-    /// antes existía una ventana entre la comprobación de estado y el envío).
+    /// Hot-path writes that already passed the state gate but have not yet
+    /// finished their `try_send`. `close()` waits for this to reach 0 before
+    /// emitting the close barrier; combined with `SeqCst` ordering this makes
+    /// it IMPOSSIBLE for an already-enqueued event to be lost on close
+    /// (fix v6.1: before, there was a window between the state check and the
+    /// send).
     inflight_writes: std::sync::atomic::AtomicUsize,
     timeout: Duration,
     #[allow(dead_code)]
@@ -163,49 +164,48 @@ impl AuditStore {
         Self::open_with(path, 90)
     }
 
-    /// Events dropped by backpressure since creation (canal lleno, writer
-    /// vivo). NO incluye los eventos rechazados tras iniciar el cierre —
-    /// esos se cuentan en [`Self::rejected_after_close`].
+    /// Events dropped by backpressure since creation (full channel, writer
+    /// alive). Does NOT include events rejected after shutdown started —
+    /// those are counted in [`Self::rejected_after_close`].
     #[must_use]
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Eventos rechazados porque el store ya no admitía escrituras (cierre
-    /// iniciado o writer terminado).
+    /// Events rejected because the store no longer accepted writes (shutdown
+    /// started or writer terminated).
     #[must_use]
     pub fn rejected_after_close(&self) -> u64 {
         self.rejected_after_close.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// `true` mientras el store admite eventos nuevos (estado `accepting`).
+    /// `true` while the store accepts new events (state `accepting`).
     #[must_use]
     pub fn is_accepting(&self) -> bool {
         self.state.load(std::sync::atomic::Ordering::Acquire) == state::ACCEPTING
     }
 
-    /// Nombre del estado actual (`accepting` | `closing` | `shutdown-sent` |
-    /// `closed`), para logs y diagnóstico.
+    /// Name of the current state (`accepting` | `closing` | `shutdown-sent` |
+    /// `closed`), for logs and diagnostics.
     #[must_use]
     pub fn state_name(&self) -> &'static str {
         state::name(self.state.load(std::sync::atomic::Ordering::Acquire))
     }
 
-    /// Override del timeout global de `flush`/`close` (enqueue + ACK).
+    /// Override the global `flush`/`close` timeout (enqueue + ACK).
     #[must_use]
     pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Deja de admitir eventos nuevos SIN cerrar el writer: primer paso del
-    /// shutdown ordenado. A partir de aquí la cola es finita (nada nuevo
-    /// entra), de modo que el `flush` posterior drena un conjunto acotado y
-    /// los eventos que lleguen tarde se reportan como rechazos honestos en vez
-    /// de perderse en silencio.
+    /// Stop accepting new events WITHOUT closing the writer: first step of
+    /// orderly shutdown. From here on the queue is finite (nothing new comes
+    /// in), so the subsequent `flush` drains a bounded set and late events
+    /// are reported as honest rejections instead of being silently lost.
     ///
-    /// Devuelve `true` si esta llamada realizó la transición
-    /// `accepting → closing`, `false` si el cierre ya había empezado.
+    /// Returns `true` if this call performed the transition
+    /// `accepting → closing`, `false` if shutdown had already started.
     pub fn begin_closing(&self) -> bool {
         self.state
             .compare_exchange(
@@ -235,7 +235,7 @@ impl AuditStore {
     ) -> Result<Self, String> {
         let conn = Connection::open(path.as_ref()).map_err(|e| format!("cannot open SQLite: {e}"))?;
         Self::create_tables(&conn)?;
-        // Purga de retención al OPEN (una vez).
+        // Retention purge on OPEN (once).
         let purged = purge_old(&conn, retention_days);
         if purged > 0 {
             tracing::info!("audit retention purge at open: removed {purged} events");
@@ -276,9 +276,9 @@ impl AuditStore {
     #[allow(clippy::needless_pass_by_value)]
     fn write_loop(rx: mpsc::Receiver<WriteMsg>, conn: Connection, retention_days: u64) {
         let mut last_purge = Instant::now();
-        // Último error de persistencia (fix review v4 #6): un INSERT fallido se
-        // retiene y NO se deja perder; el siguiente Flush lo propaga al caller
-        // en lugar de ACKear como si todo fuera durable.
+        // Last persistence error (fix review v4 #6): a failed INSERT is
+        // retained and not lost; the next Flush propagates it to the caller
+        // instead of ACKing as if everything were durable.
         let mut last_error: Option<String> = None;
         while let Ok(msg) = rx.recv() {
             match msg {
@@ -287,7 +287,7 @@ impl AuditStore {
                         tracing::error!("audit write error: {e}");
                         last_error = Some(e);
                     }
-                    // Retención periódica POR TIEMPO: purga cada ≥60s, no por conteo.
+                    // Periodic TIME-BASED retention: purge every ≥60s, not by count.
                     if last_purge.elapsed() >= Duration::from_secs(PURGE_INTERVAL_SECS) {
                         let purged = purge_old(&conn, retention_days);
                         if purged > 0 {
@@ -297,25 +297,27 @@ impl AuditStore {
                     }
                 }
                 WriteMsg::Flush { ack } => {
-                    // Los eventos previos ya se aplicaron (cola FIFO, este thread
-                    // los procesa en orden). La ack es la barrera de durabilidad:
-                    // Ok(()) solo si no hubo insert fallido desde el último flush.
+                    // Previous events already applied (FIFO queue, this thread
+                    // processes them in order). The ack is the durability
+                    // barrier: Ok(()) only if there was no failed insert since
+                    // the last flush.
                     let res = last_error.take().map_or(Ok(()), Err);
                     let _ = ack.send(res);
                 }
                 WriteMsg::Shutdown { ack } => {
-                    // Drenaje ORDENADO antes de morir (fix review v6.1): un
-                    // writer no puede tirar eventos que ya estaban encolados
-                    // detrás de la barrera de cierre. `close()` marca el store
-                    // como `closing` ANTES de emitir esta barrera, así que la
-                    // cola restante es finita: se vacía en orden FIFO y solo
-                    // entonces se ACKea y se termina.
+                    // ORDERLY drain before dying (fix review v6.1): a writer
+                    // must not drop events that were already enqueued behind
+                    // the close barrier. `close()` marks the store as
+                    // `closing` BEFORE emitting this barrier, so the remaining
+                    // queue is finite: it is drained in FIFO order and only
+                    // then ACKed and terminated.
                     let drained = Self::drain_pending(&rx, &conn, &mut last_error);
                     if drained > 0 {
                         tracing::info!("audit writer drained {drained} pending message(s) at shutdown");
                     }
-                    // El ACK transporta el último error de persistencia pendiente
-                    // (fix review v5 #4): close() sabrá si se perdió auditoría.
+                    // The ACK carries the last pending persistence error
+                    // (fix review v5 #4): close() will know if audit data was
+                    // lost.
                     let res = last_error.take().map_or(Ok(()), Err);
                     let _ = ack.send(res);
                     return;
@@ -324,13 +326,13 @@ impl AuditStore {
         }
     }
 
-    /// Vacía en orden FIFO todo lo que quede en el canal (sin bloquear) y
-    /// persiste los `Event` pendientes. Usado por la barrera de `Shutdown`
-    /// para garantizar **drenaje ordenado**: nada que ya estuviera encolado se
-    /// pierde por el hecho de cerrar. Los `Flush`/`Shutdown` que hubieran
-    /// quedado encolados por llamadas concurrentes reciben aquí su respuesta,
-    /// para que ningún caller quede esperando un ACK que nunca llega.
-    /// Devuelve cuántos mensajes se drenaron.
+    /// Drains in FIFO order whatever remains in the channel (without blocking)
+    /// and persists the pending `Event`s. Used by the `Shutdown` barrier to
+    /// guarantee **orderly drain**: nothing already enqueued is lost just by
+    /// closing. `Flush`/`Shutdown` messages left enqueued by concurrent calls
+    /// receive their reply here, so no caller is left waiting for an ACK that
+    /// never arrives.
+    /// Returns how many messages were drained.
     fn drain_pending(rx: &mpsc::Receiver<WriteMsg>, conn: &Connection, last_error: &mut Option<String>) -> usize {
         let mut drained = 0usize;
         while let Ok(msg) = rx.try_recv() {
@@ -373,10 +375,11 @@ impl AuditStore {
     /// call [`Self::flush`] afterwards.
     #[allow(clippy::unused_async)]
     pub async fn write_event_async(&self, event: AuditEvent) -> WriteOutcome {
-        // Registro de escritura en vuelo ANTES de mirar el estado, con orden
-        // `SeqCst` en ambos lados: o este writer ve que el store ya no admite
-        // (y rechaza), o `close()` ve `inflight_writes > 0` y espera. Nunca
-        // ambos fallan a la vez, así que ningún evento encolado se pierde.
+        // Register an in-flight write BEFORE looking at the state, with
+        // `SeqCst` ordering on both sides: either this writer sees that the
+        // store no longer accepts (and rejects), or `close()` sees
+        // `inflight_writes > 0` and waits. Both never fail at once, so no
+        // enqueued event is lost.
         self.inflight_writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let outcome = self.try_enqueue(event);
         self.inflight_writes.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -384,12 +387,12 @@ impl AuditStore {
     }
 
     fn try_enqueue(&self, event: AuditEvent) -> WriteOutcome {
-        // Puerta de estado ATÓMICA (fix review v6.1): una vez iniciado el
-        // cierre no se admite ni un evento más. Antes se seguía intentando el
-        // `try_send` y el fallo se contabilizaba como "backpressure", lo que
-        // (a) hacía la cola potencialmente infinita durante el shutdown y
-        // (b) producía un error deshonesto ("disco lento") para lo que en
-        // realidad era una escritura post-cierre.
+        // ATOMIC state gate (fix review v6.1): once shutdown has started, not
+        // a single event more is accepted. Before, the `try_send` was still
+        // attempted and the failure was counted as "backpressure", which
+        // (a) made the queue potentially infinite during shutdown and
+        // (b) produced a dishonest error ("slow disk") for what was really a
+        // post-close write.
         if self.state.load(std::sync::atomic::Ordering::SeqCst) != state::ACCEPTING {
             let n = self
                 .rejected_after_close
@@ -404,15 +407,15 @@ impl AuditStore {
         match self.write_tx.try_send(WriteMsg::Event(Box::new(event))) {
             Ok(()) => WriteOutcome::Queued,
             Err(mpsc::TrySendError::Full(_)) => {
-                // Canal lleno (writer ocupado) → descartar con contador.
-                // No bloquea el hot path del proxy.
+                // Full channel (busy writer) → drop with counter.
+                // Does not block the proxy hot path.
                 let n = self.dropped_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 tracing::warn!("audit write channel full, event dropped (total dropped={n})");
                 WriteOutcome::DroppedBackpressure
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
-                // El writer terminó (cierre en curso o writer caído): NO es
-                // backpressure. Se reporta en su propia categoría.
+                // The writer terminated (shutdown in progress or writer down):
+                // this is NOT backpressure. Reported in its own category.
                 let n = self
                     .rejected_after_close
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -423,9 +426,9 @@ impl AuditStore {
         }
     }
 
-    /// Consume los drops nuevos (total - acknowledged) y los marca como
-    /// informados. Así un flush Ok tras un flush anterior Err por drops
-    /// PREVIOS no vuelve a fallar (fix review v6 P1).
+    /// Consumes the new drops (total - acknowledged) and marks them as
+    /// reported. This way a successful flush after a previous flush Err due
+    /// to PREVIOUS drops does not fail again (fix review v6 P1).
     #[must_use]
     fn consume_dropped(&self) -> u64 {
         let total = self.dropped_events.load(std::sync::atomic::Ordering::Relaxed);
@@ -435,8 +438,8 @@ impl AuditStore {
         total.saturating_sub(acked)
     }
 
-    /// Igual que [`Self::consume_dropped`] para los eventos rechazados tras
-    /// iniciar el cierre.
+    /// Same as [`Self::consume_dropped`] for events rejected after shutdown
+    /// started.
     #[must_use]
     fn consume_rejected(&self) -> u64 {
         let total = self.rejected_after_close.load(std::sync::atomic::Ordering::Relaxed);
@@ -446,9 +449,9 @@ impl AuditStore {
         total.saturating_sub(acked)
     }
 
-    /// Combina el resultado del writer (durabilidad) con los drops nuevos
-    /// consumidos: si se perdieron eventos por backpressure O el writer acusó
-    /// un fallo de persistencia, el resultado es `Err` con todos los motivos.
+    /// Combines the writer result (durability) with the new drops consumed:
+    /// if events were lost to backpressure OR the writer reported a
+    /// persistence failure, the result is `Err` with all the reasons.
     fn finish_durability_ack(&self, ack: Result<(), String>, op: &str) -> Result<(), String> {
         let dropped = self.consume_dropped();
         let rejected = self.consume_rejected();
@@ -474,17 +477,17 @@ impl AuditStore {
         }
     }
 
-    /// Envía un mensaje barrera al writer (Flush/Shutdown) y espera su ACK,
-    /// toda la operación fuera del executor tokio (`spawn_blocking`): ni `send`
-    /// (canal bounded puede estar lleno) ni `recv_timeout` bloquean un async
-    /// worker.
-    /// Devuelve la ack del writer (Ok=previos persistentes, Err=fallo previo).
+    /// Sends a barrier message to the writer (Flush/Shutdown) and waits for
+    /// its ACK, the whole operation off the tokio executor
+    /// (`spawn_blocking`): neither `send` (a bounded channel may be full) nor
+    /// `recv_timeout` block an async worker.
+    /// Returns the writer ack (Ok=previous persisted, Err=previous failure).
     async fn barrier_ack(&self, msg: WriteMsg, ack_rx: mpsc::Receiver<Result<(), String>>) -> Result<(), String> {
         self.barrier_ack_until(msg, ack_rx, Instant::now() + self.timeout).await
     }
 
-    /// Espera (sin bloquear el executor) a que no queden escrituras en vuelo,
-    /// o a que se agote el deadline. Devuelve las que quedaron sin terminar.
+    /// Waits (without blocking the executor) until no in-flight writes
+    /// remain, or the deadline expires. Returns the ones left unfinished.
     async fn await_write_quiescence(&self, deadline: Instant) -> usize {
         loop {
             let inflight = self.inflight_writes.load(std::sync::atomic::Ordering::SeqCst);
@@ -499,8 +502,8 @@ impl AuditStore {
         }
     }
 
-    /// Igual que [`Self::barrier_ack`] pero con un deadline ya en curso, para
-    /// que el timeout de `close()` cubra quiesce + enqueue + ACK.
+    /// Same as [`Self::barrier_ack`] but with a deadline already in progress,
+    /// so the `close()` timeout covers quiesce + enqueue + ACK.
     async fn barrier_ack_until(
         &self,
         msg: WriteMsg,
@@ -513,17 +516,17 @@ impl AuditStore {
             _ => "flush",
         };
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            // Un ÚNICO deadline para toda la operación (fix review v6.1): el
-            // `send` bloqueante sin límite podía colgar el shutdown para
-            // siempre si el canal estaba lleno y el writer atascado. Ahora el
-            // enqueue reintenta con `try_send` hasta el deadline, y el ACK
-            // solo dispone del presupuesto restante.
+            // A SINGLE deadline for the whole operation (fix review v6.1):
+            // the blocking unbounded `send` could hang the shutdown forever
+            // if the channel was full and the writer stalled. Now the enqueue
+            // retries with `try_send` until the deadline, and the ACK only
+            // has the remaining budget.
             let mut pending = msg;
             loop {
                 match tx.try_send(pending) {
                     Ok(()) => break,
                     Err(mpsc::TrySendError::Disconnected(_)) => {
-                        return Err("store channel closed (writer terminado)".to_string());
+                        return Err("store channel closed (writer terminated)".to_string());
                     }
                     Err(mpsc::TrySendError::Full(msg)) => {
                         if Instant::now() >= deadline {
@@ -539,14 +542,14 @@ impl AuditStore {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match ack_rx.recv_timeout(remaining) {
                 Ok(res) => res,
-                Err(mpsc::RecvTimeoutError::Disconnected) => Err("store channel closed (writer terminado)".to_string()),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err("store channel closed (writer terminated)".to_string()),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     Err(format!("store {op} timed out waiting for writer ACK"))
                 }
             }
         })
         .await
-        .map_err(|e| format!("spawn_blocking falló: {e}"))?
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }
 
     /// Durability barrier: blocks until every event previously sent through
@@ -554,24 +557,24 @@ impl AuditStore {
     /// thread. The hot path stays non-blocking; only this call awaits the ACK
     /// (with a timeout) off the tokio runtime.
     ///
-    /// **Error propagation (fix review v4 #6):** si un `INSERT` falló en la
-    /// escritura de un evento que está en la cola/escritura ANTES de este
-    /// flush, la ack es `Err` con el mensaje de `SQLite` — un flush ya no
-    /// acuse un fallo de persistencia previo.
+    /// **Error propagation (fix review v4 #6):** if an `INSERT` failed while
+    /// writing an event that is in the queue/being written BEFORE this flush,
+    /// the ack is `Err` with the `SQLite` message — a flush no longer hides a
+    /// previous persistence failure.
     ///
-    /// **Drops por backpressure (fix review v6 P1):** tras la barrera, si
-    /// hubo eventos descartados por canal lleno desde el último flush/close,
-    /// devuelve `Err` indicando cuántos se perdieron — el hot path no bloquea
-    /// pero la durabilidad NO confirma éxito si hubo pérdida.
+    /// **Drops by backpressure (fix review v6 P1):** after the barrier, if
+    /// events were dropped due to a full channel since the last flush/close,
+    /// returns `Err` indicating how many were lost — the hot path does not
+    /// block but durability does NOT confirm success if there was loss.
     ///
     /// Returns `Err` if the writer channel is closed, the writer did not
     /// acknowledge within the timeout, a previous insert failed, or events
     /// were dropped to backpressure.
     pub async fn flush(&self) -> Result<(), String> {
-        // `flush` es válido en `accepting` y en `closing` (writer vivo). Una
-        // vez emitida la barrera de cierre, no se emiten más barreras: el
-        // writer ya terminó o está terminando y un `send` aquí solo produciría
-        // un ACK que nunca llega.
+        // `flush` is valid in `accepting` and in `closing` (writer alive).
+        // Once the close barrier has been emitted, no more barriers are
+        // emitted: the writer has already terminated or is terminating and a
+        // `send` here would only produce an ACK that never arrives.
         let st = self.state.load(std::sync::atomic::Ordering::Acquire);
         if st >= state::SHUTDOWN_SENT {
             return self.finish_durability_ack(
@@ -587,31 +590,32 @@ impl AuditStore {
         self.finish_durability_ack(ack, "flush")
     }
 
-    /// Alias de [`Self::flush`] con semántica explícita de durabilidad +
-    /// propagación de errores de escritura (fix review v4 #6). Usado por el
-    /// daemon en el shutdown graceful.
+    /// Alias for [`Self::flush`] with explicit durability semantics +
+    /// write-error propagation (fix review v4 #6). Used by the daemon during
+    /// graceful shutdown.
     pub async fn flush_durable(&self) -> Result<(), String> {
         self.flush().await
     }
 
-    /// Cierre ordenado del writer thread. El ACK transporta el último error de
-    /// persistencia pendiente (fix review v5 #4): si el writer debía persistir un
-    /// evento que falló, `close()` devuelve `Err` — ya no confirma éxito cuando
-    /// hay pérdida de auditoría. La desconexión prematura del writer también se
-    /// reporta como `Err` (no como éxito).
+    /// Orderly shutdown of the writer thread. The ACK carries the last
+    /// pending persistence error (fix review v5 #4): if the writer had to
+    /// persist an event that failed, `close()` returns `Err` — it no longer
+    /// confirms success when there is audit loss. Premature writer
+    /// disconnection is also reported as `Err` (not as success).
     ///
-    /// **Drops por backpressure (fix review v6 P1):** si se descartaron eventos
-    /// por canal lleno no consumidos por un flush previo, el cierre NO es un
-    /// éxito limpio: devuelve `Err` con el número de eventos perdidos.
+    /// **Drops by backpressure (fix review v6 P1):** if events were dropped
+    /// due to a full channel and not consumed by a previous flush, the close
+    /// is NOT a clean success: returns `Err` with the number of lost events.
     ///
-    /// Returns `Err` si el writer no confirmó dentro del timeout, hubo errores
-    /// de persistencia pendientes, o se perdieron eventos por backpressure.
+    /// Returns `Err` if the writer did not acknowledge within the timeout,
+    /// there were pending persistence errors, or events were lost to
+    /// backpressure.
     pub async fn close(&self) -> Result<(), String> {
-        // Transición atómica a `shutdown-sent`: exactamente UN `close`
-        // concurrente emite la barrera de cierre; el resto falla honestamente
-        // en lugar de quedarse esperando un ACK que ya consumió otro.
-        // Antes de la barrera el store deja de admitir eventos, de forma que
-        // la cola que el writer debe drenar es finita.
+        // Atomic transition to `shutdown-sent`: exactly ONE concurrent
+        // `close` emits the close barrier; the rest fail honestly instead of
+        // waiting for an ACK that another already consumed.
+        // Before the barrier the store stops accepting events, so the queue
+        // the writer must drain is finite.
         let deadline = Instant::now() + self.timeout;
         let mut cur = self.state.load(std::sync::atomic::Ordering::SeqCst);
         loop {
@@ -629,19 +633,19 @@ impl AuditStore {
             }
         }
 
-        // Quiesce: esperar a que las escrituras que ya habían pasado la puerta
-        // terminen su `try_send`. Después de este punto ningún hilo puede
-        // encolar nada más, así que la cola que el writer drenará es final y
-        // el drenaje es completo. La espera consume del MISMO presupuesto de
-        // timeout (nunca cuelga).
+        // Quiesce: wait for writes that had already passed the gate to finish
+        // their `try_send`. After this point no thread can enqueue anything
+        // more, so the queue the writer will drain is final and the drain is
+        // complete. The wait consumes from the SAME timeout budget (never
+        // hangs).
         self.await_write_quiescence(deadline).await;
 
         let (ack_tx, ack_rx) = mpsc::sync_channel::<Result<(), String>>(1);
         let ack = self
             .barrier_ack_until(WriteMsg::Shutdown { ack: ack_tx }, ack_rx, deadline)
             .await;
-        // El writer ya no está (ACKeó y salió, o se agotó el timeout y lo
-        // damos por perdido): el estado final es `closed` en ambos casos.
+        // The writer is gone (ACKed and exited, or the timeout expired and we
+        // consider it lost): the final state is `closed` in both cases.
         self.state.store(state::CLOSED, std::sync::atomic::Ordering::Release);
         self.finish_durability_ack(ack, "store close")
     }
@@ -698,9 +702,9 @@ impl AuditStore {
     }
 }
 
-/// Persiste un evento. Devuelve el mensaje de error de `SQLite` si el
-/// `INSERT` falla (el writer lo retiene para propagarlo en la próxima
-/// barrera de durabilidad).
+/// Persists an event. Returns the `SQLite` error message if the `INSERT`
+/// fails (the writer retains it to propagate it in the next durability
+/// barrier).
 fn insert_event(conn: &Connection, event: &AuditEvent) -> Result<(), String> {
     let flags_json = serde_json::to_string(&event.flags).unwrap_or_default();
     let counts_json = serde_json::to_string(&event.counts).unwrap_or_default();
@@ -729,10 +733,10 @@ fn insert_event(conn: &Connection, event: &AuditEvent) -> Result<(), String> {
 
 #[cfg(test)]
 impl AuditStore {
-    /// Store de test cuyo writer está **atascado**: el receptor del canal se
-    /// aparca en un hilo que no lo consume hasta que el `Sender` devuelto se
-    /// suelta. Sirve para comprobar que `flush`/`close` respetan el timeout en
-    /// el *enqueue* (canal lleno) y no cuelgan para siempre.
+    /// Test store whose writer is **stalled**: the channel receiver is
+    /// parked on a thread that does not consume it until the returned
+    /// `Sender` is released. Useful to verify that `flush`/`close` respect
+    /// the timeout on the *enqueue* (full channel) and do not hang forever.
     fn with_stalled_writer(
         path: impl AsRef<std::path::Path>,
         channel_capacity: usize,
@@ -750,7 +754,7 @@ impl AuditStore {
         let write_thread = std::thread::Builder::new()
             .name("cerberus-store-stalled-writer".to_string())
             .spawn(move || {
-                // Nunca consume `write_rx` hasta que el test lo libere.
+                // Never consumes `write_rx` until the test releases it.
                 let _ = release_rx.recv();
                 drop(write_rx);
             })
@@ -937,7 +941,7 @@ mod tests {
         for i in 0..n {
             assert!(ids.contains(&format!("evt_{i}")));
         }
-        // Contiguos en ts: orden DESC por ts_unix.
+        // Contiguous in ts: DESC order by ts_unix.
         let ts: Vec<i64> = events.iter().map(|e| e.ts_unix).collect();
         assert!(ts.windows(2).all(|w| w[0] >= w[1]));
         assert_eq!(rt.block_on(store.event_count()).expect("count"), n);
@@ -950,7 +954,7 @@ mod tests {
         {
             let conn = Connection::open(&path).expect("db");
             AuditStore::create_tables(&conn).expect("tables");
-            // ts_unix muy antiguo (≥90 días de retención por defecto).
+            // Very old ts_unix (≥90 days of default retention).
             insert_row(&conn, &make_event("evt_old", "block", 1_000_000_000));
             insert_row(&conn, &make_event("evt_new", "warn", chrono::Utc::now().timestamp()));
         }
@@ -971,7 +975,7 @@ mod tests {
         {
             let conn = Connection::open(&path).expect("db");
             AuditStore::create_tables(&conn).expect("tables");
-            // Pasado reciente (1 h atrás) y futuro (1 h adelante): cutoff = now.
+            // Recent past (1 h ago) and future (1 h ahead): cutoff = now.
             insert_row(&conn, &make_event("evt_past", "warn", now - 3_600));
             insert_row(&conn, &make_event("evt_future", "warn", now + 3_600));
         }
@@ -983,11 +987,11 @@ mod tests {
         assert!(!events.iter().any(|e| e.id == "evt_past"));
     }
 
-    // ─── Fix code review v4 #6: flush propaga errores de INSERT ─────────────
+    // ─── Fix code review v4 #6: flush propagates INSERT errors ─────────────
 
-    /// Un `INSERT` falla determinísticamente cuando el `id` (`PRIMARY KEY`) ya
-    /// existe. El flush posterior debe devolver `Err` con el mensaje de `SQLite`
-    /// en lugar de acuse un fallo de persistencia previo.
+    /// A deterministic `INSERT` failure happens when the `id` (`PRIMARY KEY`)
+    /// already exists. The subsequent flush must return `Err` with the
+    /// `SQLite` message instead of hiding a previous persistence failure.
     #[test]
     fn flush_reports_prev_insert_failure() {
         let tmp = temp_db();
@@ -1000,23 +1004,23 @@ mod tests {
         rt.block_on(store.flush()).expect("first write durable");
         assert_eq!(rt.block_on(store.event_count()).expect("count"), 1);
 
-        // Segundo evento con el MISMO id → el INSERT del writer falla.
+        // Second event with the SAME id → the writer's INSERT fails.
         let dup = make_event("evt_twin", "block", 1_700_000_101);
         rt.block_on(store.write_event_async(dup));
 
         let err = rt
             .block_on(store.flush())
-            .expect_err("flush debe propagar el error del INSERT");
+            .expect_err("flush must propagate the INSERT error");
         assert!(
             err.contains("UNIQUE") || err.contains("constraint"),
-            "esperaba error de constraint SQLite, got: {err}"
+            "expected a SQLite constraint error, got: {err}"
         );
 
-        // El error se consumió: el siguiente flush (sin nuevos fallos) pasa.
-        rt.block_on(store.flush()).expect("flush sin fallos posteriores");
+        // The error was consumed: the next flush (with no new failures) passes.
+        rt.block_on(store.flush()).expect("flush with no later failures");
     }
 
-    // ─── Fix review v4 #6b: close() termina el writer ordenadamente ─────────
+    // ─── Fix review v4 #6b: close() stops the writer orderly ─────────
 
     #[test]
     fn close_stops_writer_and_fails_subsequent_writes() {
@@ -1031,29 +1035,29 @@ mod tests {
 
         rt.block_on(store.close()).expect("graceful close");
 
-        // El store ya no admite eventos y lo dice con honestidad: el evento se
-        // cuenta como RECHAZADO post-cierre (no como backpressure de disco) y
-        // el flush posterior falla explicando que el store está cerrado.
+        // The store no longer accepts events and says so honestly: the event
+        // is counted as REJECTED post-close (not as disk backpressure) and
+        // the subsequent flush fails explaining that the store is closed.
         assert!(!store.is_accepting());
         assert_eq!(store.state_name(), "closed");
         rt.block_on(store.write_event_async(make_event("evt_c2", "warn", 1_700_000_201)));
         assert_eq!(store.rejected_after_close(), 1);
-        assert_eq!(store.dropped_events(), 0, "un rechazo post-cierre no es backpressure");
-        let err = rt.block_on(store.flush()).expect_err("flush tras close debe fallar");
+        assert_eq!(store.dropped_events(), 0, "a post-close rejection is not backpressure");
+        let err = rt.block_on(store.flush()).expect_err("flush after close must fail");
         assert!(err.contains("store already closed"), "got: {err}");
         assert!(err.contains("1 audit event(s) rejected after close"), "got: {err}");
 
-        // Un segundo close no vuelve a emitir barrera: falla honestamente.
-        let err2 = rt.block_on(store.close()).expect_err("close idempotente debe reportar");
+        // A second close does not emit a barrier again: it fails honestly.
+        let err2 = rt.block_on(store.close()).expect_err("idempotent close must report");
         assert!(err2.contains("close already invoked"), "got: {err2}");
 
-        // El query thread sigue leyendo lo ya persistido antes del cierre.
+        // The query thread still reads what was already persisted before close.
         let events = rt.block_on(store.recent_events(10));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, "evt_c1");
     }
 
-    // ─── Fix review v6 P1: drops por backpressure en durabilidad ────────────
+    // ─── Fix review v6 P1: backpressure drops in durability ────────────
 
     #[test]
     fn flush_reports_dropped_events() {
@@ -1062,28 +1066,28 @@ mod tests {
         let store = AuditStore::open(&path).expect("open store");
         let rt = tokio::runtime::Runtime::new().unwrap();
 
-        // Sin drops: flush es un éxito limpio.
-        rt.block_on(store.flush()).expect("flush limpio sin drops");
+        // No drops: flush is a clean success.
+        rt.block_on(store.flush()).expect("clean flush with no drops");
 
-        // Simula eventos perdidos por backpressure (canal lleno) colgándolos
-        // directamente en el contador — camino determinista.
+        // Simulate events lost to backpressure (full channel) by bumping the
+        // counter directly — deterministic path.
         store.dropped_events.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
 
-        let err = rt.block_on(store.flush()).expect_err("flush debe reportar drops");
+        let err = rt.block_on(store.flush()).expect_err("flush must report drops");
         assert!(err.contains("3 audit event(s) lost to backpressure"), "got: {err}");
 
-        // Drops consumidos: un flush posterior sin drops nuevos vuelve a Ok.
+        // Drops consumed: a subsequent flush with no new drops goes back to Ok.
         rt.block_on(store.flush())
-            .expect("flush sin drops nuevos no vuelve a fallar");
+            .expect("flush with no new drops does not fail again");
     }
 
-    // ─── Fix review v6.1: shutdown atómico, drenaje ordenado, sin cuelgues ──
+    // ─── Fix review v6.1: atomic shutdown, orderly drain, no hangs ──
 
-    /// Shutdown CONCURRENTE con writers activos. Invariante fuerte: todo lo
-    /// que el store aceptó (`WriteOutcome::Queued`) acaba persistido, y todo
-    /// intento contabilizado cae en exactamente una categoría honesta
-    /// (encolado / backpressure / rechazado post-cierre). Nada se pierde en
-    /// silencio y el cierre no cuelga.
+    /// Shutdown CONCURRENT with active writers. Strong invariant: everything
+    /// the store accepted (`WriteOutcome::Queued`) ends up persisted, and
+    /// every counted attempt falls into exactly one honest category
+    /// (enqueued / backpressure / rejected post-close). Nothing is silently
+    /// lost and the close does not hang.
     #[test]
     fn concurrent_shutdown_with_active_writers_persists_everything_accepted() {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
@@ -1091,7 +1095,7 @@ mod tests {
 
         let tmp = temp_db();
         let path = tmp.path().join("cerberus.db");
-        // Capacidad pequeña a propósito: fuerza backpressure real.
+        // Small capacity on purpose: forces real backpressure.
         let store = Arc::new(AuditStore::open_with_capacity(&path, 90, 32).expect("open store"));
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
@@ -1129,13 +1133,13 @@ mod tests {
             })
             .collect();
 
-        // Cierre ordenado MIENTRAS los writers siguen empujando eventos.
+        // Orderly close WHILE writers keep pushing events.
         let (flush_res, close_res) = rt.block_on(async {
             tokio::time::sleep(Duration::from_millis(30)).await;
-            assert!(store.begin_closing(), "primera transición accepting → closing");
-            assert!(!store.is_accepting(), "tras begin_closing no se admiten eventos");
+            assert!(store.begin_closing(), "first transition accepting → closing");
+            assert!(!store.is_accepting(), "after begin_closing no events are accepted");
             assert_eq!(store.state_name(), "closing");
-            assert!(!store.begin_closing(), "begin_closing no se repite");
+            assert!(!store.begin_closing(), "begin_closing does not repeat");
             let f = store.flush().await;
             let c = store.close().await;
             (f, c)
@@ -1143,64 +1147,64 @@ mod tests {
 
         keep_going.store(false, SeqCst);
         for h in writers {
-            rt.block_on(h).expect("writer task no debe entrar en pánico");
+            rt.block_on(h).expect("writer task must not panic");
         }
 
         assert_eq!(store.state_name(), "closed");
 
-        // Toda escritura posterior al cierre se rechaza (no es backpressure).
+        // Every post-close write is rejected (not backpressure).
         let post = rt.block_on(store.write_event_async(make_event("evt_post", "warn", 1)));
         assert_eq!(post, WriteOutcome::RejectedClosed);
 
-        // Contabilidad exhaustiva: cada intento tiene exactamente un destino.
+        // Exhaustive accounting: every attempt has exactly one destination.
         let (a, q, d, r) = (
             attempted.load(SeqCst),
             queued.load(SeqCst),
             dropped.load(SeqCst),
             rejected.load(SeqCst),
         );
-        assert_eq!(a, q + d + r, "cada intento cae en una única categoría");
-        assert!(q > 0, "algún evento debió encolarse");
+        assert_eq!(a, q + d + r, "every attempt falls into a single category");
+        assert!(q > 0, "some event must have been enqueued");
         assert_eq!(
             store.dropped_events(),
             d as u64,
-            "el contador de backpressure coincide con los outcomes"
+            "the backpressure counter matches the outcomes"
         );
         assert!(store.rejected_after_close() >= r as u64);
 
-        // DRENAJE ORDENADO: todo lo aceptado está en SQLite.
+        // ORDERLY DRAIN: everything accepted is in SQLite.
         let persisted = rt.block_on(store.event_count()).expect("count");
-        assert_eq!(persisted, q, "todo evento aceptado debe persistir tras close()");
+        assert_eq!(persisted, q, "every accepted event must persist after close()");
 
-        // Errores HONESTOS: si hubo pérdida, ni flush ni close la esconden.
+        // HONEST errors: if there was loss, neither flush nor close hides it.
         if d > 0 || r > 0 {
             assert!(
                 flush_res.is_err() || close_res.is_err(),
-                "con pérdida ({d} drops, {r} rechazos) el cierre no puede reportar éxito limpio"
+                "with loss ({d} drops, {r} rejections) the close cannot report a clean success"
             );
         }
         for res in [&flush_res, &close_res] {
             if let Err(e) = res {
                 assert!(
                     e.contains("backpressure") || e.contains("rejected after close"),
-                    "el error debe explicar la pérdida real, got: {e}"
+                    "the error must explain the real loss, got: {e}"
                 );
             }
         }
     }
 
-    /// Canal LLENO con el writer atascado: ni `flush` ni `close` pueden
-    /// colgarse. El timeout cubre también el *enqueue* de la barrera (antes el
-    /// `send` bloqueante era ilimitado → shutdown colgado para siempre).
+    /// FULL channel with a stalled writer: neither `flush` nor `close` may
+    /// hang. The timeout also covers the *enqueue* of the barrier (before,
+    /// the blocking unbounded `send` → shutdown hung forever).
     #[test]
     fn full_channel_with_stalled_writer_times_out_instead_of_hanging() {
         let tmp = temp_db();
         let path = tmp.path().join("cerberus.db");
         let timeout = Duration::from_millis(150);
-        let (store, release) = AuditStore::with_stalled_writer(&path, 1, timeout).expect("store con writer atascado");
+        let (store, release) = AuditStore::with_stalled_writer(&path, 1, timeout).expect("store with stalled writer");
         let rt = tokio::runtime::Runtime::new().unwrap();
 
-        // Capacidad 1: el primer evento ocupa el canal, el segundo se descarta.
+        // Capacity 1: the first event fills the channel, the second is dropped.
         assert_eq!(
             rt.block_on(store.write_event_async(make_event("evt_s1", "warn", 1_700_000_300))),
             WriteOutcome::Queued
@@ -1210,22 +1214,22 @@ mod tests {
             WriteOutcome::DroppedBackpressure
         );
 
-        // flush: el enqueue de la barrera nunca cabe → timeout, no cuelgue.
+        // flush: the barrier enqueue never fits → timeout, not a hang.
         let started = Instant::now();
-        let err = rt.block_on(store.flush()).expect_err("flush no puede colgarse");
+        let err = rt.block_on(store.flush()).expect_err("flush must not hang");
         let elapsed = started.elapsed();
         assert!(
             err.contains("timed out enqueueing the durability barrier"),
             "got: {err}"
         );
         assert!(err.contains("1 audit event(s) lost to backpressure"), "got: {err}");
-        assert!(elapsed >= timeout, "debe respetar el deadline, tardó {elapsed:?}");
-        assert!(elapsed < Duration::from_secs(3), "tardó demasiado: {elapsed:?}");
+        assert!(elapsed >= timeout, "must respect the deadline, took {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "took too long: {elapsed:?}");
 
-        // close: mismo presupuesto, mismo comportamiento; el estado queda
-        // cerrado aunque el writer nunca ACKee (no se admiten más eventos).
+        // close: same budget, same behavior; the state ends up closed even
+        // though the writer never ACKs (no more events are accepted).
         let started = Instant::now();
-        let err = rt.block_on(store.close()).expect_err("close no puede colgarse");
+        let err = rt.block_on(store.close()).expect_err("close must not hang");
         assert!(err.contains("timed out"), "got: {err}");
         assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(store.state_name(), "closed");
@@ -1248,7 +1252,7 @@ mod tests {
 
         let err = rt
             .block_on(store.close())
-            .expect_err("cierre con drops NO es éxito limpio");
+            .expect_err("a close with drops is NOT a clean success");
         assert!(err.contains("2 audit event(s) lost to backpressure"), "got: {err}");
     }
 }

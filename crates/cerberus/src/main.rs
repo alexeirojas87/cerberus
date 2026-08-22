@@ -1,13 +1,13 @@
-//! Cerberus Local CLI — punto de entrada para el Modo B.
+//! Cerberus Local CLI — entry point for Mode B.
 //!
-//! Comandos disponibles:
-//! - `init`: autodetecta agentes instalados y configura sus `*_BASE_URL`
-//! - `start`: inicia el daemon local
-//! - `stop`: detiene el daemon local
-//! - `status`: estado del daemon
-//! - `scan <file>`: escanea un archivo sin enviarlo
-//! - `test <text>`: prueba detección con texto inline
-//! - `doctor`: diagnóstico del sistema
+//! Available commands:
+//! - `init`: auto-detects installed agents and configures their `*_BASE_URL`
+//! - `start`: starts the local daemon
+//! - `stop`: stops the local daemon
+//! - `status`: daemon status
+//! - `scan <file>`: scans a file without sending it
+//! - `test <text>`: test detection with inline text
+//! - `doctor`: system diagnostics
 
 use std::process::ExitCode;
 
@@ -21,7 +21,7 @@ mod mitm;
 mod packs;
 mod platform;
 
-/// Cerberus Local — cortafuegos de datos sensibles para agentes LLM.
+/// Cerberus Local — sensitive-data firewall for LLM agents.
 #[derive(Parser)]
 #[command(name = "cerberus", version, about)]
 struct Cli {
@@ -31,81 +31,81 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Autodetecta agentes instalados y configura Cerberus
+    /// Auto-detects installed agents and configures Cerberus
     Init {
-        /// Ruta al directorio de configuración (default: el config dir por plataforma)
+        /// Path to the configuration directory (default: the platform config dir)
         #[arg(short, long)]
         config_dir: Option<String>,
     },
-    /// Inicia el daemon local
+    /// Starts the local daemon
     Start {
-        /// Puerto de escucha (default: 8787)
+        /// Listen port (default: 8787)
         #[arg(short, long, default_value_t = 8787)]
         port: u16,
     },
-    /// Detiene el daemon local
+    /// Stops the local daemon
     Stop,
-    /// Muestra el estado del daemon
+    /// Shows the daemon status
     Status,
-    /// Muestra la licencia activa (tier y expiración)
+    /// Shows the active license (tier and expiration)
     License,
-    /// Gestiona rule packs firmados (requiere licencia Pro)
+    /// Manages signed rule packs (requires Pro license)
     Pack {
         #[command(subcommand)]
         pack: PackCmd,
     },
-    /// Gestiona el forward proxy TLS avanzado (siempre opt-in)
+    /// Manages the advanced TLS forward proxy (always opt-in)
     Mitm {
         #[command(subcommand)]
         mitm: MitmCmd,
     },
-    /// Escanea un archivo en busca de secretos
+    /// Scans a file for secrets
     Scan {
-        /// Ruta al archivo a escanear
+        /// Path to the file to scan
         file: String,
     },
-    /// Prueba detección con texto inline
+    /// Tests detection with inline text
     Test {
-        /// Texto a escanear
+        /// Text to scan
         text: String,
     },
-    /// Diagnóstico del sistema
+    /// System diagnostics
     Doctor,
 }
 
-/// Subcomandos de `cerberus pack` (F7: rule packs firmados).
+/// `cerberus pack` subcommands (F7: signed rule packs).
 #[derive(Subcommand)]
 enum PackCmd {
-    /// Instala un rule pack firmado (verifica `CERBERUS_PACK_TRUST_ROOT`)
+    /// Installs a signed rule pack (verifies `CERBERUS_PACK_TRUST_ROOT`)
     Install {
-        /// Ruta al JSON firmado del pack
+        /// Path to the signed pack JSON
         file: String,
     },
-    /// Lista los rule packs presentes en `~/.cerberus/packs`
+    /// Lists the rule packs present in `~/.cerberus/packs`
     List,
-    /// Revierte al engine anterior (última instalación)
+    /// Reverts to the previous engine (last install)
     Rollback,
 }
 
-/// Subcomandos explícitos del modo forward proxy + CA local.
+/// Explicit subcommands for forward proxy mode + local CA.
 #[derive(Subcommand)]
 enum MitmCmd {
-    /// Muestra si el listener está habilitado y si la CA está lista
+    /// Shows whether the listener is enabled and the CA is ready
     Status,
-    /// Genera una CA local; NO la instala ni confía automáticamente
+    /// Generates a local CA; does NOT install or trust it automatically
     InitCa,
-    /// Habilita el listener sólo para hosts DNS exactos
+    /// Enables the listener only for exact DNS hosts
     Enable {
-        /// Host autorizado; repetir para cada endpoint hardcodeado
+        /// Authorized host; repeat for each hardcoded endpoint
         #[arg(long = "host", required = true)]
         hosts: Vec<String>,
-        /// Listener loopback separado del reverse proxy
+        /// Loopback listener separate from the reverse proxy
         #[arg(long, default_value = "127.0.0.1:8788")]
         listen: String,
     },
-    /// Deshabilita el listener sin borrar la CA
+    /// Disables the listener without deleting the CA
     Disable,
-    /// Imprime instrucciones manuales; nunca modifica el trust store
+    /// Prints manual instructions; never modifies the trust store
     TrustInstructions,
 }
 
@@ -162,15 +162,16 @@ async fn main() -> ExitCode {
         Command::License => {
             let path = daemon::license_path();
             let mgr = daemon::load_license(Some(&path));
-            println!("Licencia cargada desde: {}", path.display());
+            println!("License loaded from: {}", path.display());
             println!("{}", daemon::license_summary(&mgr));
             ExitCode::SUCCESS
         }
         Command::Pack { pack } => {
-            // Revisor v6 (P1): si el daemon está en marcha, el CLI es CLIENTE
-            // del control plane HTTP — NO abre otro PackManager ni toca disco
-            // (el worker del daemon es el único escritor del manifest). Solo
-            // sin daemon (pid file ausente/muerto) se usa el modo local.
+            // Reviewer v6 (P1): if the daemon is running, the CLI is a CLIENT
+            // of the HTTP control plane — it does NOT open another PackManager
+            // nor touch disk (the daemon's worker is the only manifest
+            // writer). Only without a daemon (pid file missing/dead) is local
+            // mode used.
             if cli_pack::daemon_is_running() {
                 match pack {
                     PackCmd::Install { file } => match cli_pack::install(&file).await {
@@ -240,11 +241,11 @@ async fn main() -> ExitCode {
             }
         }
         Command::Mitm { mitm: command } => {
-            // F4: el enmadrado de `enable`/`disable` comprueba si el daemon
-            // está en marcha. La config MITM se lee SOLO al arrancar y no hay
-            // `/api/mitm` en caliente (el control plane es de otro agente):
-            // si el daemon vive, el comando persiste la config y añade la nota
-            // clara de "edita ~/.cerberus/mitm.json y reinicia".
+            // F4: the wiring of `enable`/`disable` checks whether the daemon
+            // is running. The MITM config is read ONLY at boot and there is no
+            // `/api/mitm` at runtime (the control plane is another agent's):
+            // if the daemon is live, the command persists the config and adds
+            // the clear note "edit ~/.cerberus/mitm.json and restart".
             let daemon_running = crate::daemon::is_running();
             let result = match command {
                 MitmCmd::Status => Ok(mitm::status()),

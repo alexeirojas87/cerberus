@@ -1,43 +1,43 @@
-# Evidence Pack — Fase 2 / reversible-vault
-- Intento: 1    Revisor: Builder    Veredicto: PASS
+# Evidence Pack — Phase 2 / reversible-vault
+- Attempt: 1    Reviewer: Builder    Verdict: PASS
 
-## Criterios de aceptación
-| Criterio | Comando ejecutado | Salida | Resultado |
+## Acceptance criteria
+| Criterion | Command executed | Output | Result |
 |----------|-------------------|--------|-----------|
 | `cargo build --workspace` | `cargo build --workspace` | 0 errors | ✅ |
 | `cargo test -p cerberus-engine` | `cargo test -p cerberus-engine` | 180 passed; 0 failed | ✅ |
 | `cargo clippy --all-targets -- -D warnings` | `cargo clippy --all-targets -- -D warnings` | No issues found | ✅ |
 | `cargo fmt --check` | `cargo fmt --check` | No diffs | ✅ |
-| store/resolve round-trip funciona | `test::store_and_resolve` | Pass | ✅ |
-| resolve_str con wrapper [VAULT:...] funciona | `test::resolve_str_with_wrapper` | Pass | ✅ |
-| resolve_str con id directo funciona | `test::resolve_str_direct_id` | Pass | ✅ |
-| Token inexistente devuelve None | `test::resolve_nonexistent_token` | Pass | ✅ |
-| Vault vacío al inicio | `test::vault_is_empty_initially` | Pass | ✅ |
-| len() incrementa con stores | `test::vault_len_increases` | Pass | ✅ |
-| clear() remueve todo | `test::clear_removes_all` | Pass | ✅ |
-| Tokens monótonos (v1, v2, ...) | `test::tokens_are_monotonic` | Pass | ✅ |
-| ReversibleOptions default deshabilitado | `test::reversible_options_default_disabled` | Pass | ✅ |
-| ReversibleOptions.enabled() funciona | `test::reversible_options_enabled` | Pass | ✅ |
+| store/resolve round-trip works | `test::store_and_resolve` | Pass | ✅ |
+| resolve_str with wrapper [VAULT:...] works | `test::resolve_str_with_wrapper` | Pass | ✅ |
+| resolve_str with direct id works | `test::resolve_str_direct_id` | Pass | ✅ |
+| Nonexistent token returns None | `test::resolve_nonexistent_token` | Pass | ✅ |
+| Empty vault at start | `test::vault_is_empty_initially` | Pass | ✅ |
+| len() increments with stores | `test::vault_len_increases` | Pass | ✅ |
+| clear() removes everything | `test::clear_removes_all` | Pass | ✅ |
+| Monotonic tokens (v1, v2, ...) | `test::tokens_are_monotonic` | Pass | ✅ |
+| ReversibleOptions default disabled | `test::reversible_options_default_disabled` | Pass | ✅ |
+| ReversibleOptions.enabled() works | `test::reversible_options_enabled` | Pass | ✅ |
 
-## Casos adversariales probados
-- Token con formato [VAULT:...] extraído correctamente
-- Token sin wrapper (id directo) también funciona
-- Token inexistente → None (no panic)
-- Thread-safe via Mutex (acceso concurrente)
-- Contador monótono: IDs secuenciales
-- clear() después de store → vault vacío
+## Adversarial cases tested
+- Token with [VAULT:...] format extracted correctly
+- Token without wrapper (direct id) also works
+- Nonexistent token → None (no panic)
+- Thread-safe via Mutex (concurrent access)
+- Monotonic counter: sequential IDs
+- clear() after store → empty vault
 
-## NFR aplicables
-- N/A (no aplica latencia/seguridad para esta unidad)
+## Applicable NFRs
+- N/A (no latency/security applies to this unit)
 
-## Archivos
-- `crates/cerberus-engine/src/vault.rs` (nuevo)
-- `crates/cerberus-engine/src/lib.rs` (modificado: +pub mod vault)
+## Files
+- `crates/cerberus-engine/src/vault.rs` (new)
+- `crates/cerberus-engine/src/lib.rs` (modified: +pub mod vault)
 
 ## SHAs
 ```
-TODO: sha256sum de archivos nuevos
+TODO: sha256sum of new files
 ```
 
-## Desviaciones del plan
-Ninguna. Implementa reversible-vault: bóveda local thread-safe con tokens [VAULT:vN] y opción ReversibleOptions para activarla.
+## Deviations from plan
+None. It implements reversible-vault: a thread-safe local vault with [VAULT:vN] tokens and a ReversibleOptions flag to enable it.

@@ -1,26 +1,26 @@
 name: release
 
-# Release pipeline — F8 (installers multiplataforma).
-# Dispara en cada push a main (prerelease con tag v<version>-ci.<sha>)
-# y vía workflow_dispatch (draft).
+# Release pipeline — F8 (cross-platform installers).
+# Triggers on every push to main (prerelease with tag v<version>-ci.<sha>)
+# and via workflow_dispatch (draft).
 #
-#   build (matrix 5 targets): compila cerberus --release y prepara artefactos
-#                             con el MISMO esquema de nombres que install.sh,
-#                             la formula Homebrew y el manifest de winget:
+#   build (matrix 5 targets): compiles cerberus --release and prepares artifacts
+#                             with the SAME naming scheme used by install.sh,
+#                             the Homebrew formula and the winget manifest:
 #                               cerberus-<version>-<os>-<arch>.tar.gz|.zip
-#                             + SHA256SUMS. En el mismo job se inyecta la
-#                             firma real cuando hay credenciales:
+#                             + SHA256SUMS. The real signature is injected in
+#                             the same job when credentials are present:
 #                             - macOS : codesign + notarytool + stapler
 #                                       (secrets APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
 #                                        APPLE_TEAM_ID / APPLE_IDENTITY)
 #                             - Windows: signtool Authenticode
-#                                       (secrets WINDOWS_SIGN_CERT = pfx en base64 /
+#                                       (secrets WINDOWS_SIGN_CERT = pfx in base64 /
 #                                        WINDOWS_SIGN_PASSWORD)
-#                             Sin credenciales esos steps se omiten y los
-#                             binarios salen sin firmar (documentado).
-#   release        : agrega todo y crea el GitHub Release + SHA256SUMS global.
+#                             Without credentials these steps are skipped and the
+#                             binaries are published unsigned (documented).
+#   release        : aggregates everything and creates the GitHub Release + global SHA256SUMS.
 #
-# Helm y firma de packs los cubre otro agente — aquí SOLO vending.
+# Helm and pack signing are covered by another agent — ONLY vending here.
 
 on:
   push:
@@ -100,7 +100,7 @@ jobs:
           echo "$art"
           echo "artifact=$art" >> "$GITHUB_OUTPUT"
 
-      # ── Firma macOS (solo si la CI tiene credenciales de Apple) ────────────
+      # ── macOS signing (only if the CI has Apple credentials) ────────────
       - name: codesign + notarize (macOS)
         if: ${{ runner.os == 'macOS' && env.HAS_APPLE_CREDS == 'true' }}
         env:
@@ -111,10 +111,10 @@ jobs:
           HAS_APPLE_CREDS: ${{ (secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '') && 'true' || 'false' }}
         run: |
           ARF="dist/${{ steps.build.outputs.artifact }}"
-          echo "firmando $ARF"
+          echo "signing $ARF"
           bash -x tools/release/macos-notarize.sh "$ARF"
 
-      # ── Firma Authenticode Windows (solo con credenciales) ─────────────────
+      # ── Windows Authenticode signing (only with credentials) ─────────────────
       - name: signtool Authenticode
         if: ${{ matrix.os == 'windows-latest' && env.HAS_WIN_CREDS == 'true' }}
         shell: bash
@@ -123,22 +123,22 @@ jobs:
           WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
           HAS_WIN_CREDS: ${{ (secrets.WINDOWS_SIGN_CERT != '' && secrets.WINDOWS_SIGN_PASSWORD != '') && 'true' || 'false' }}
         run: |
-          # 1) extraer cerberus.exe del .zip
+          # 1) extract cerberus.exe from the .zip
           python - <<'PY'
           import glob, zipfile
           zips = glob.glob('dist/*.zip')
-          assert zips, 'no zip en dist/'
+          assert zips, 'no zip in dist/'
           zipfile.ZipFile(zips[0]).extractall('dist/exe')
           PY
-          # 2) localizar signtool del Windows SDK en el runner
+          # 2) locate signtool from the Windows SDK on the runner
           signtool_path="$(ls /c/Program\ Files*/Windows\ Kits/10/bin/*/x64/signtool.exe 2>/dev/null | head -1)"
-          [ -n "$signtool_path" ] || { echo "signtool no hallado; instalar Windows SDK (choco install windows-sdk)"; exit 1; }
+          [ -n "$signtool_path" ] || { echo "signtool not found; install Windows SDK (choco install windows-sdk)"; exit 1; }
           export PATH="$PATH:$(dirname "$signtool_path")"
-          # 3) certificado PFX (en base64) y firma
+          # 3) PFX certificate (in base64) and signing
           echo "$WINDOWS_SIGN_CERT" | base64 --decode > /tmp/cerberus-cert.pfx
           export WINDOWS_SIGN_CERT=/tmp/cerberus-cert.pfx
           bash tools/release/windows-sign.sh dist/exe/cerberus.exe
-          # 4) re-empaquetar zip con el exe FIRMAADO mismo nombre + sumas
+          # 4) re-pack the zip with the SIGNED exe, same name + checksums
           python - <<'PY'
           import glob, os, zipfile
           zips = [f for f in glob.glob('dist/*.zip')]
@@ -146,7 +146,7 @@ jobs:
           z = zips[0]
           with zipfile.ZipFile(z, 'w', zipfile.ZIP_DEFLATED) as zo:
               zo.write('dist/exe/cerberus.exe', 'cerberus.exe')
-          print('re-empaquetado', z)
+          print('re-packaged', z)
           PY
           (cd dist && sha256sum *.zip > SHA256SUMS)
           cat dist/SHA256SUMS
@@ -166,7 +166,7 @@ jobs:
             dist/SHA256SUMS
           if-no-files-found: error
 
-  # ── Publicación del GitHub Release ─────────────────────────────────────────
+  # ── GitHub Release publishing ─────────────────────────────────────────
   release:
     name: release
     needs: [build]
@@ -188,8 +188,8 @@ jobs:
           VER="$(sed -nE 's/^version = "([^"]+)"/\1/p' crates/cerberus/Cargo.toml | head -1)"
           SHA="$(git rev-parse --short HEAD)"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          # Cada push a main = prerelease con tag único basado en SHA.
-          # Los tags v* manuales siguen creando releases estables.
+          # Each push to main = prerelease with a unique tag based on SHA.
+          # Manual v* tags still create stable releases.
           echo "tag=v${VER}-ci.${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Global SHA256SUMS
@@ -213,10 +213,10 @@ jobs:
             --title "Cerberus ${{ steps.ver.outputs.version }} (CI build ${{ github.sha }})" \
             --notes "Automated release from push to main.
 
-          Artefactos:
+          Artifacts:
           - macOS/Linux: cerberus-<v>-macos|linux-{x86_64,aarch64}.tar.gz
           - Windows: cerberus-<v>-windows-x86_64.zip
-          - SHA256SUMS adjunto por integridad de descarga.
+          - SHA256SUMS attached for download integrity.
 
-          Sin credenciales de firma en CI, los binarios salen sin firmar." \
+          Without signing credentials in CI, binaries are published unsigned." \
             --prerelease

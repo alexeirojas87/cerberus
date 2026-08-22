@@ -1,74 +1,74 @@
-//! Rule pack format — versioned, signed rule packs (§7 del build plan).
+//! Rule pack format — versioned, signed rule packs (§7 of the build plan).
 //!
-//! Un rule pack es un conjunto de reglas de detección empaquetado con
-//! metadatos (nombre, versión, descripción) y firmado con Ed25519 para
-//! garantizar integridad y autenticidad.
+//! A rule pack is a set of detection rules packaged with metadata
+//! (name, version, description) and signed with Ed25519 to guarantee
+//! integrity and authenticity.
 
 use cerberus_engine::rule::Rule;
 use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
 
-/// Metadatos de un rule pack.
+/// Metadata for a rule pack.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackMetadata {
-    /// Nombre del pack, ej. "secrets-core".
+    /// Pack name, e.g. "secrets-core".
     pub name: String,
-    /// Versión semántica, ej. "1.2.0".
+    /// Semantic version, e.g. "1.2.0".
     pub version: String,
-    /// Descripción legible.
+    /// Human-readable description.
     pub description: String,
-    /// Autor/editor del pack.
+    /// Pack author/publisher.
     pub author: String,
-    /// Fecha de publicación `ISO 8601`.
+    /// Publication date `ISO 8601`.
     pub published: String,
-    /// Pack requerido mínima versión del engine.
+    /// Minimum required engine version for the pack.
     pub min_engine_version: String,
 }
 
-/// Un rule pack completo (sin firmar).
+/// A complete (unsigned) rule pack.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RulePack {
-    /// Metadatos del pack.
+    /// Pack metadata.
     pub metadata: PackMetadata,
-    /// Reglas del pack.
+    /// Pack rules.
     pub rules: Vec<Rule>,
 }
 
-/// Un rule pack firmado con Ed25519.
+/// A rule pack signed with Ed25519.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedRulePack {
-    /// Contenido del pack en JSON (serializado para firma).
+    /// Pack content as JSON (serialized for signing).
     pub pack_json: String,
-    /// Firma Ed25519 en hex.
+    /// Ed25519 signature in hex.
     pub signature_hex: String,
-    /// Clave pública del firmante en hex.
+    /// Signer public key in hex.
     pub signer_public_key_hex: String,
 }
 
 impl RulePack {
-    /// Serializar el pack a JSON.
+    /// Serialize the pack to JSON.
     ///
     /// # Errors
     ///
-    /// Devuelve error si la serialización falla.
+    /// Returns an error if serialization fails.
     pub fn to_json(&self) -> Result<String, String> {
         serde_json::to_string(self).map_err(|e| format!("serialize pack: {e}"))
     }
 
-    /// Deserializar un pack desde JSON.
+    /// Deserialize a pack from JSON.
     ///
     /// # Errors
     ///
-    /// Devuelve error si el JSON no es válido.
+    /// Returns an error if the JSON is invalid.
     pub fn from_json(json: &str) -> Result<Self, String> {
         serde_json::from_str(json).map_err(|e| format!("deserialize pack: {e}"))
     }
 
-    /// Compilar todas las reglas del pack en el engine.
+    /// Compile all the pack's rules into the engine.
     ///
     /// # Errors
     ///
-    /// Devuelve error si alguna regla no compila.
+    /// Returns an error if any rule fails to compile.
     pub fn compile(&self) -> Result<(), String> {
         let _engine = cerberus_engine::engine::EngineBuilder::new(&self.rules)
             .build()
@@ -76,7 +76,7 @@ impl RulePack {
         Ok(())
     }
 
-    /// Obtener el conteo de reglas.
+    /// Get the rule count.
     #[must_use]
     pub const fn rule_count(&self) -> usize {
         self.rules.len()
@@ -84,11 +84,11 @@ impl RulePack {
 }
 
 impl SignedRulePack {
-    /// Crear un `SignedRulePack` firmando un `RulePack`.
+    /// Create a `SignedRulePack` by signing a `RulePack`.
     ///
     /// # Errors
     ///
-    /// Devuelve error si la serialización o firma fallan.
+    /// Returns an error if serialization or signing fails.
     pub fn sign(pack: &RulePack, keypair: &ed25519_dalek::SigningKey) -> Result<Self, String> {
         let pack_json = pack.to_json()?;
         let signature = keypair.sign(pack_json.as_bytes());
@@ -102,11 +102,11 @@ impl SignedRulePack {
         })
     }
 
-    /// Verificar la firma del pack.
+    /// Verify the pack signature.
     ///
     /// # Errors
     ///
-    /// Devuelve error si la firma no es válida.
+    /// Returns an error if the signature is invalid.
     pub fn verify(&self) -> Result<(), String> {
         let signature_bytes = hex::decode(&self.signature_hex).map_err(|e| format!("invalid signature hex: {e}"))?;
         let signature =
@@ -128,12 +128,12 @@ impl SignedRulePack {
         Ok(())
     }
 
-    /// Verificar la firma del pack contra una clave pública de confianza
-    /// (trust root). Cualquier pack firmado por otra clave es rechazado.
+    /// Verify the pack signature against a trusted public key (trust root).
+    /// Any pack signed by another key is rejected.
     ///
     /// # Errors
     ///
-    /// Devuelve error si la firma no es válida o la clave no coincide.
+    /// Returns an error if the signature is invalid or the key does not match.
     pub fn verify_with_trusted_root(&self, expected_public_key_hex: &str) -> Result<(), String> {
         if !self.signer_public_key_hex.eq_ignore_ascii_case(expected_public_key_hex) {
             return Err(format!(
@@ -144,18 +144,19 @@ impl SignedRulePack {
         self.verify()
     }
 
-    /// Deserializar el `RulePack` interno.
+    /// Deserialize the inner `RulePack`.
     ///
-    /// La firma SIEMPRE se verifica contra un trust root: la variable de
-    /// entorno `CERBERUS_PACK_TRUST_ROOT`. Sin trust root NO se acepta:
-    /// falla-closed (regresión revisión 2, P1 #4). El `signer_public_key_hex`
-    /// del propio pack jamás puede servir de root (pack autofirmado por el
-    /// atacante). Para un root explícito usar [`Self::extract_with_root`].
+    /// The signature is ALWAYS verified against a trust root: the
+    /// `CERBERUS_PACK_TRUST_ROOT` environment variable. Without a trust root
+    /// it is NOT accepted: fail-closed (review 2 regression, P1 #4). The
+    /// `signer_public_key_hex` of the pack itself can never serve as root
+    /// (self-signed pack by the attacker). For an explicit root use
+    /// [`Self::extract_with_root`].
     ///
     /// # Errors
     ///
-    /// Devuelve error si no hay trust root, la firma no es válida o el JSON
-    /// no se puede parsear.
+    /// Returns an error if there is no trust root, the signature is invalid,
+    /// or the JSON cannot be parsed.
     pub fn extract(&self) -> Result<RulePack, String> {
         let root = std::env::var("CERBERUS_PACK_TRUST_ROOT").ok().filter(|r| !r.is_empty());
         let Some(root) = root else {
@@ -167,14 +168,14 @@ impl SignedRulePack {
         self.extract_with_root(&root)
     }
 
-    /// Deserializar el `RulePack` interno verificando contra una clave raíz de
-    /// confianza EXPLÍCITA. Esta es la vía a usar por callers que ya resuelven
-    /// el root desde su propia config confiable, sin depender del entorno.
+    /// Deserialize the inner `RulePack` verifying against an EXPLICIT trust
+    /// root key. This is the path to use for callers that already resolve the
+    /// root from their own trusted config, without depending on the environment.
     ///
     /// # Errors
     ///
-    /// Devuelve error si la firma no es válida, no coincide con `root_hex`, o
-    /// el JSON no se puede parsear.
+    /// Returns an error if the signature is invalid, does not match
+    /// `root_hex`, or the JSON cannot be parsed.
     pub fn extract_with_root(&self, root_key: &str) -> Result<RulePack, String> {
         self.verify_with_trusted_root(root_key)?;
         RulePack::from_json(&self.pack_json).map_err(|e| format!("deserialize pack: {e}"))
@@ -188,8 +189,8 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use std::sync::Mutex;
 
-    /// Guard para serializar los (pocos) tests que tocan `std::env`
-    /// (ver carrera con `--test-threads=N`).
+    /// Guard to serialize the (few) tests that touch `std::env`
+    /// (see race with `--test-threads=N`).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn sample_pack() -> RulePack {
@@ -266,10 +267,10 @@ mod tests {
         let keypair = test_keypair();
         let signed = SignedRulePack::sign(&pack, &keypair).unwrap();
 
-        // Sin CERBERUS_PACK_TRUST_ROOT → fail-closed (regresión revisión 2,
-        // P1 #4). El signer del propio pack jamás es root.
+        // Without CERBERUS_PACK_TRUST_ROOT → fail-closed (review 2 regression,
+        // P1 #4). The pack's own signer is never a root.
         std::env::remove_var("CERBERUS_PACK_TRUST_ROOT");
-        assert!(signed.extract().is_err(), "sin trust root no debe pasar");
+        assert!(signed.extract().is_err(), "without a trust root it must not pass");
     }
 
     #[test]
@@ -278,7 +279,7 @@ mod tests {
         let keypair = test_keypair();
 
         let signed = SignedRulePack::sign(&pack, &keypair).unwrap();
-        // Root explícito como parámetro (sin tocar el entorno del proceso).
+        // Explicit root as a parameter (without touching the process env).
         let root = hex::encode(keypair.verifying_key().as_bytes());
         let extracted = signed.extract_with_root(&root).unwrap();
         assert_eq!(extracted.metadata.name, "test-pack");
@@ -295,7 +296,7 @@ mod tests {
         let attacker_root = hex::encode(attacker.verifying_key().as_bytes());
         assert!(
             signed.extract_with_root(&attacker_root).is_err(),
-            "root de otro firmante no debe pasar"
+            "a root from another signer must not pass"
         );
     }
 

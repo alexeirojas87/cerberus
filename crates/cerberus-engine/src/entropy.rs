@@ -9,9 +9,9 @@ use regex::Regex;
 use crate::engine::{hash_value, Finding};
 use crate::rule::{Action, Category, Severity};
 
-/// Hashear un valor: HMAC-SHA256 si hay secret, si no SHA-256 plano.
-/// (Revisión 2, P2 #11: la entropía ya no emite SHA-256 determinista cuando el
-/// proxy tiene `CERBERUS_HMAC_SECRET`.)
+/// Hash a value: HMAC-SHA256 if a secret is present, otherwise plain SHA-256.
+/// (Review 2, P2 #11: entropy no longer emits deterministic SHA-256 when the
+/// proxy has `CERBERUS_HMAC_SECRET`.)
 #[must_use]
 fn hash_with_secret(value: &str, secret: Option<&[u8]>) -> String {
     secret.map_or_else(
@@ -78,8 +78,8 @@ pub fn shannon_entropy(text: &str) -> f64 {
 ///
 /// For each keyword occurrence, searches up to [`NEAR_KEYWORD_WINDOW`] bytes
 /// forward for a candidate value. If the value's Shannon entropy exceeds
-/// `threshold`, a [`Finding`] is produced. `secret` (opcional) habilita
-/// HMAC-SHA256 en lugar de SHA-256 plano (revisión 2, P2 #11).
+/// `threshold`, a [`Finding`] is produced. `secret` (optional) enables
+/// HMAC-SHA256 instead of plain SHA-256 (review 2, P2 #11).
 #[must_use]
 pub fn detect_near_keywords(text: &str, threshold: f64, secret: Option<&[u8]>) -> Vec<Finding> {
     let mut findings = Vec::new();

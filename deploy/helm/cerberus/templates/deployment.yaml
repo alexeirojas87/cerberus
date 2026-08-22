@@ -33,15 +33,15 @@ spec:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # El binario escucha en 8080 dentro del pod (puerto canónico del
-          # chart); el Service se encarga de exponer 8787 hacia la flota.
+          # The binary listens on 8080 inside the pod (canonical port for the
+          # chart); the Service exposes 8787 to the fleet.
           args:
             - start
             - --port
             - {{ .Values.service.targetPort | quote }}
           env:
-            # Fuerza bind a todas las interfaces (necesario en K8s); el listener
-            # no-loopback exige token de admin fuerte (garantizado por el chart).
+            # Force binding to all interfaces (required in K8s); the non-loopback
+            # listener requires a strong admin token (guaranteed by the chart).
             - name: CERBERUS_LISTEN_HOST
               value: "0.0.0.0"
             {{- if .Values.config.admin.token }}

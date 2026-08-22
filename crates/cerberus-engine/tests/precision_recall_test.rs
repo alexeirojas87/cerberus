@@ -33,23 +33,23 @@ const CORPUS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 const ENTROPY_FLAG: &str = "entropy.high_entropy_secret";
 
-/// Una instancia esperada: el valor literal exacto (raw) que debe detectarse.
+/// An expected instance: the exact literal (raw) value that must be detected.
 struct ExpectedInstance {
     flag: &'static str,
     value: &'static str,
 }
 
 impl ExpectedInstance {
-    /// Span (start,end) del valor dentro del texto del archivo.
+    /// Span (start,end) of the value within the file text.
     fn span_in(&self, text: &str) -> Option<(usize, usize)> {
         let start = text.find(self.value)?;
         Some((start, start + self.value.len()))
     }
 
-    /// Posiciones de inicio de TODAS las apariciones sucesivas de `value` en
-    /// `text`. (review 5, item 5: `text.find` solo ve la primera ocurrencia;
-    /// con literales repetidos se debe asignar a cada instancia su k-ésima
-    /// aparición, no la primera de todas.)
+    /// Start positions of ALL successive occurrences of `value` in `text`.
+    /// (review 5, item 5: `text.find` only sees the first occurrence; with
+    /// repeated literals each instance must be assigned its k-th occurrence,
+    /// not the first one.)
     fn span_in_all(&self, text: &str) -> Vec<usize> {
         let val = self.value;
         let mut positions: Vec<usize> = Vec::new();
@@ -69,8 +69,8 @@ impl ExpectedInstance {
 
 struct CorpusFile {
     path: &'static str,
-    /// Ground truth PER INSTANCE: cada secreto individual del archivo con su
-    /// valor literal (nunca inventado: leído del corpus).
+    /// Ground truth PER INSTANCE: each individual secret in the file with its
+    /// literal value (never invented: read from the corpus).
     instances: &'static [ExpectedInstance],
     label: &'static str,
 }
@@ -338,7 +338,7 @@ fn write_results(results: &Results) {
     output.push_str("     occurrence of that literal for the k-th instance sharing the\n");
     output.push_str("     same (flag, value) (span_in_all), never just text.find (first match).\n");
     output.push_str("  2. A finding counts as TP only if it overlaps the span of a DIFFERENT\n");
-    output.push_str("     expected instance of the same flag (greedy, one finding/con instance).\n");
+    output.push_str("     expected instance of the same flag (greedy, one finding per instance).\n");
     output.push_str("  3. Two same-flag instances can NEVER substitute for each other (item 8).\n");
     output.push_str("  4. Entropy findings overlapping an already-consumed named secret are\n");
     output.push_str("     excluded (duplicate detector); all other non-consuming findings are FP.\n");
@@ -363,15 +363,16 @@ fn run_measurement() -> Results {
             ..Default::default()
         };
 
-        // 1) Localizar los spans de cada instancia esperada dentro del archivo.
-        //    (review 5, item 5:) el span de una instancia es la (k+1)-ésima
-        //    aparición de su `value`, donde k es el índice de la instancia
-        //    dentro de la lista de instancias de su (flag, valor). Así dos
-        //    instancias del mismo flag con el mismo literal no chocan: cada
-        //    una recibe una ocurrencia distinta (no gaps: si faltan apariciones, panic).
+        // 1) Locate the spans of each expected instance within the file.
+        //    (review 5, item 5:) the span of an instance is the (k+1)-th
+        //    occurrence of its `value`, where k is the index of the instance
+        //    within the list of instances of its (flag, value). This way two
+        //    instances of the same flag with the same literal do not collide:
+        //    each one receives a distinct occurrence (no gaps: if occurrences
+        //    are missing, panic).
         let mut expected_spans: Vec<(usize, (usize, usize))> = Vec::new(); // (idx, span)
-                                                                           // k = índice de la instancia dentro de su (flag, value) en el corpus:
-                                                                           // para literales repetidos cada instancia toma su k-ésima aparición.
+                                                                           // k = index of the instance within its (flag, value) in the corpus:
+                                                                           // for repeated literals each instance takes its k-th occurrence.
         let mut group_counter: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
         for (i, inst) in entry.instances.iter().enumerate() {
             let k = group_counter.get(&(inst.flag, inst.value)).copied().unwrap_or(0);
@@ -389,15 +390,15 @@ fn run_measurement() -> Results {
             expected_spans.push((i, (start, start + inst.value.len())));
         }
 
-        // 2) Consumo greedy de instancias: cada finding puede consumir como
-        //    máximo UNA instancia esperada del MISMO flag cuyo span solapa.
-        //    (review 4, item 8: dos instancias del mismo flag nunca se suplen.)
+        // 2) Greedy consumption of instances: each finding can consume at most
+        //    ONE expected instance of the SAME flag whose span overlaps.
+        //    (review 4, item 8: two instances of the same flag never substitute.)
         let mut consumed = vec![false; entry.instances.len()];
-        // Spans de instancias ya consumidas por findings de flag NO-entropía:
-        // sirven para excluir la entropía que replica un secreto nombrado.
+        // Spans of instances already consumed by non-entropy findings:
+        // used to exclude entropy that replicates a named secret.
         let mut named_consumed_spans: Vec<(usize, usize)> = Vec::new();
 
-        // Pasada 1: findings no-entropía (nombrados).
+        // Pass 1: non-entropy (named) findings.
         for f in output.findings.iter().filter(|f| !is_entropy_finding(f)) {
             let mut hit = false;
             for (i, inst) in entry.instances.iter().enumerate() {
@@ -420,7 +421,7 @@ fn run_measurement() -> Results {
             }
         }
 
-        // Pasada 2: findings de entropía.
+        // Pass 2: entropy findings.
         for f in output.findings.iter().filter(|f| is_entropy_finding(f)) {
             let mut hit = false;
             for (i, inst) in entry.instances.iter().enumerate() {
@@ -438,8 +439,8 @@ fn run_measurement() -> Results {
                 }
             }
             if !hit {
-                // Entropía que replica un secreto nombrado ya consumido:
-                // detector duplicado → excluida (ni TP ni FP).
+                // Entropy replicating an already-consumed named secret:
+                // duplicate detector → excluded (neither TP nor FP).
                 if named_consumed_spans
                     .iter()
                     .any(|sp| spans_overlap((f.start, f.end), *sp))
@@ -451,7 +452,7 @@ fn run_measurement() -> Results {
             }
         }
 
-        // 3) Instancias esperadas no consumidas → FN (miss real, por span).
+        // 3) Expected instances not consumed → FN (real miss, by span).
         let mut under = 0usize;
         for (i, &consumed_flag) in consumed.iter().enumerate() {
             if !consumed_flag {
@@ -462,7 +463,7 @@ fn run_measurement() -> Results {
         }
         results.total_expected += entry.total_expected();
 
-        // Filas por flag para el reporte (per-instancia).
+        // Rows per flag for the report (per-instance).
         let mut per_flag_expected: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for inst in entry.instances {
             *per_flag_expected.entry(inst.flag).or_insert(0) += 1;
@@ -483,8 +484,8 @@ fn run_measurement() -> Results {
                 under: expected.saturating_sub(found),
             });
         }
-        // (review 5, item 6:) las filas se vuelcan en orden lexicográfico de
-        // flag para que el reporte sea reproducible (HashMap no tiene orden).
+        // (review 5, item 6:) rows are dumped in lexicographic flag order so
+        // the report is reproducible (HashMap has no order).
         rows.sort_by_key(|r| r.flag.clone());
 
         let detected_total = cat.detected;
@@ -542,10 +543,10 @@ fn precision_recall_measurement() {
         POSITIVE_FILES.len() + NEGATIVE_FILES.len()
     );
 
-    // Gates del Gauntlet F1 con métrica PER-INstancia:
-    //  - Recall >= 90%  (verificado: 94.3% sobre 35 instancias reales).
-    //  - Precision >= 85% (verificado: 89.2% con 1 entropy FP y 3 FPs de
-    //    negativos + horizontes).
+    // F1 Gauntlet gates with PER-INSTANCE metric:
+    //  - Recall >= 90%  (verified: 94.3% over 35 real instances).
+    //  - Precision >= 85% (verified: 89.2% with 1 entropy FP and 3 FPs from
+    //    negatives + horizons).
     assert!(recall >= 0.90, "Recall too low: {:.1}% (gate >= 90%)", recall * 100.0);
     assert!(
         precision >= 0.85,
@@ -587,10 +588,10 @@ fn positive_files_detected() {
     }
 }
 
-/// Test de honestidad del ground truth por instancia (review 4, item 8):
-/// dos instancias del MISMO flag donde solo una es detectada deben reportar
-/// recall 1/2 (no 2/2). Con ground truth (flag,count) el min(found,expected)
-/// hubiera inflado a 2/2.
+/// Per-instance ground-truth honesty test (review 4, item 8):
+/// two instances of the SAME flag where only one is detected must report
+/// recall 1/2 (not 2/2). With (flag,count) ground truth min(found,expected)
+/// would have inflated it to 2/2.
 #[test]
 fn per_instance_recall_does_not_substitute_same_flag() {
     let rules = vec![cerberus_engine::rule::Rule {
@@ -608,12 +609,12 @@ fn per_instance_recall_does_not_substitute_same_flag() {
     }];
     let engine = EngineBuilder::new(&rules).build().unwrap();
 
-    // El motor detecta solo la minúscula (la mayúscula no casa el regex).
+    // The engine detects only the lowercase one (the uppercase does not match the regex).
     let text = "a@b.com y A@b.com";
     let output = scan(&engine, &ScanRequest::new(text));
     assert_eq!(output.findings.len(), 1, "expected only lowercase email detected");
 
-    // Ground truth por instancia con valor literal exacto.
+    // Per-instance ground truth with exact literal value.
     let inst1 = ExpectedInstance {
         flag: "t.email",
         value: "a@b.com",
@@ -641,7 +642,7 @@ fn per_instance_recall_does_not_substitute_same_flag() {
         }
     }
     let total_expected = 2;
-    // La instancia "A@b.com" NO fue detectada: no hay finding que cubra su span.
+    // The "A@b.com" instance was NOT detected: no finding covers its span.
     assert!(!consumed[1], "uppercase instance must NOT be counted as detected");
     let recall = total_detected as f64 / total_expected as f64;
     assert!(

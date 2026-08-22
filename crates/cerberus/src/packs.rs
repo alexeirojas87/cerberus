@@ -1,10 +1,10 @@
-//! Default rule packs — reglas de detección incluidas por defecto.
+//! Default rule packs — detection rules included by default.
 //!
-//! El contenido del pack por defecto vive en `cerberus_packs::default_pack`
-//! (fuente única de verdad). Este módulo lo expone al daemon/CLI y mantiene
-//! los tests de coherencia del pack.
+//! The default pack content lives in `cerberus_packs::default_pack`
+//! (single source of truth). This module exposes it to the daemon/CLI and
+//! maintains the pack coherence tests.
 
-/// Obtener el JSON de reglas por defecto (delegado a `cerberus_packs`).
+/// Get the default rules JSON (delegated to `cerberus_packs`).
 #[must_use]
 pub(crate) fn default_rules_json() -> String {
     cerberus_packs::default_pack::DEFAULT_PACK_JSON.to_string()

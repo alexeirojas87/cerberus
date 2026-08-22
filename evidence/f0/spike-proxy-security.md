@@ -1,171 +1,171 @@
 # Evidence Pack — f0/spike-proxy-security
 
-- **Rol**: REVISOR 3 (Security)
-- **Unidad**: spike-proxy
-- **Veredicto**: PASS
+- **Role**: REVIEWER 3 (Security)
+- **Unit**: spike-proxy
+- **Verdict**: PASS
 
-## Resumen
+## Summary
 
-Revisión de seguridad sobre el reverse proxy de spike (Fase 0). Todos los
-criterios PASS. Se documentan 4 hallazgos de severidad baja/media, ninguno
-bloqueante para un spike local.
+Security review of the spike reverse proxy (Phase 0). All
+criteria PASS. 4 low/medium severity findings are documented, none
+blocking for a local spike.
 
-## Criterios de Seguridad
+## Security Criteria
 
 ### 1. Build ✅
 
-| Comando | Resultado |
+| Command | Result |
 |---------|-----------|
-| `cargo build --release --workspace` | ✅ 0 errores |
+| `cargo build --release --workspace` | ✅ 0 errors |
 
 ### 2. Tests ✅
 
-| Comando | Resultado |
+| Command | Result |
 |---------|-----------|
 | `cargo test -p spike-proxy` | ✅ 7/7 passed (3 unit lib + 4 integration) |
 
-### 3. Reenvío de headers hostiles / sanitización ✅
+### 3. Hostile header forwarding / sanitization ✅
 
-**Archivo**: `crates/spike-proxy/src/proxy.rs:16-24, 147-152`
+**File**: `crates/spike-proxy/src/proxy.rs:16-24, 147-152`
 
-El proxy tiene un allowlist de headers **skip** (hop-by-hop): `host`,
+The proxy has a header **skip** allowlist (hop-by-hop): `host`,
 `content-length`, `connection`, `keep-alive`, `proxy-connection`,
-`transfer-encoding`, `upgrade`. Todos los demás headers se reenvían
-**verbatim**, incluyendo `authorization`, `cookie`, `x-api-key`, etc.
+`transfer-encoding`, `upgrade`. All other headers are forwarded
+**verbatim**, including `authorization`, `cookie`, `x-api-key`, etc.
 
-**Riesgo**: Bajo. Para un spike local sin tráfico real no hay riesgo. En
-producción, headers sensibles deben ser filtrados explícitamente.
+**Risk**: Low. For a local spike with no real traffic there is no risk. In
+production, sensitive headers must be explicitly filtered.
 
-**Hallazgo** 🟡 Low: El proxy reenvía headers sensibles sin sanitizar.
-Aceptable para el spike.
+**Finding** 🟡 Low: The proxy forwards sensitive headers without sanitization.
+Acceptable for the spike.
 
-### 4. Body de tamaño infinito (sin límite) ✅
+### 4. Infinite-size body (no limit) ✅
 
-**Archivo**: `crates/spike-proxy/src/proxy.rs:136`
+**File**: `crates/spike-proxy/src/proxy.rs:136`
 
 ```rust
 let body_bytes = body.collect().await.map_err(|e| e.to_string())?.to_bytes();
 ```
 
-`body.collect()` bufferiza el body **completo en memoria** sin límite de
-tamaño. Un cliente malicioso puede enviar gigabytes de datos y agotar la
-memoria del proxy.
+`body.collect()` buffers the **full body in memory** with no size
+limit. A malicious client can send gigabytes of data and exhaust the
+proxy's memory.
 
-**Riesgo**: Medio. El plan §4.1 establece explícitamente que el body se
-bufferiza para escaneo, pero no hay límite superior. En producción se
-necesita `max_body_size` de hyper o un `StreamBody` con límite.
+**Risk**: Medium. The §4.1 plan explicitly states that the body is
+buffered for scanning, but there is no upper limit. In production,
+hyper's `max_body_size` or a bounded `StreamBody` is needed.
 
-**Hallazgo** 🟠 Medium: Bufferización sin límite → DoS por memoria.
-Aceptable para el spike local.
+**Finding** 🟠 Medium: Unbounded buffering → memory DoS.
+Acceptable for the local spike.
 
 ### 5. Header spoofing: Host / X-Forwarded-For ✅
 
-**Archivo**: `crates/spike-proxy/src/proxy.rs:142-152`
+**File**: `crates/spike-proxy/src/proxy.rs:142-152`
 
-- **Host**: El proxy **REESCRIBE** el `Host` correctamente. El header `host`
-  está en `SKIP_HEADERS` (línea 17), y la URI se reconstruye desde la
-  dirección del upstream (línea 142-143). No hay spoofing del Host.
-- **X-Forwarded-For**: El proxy **NO** añade `X-Forwarded-For` ni
-  `X-Real-IP`. La IP del cliente se pierde. Esto es correcto para un spike
-  local donde no hay clientes reales.
+- **Host**: The proxy **REWRITES** the `Host` correctly. The `host`
+  header is in `SKIP_HEADERS` (line 17), and the URI is rebuilt from the
+  upstream address (line 142-143). No Host spoofing.
+- **X-Forwarded-For**: The proxy does **NOT** add `X-Forwarded-For` or
+  `X-Real-IP`. The client IP is lost. This is correct for a local
+  spike where there are no real clients.
 
-**Comportamiento actual**: Host rewrite ✅, X-Forwarded-For ausente
-(intencional para el spike).
+**Current behavior**: Host rewrite ✅, X-Forwarded-For absent
+(intentional for the spike).
 
 ### 6. `unsafe` ✅
 
-| Búsqueda | Resultado |
+| Search | Result |
 |----------|-----------|
-| `grep -rn 'unsafe' crates/spike-proxy/` | ❌ 0 ocurrencias |
+| `grep -rn 'unsafe' crates/spike-proxy/` | ❌ 0 occurrences |
 
-**Workspace lint**: `unsafe_code = "forbid"` en `Cargo.toml:8` — verificado
-funcionalmente. El build no compilaría si hubiera `unsafe`.
+**Workspace lint**: `unsafe_code = "forbid"` in `Cargo.toml:8` — verified
+functionally. The build would not compile if there were `unsafe`.
 
-### 7. SSRF: upstream configurable ✅
+### 7. SSRF: configurable upstream ✅
 
-**Archivo**: `crates/spike-proxy/src/main.rs:52-56, 129-130`
+**File**: `crates/spike-proxy/src/main.rs:52-56, 129-130`
 
-El upstream es configurable vía `--upstream-addr <ADDR>`. Default:
-`127.0.0.1:8091`. No hay validación de que la dirección sea local.
+The upstream is configurable via `--upstream-addr <ADDR>`. Default:
+`127.0.0.1:8091`. There is no validation that the address is local.
 
-**Riesgo**: Bajo. Para el spike local el default es loopback y el uso es
-controlado. En despliegues multi-tenant, el proxy podría ser usado para
-SSRF contra servicios internos.
+**Risk**: Low. For the local spike the default is loopback and usage is
+controlled. In multi-tenant deployments, the proxy could be used for
+SSRF against internal services.
 
-**Hallazgo** 🟢 Info: Sin validación de upstream como localhost. Si se
-usara en infra multi-tenant, sería SSRF. Aceptable para el spike.
+**Finding** 🟢 Info: No validation of upstream as localhost. If used
+in multi-tenant infra, it would be SSRF. Acceptable for the spike.
 
-### 8. Body leaks (logs sin secretos) ✅
+### 8. Body leaks (logs without secrets) ✅
 
-**Archivo**: `crates/spike-proxy/src/proxy.rs`
+**File**: `crates/spike-proxy/src/proxy.rs`
 
-| Búsqueda | Resultado |
+| Search | Result |
 |----------|-----------|
-| `println!` en `proxy.rs` | ❌ 0 ocurrencias |
-| `eprintln!` en `proxy.rs` | 4 ocurrencias — solo errores de conexión (líneas 58, 66, 78, 90) |
-| `dbg!` en `crates/spike-proxy/` | ❌ 0 ocurrencias |
+| `println!` in `proxy.rs` | ❌ 0 occurrences |
+| `eprintln!` in `proxy.rs` | 4 occurrences — only connection errors (lines 58, 66, 78, 90) |
+| `dbg!` in `crates/spike-proxy/` | ❌ 0 occurrences |
 
-Ningún log incluye el contenido del body ni datos de la request.
-Las `eprintln!` solo reportan errores de conexión.
+No log includes the body content or request data.
+The `eprintln!` only report connection errors.
 
-### 9. Timeouts de conexión ✅
+### 9. Connection timeouts ✅
 
-**Archivo**: `crates/spike-proxy/src/proxy.rs:73, 155`
+**File**: `crates/spike-proxy/src/proxy.rs:73, 155`
 
 ```rust
 let client: Client<HttpConnector, Full<Bytes>> =
     Client::builder(TokioExecutor::new()).build(HttpConnector::new());
 ```
 
-**No hay un solo timeout configurado**:
-- Sin `pool_config().set_idle_timeout()`
-- Sin `set_connect_timeout()`
-- Sin `set_http1_keepalive()`
-- Sin `http1::Builder::new().timer(...)` en el server
+**There is not a single timeout configured**:
+- No `pool_config().set_idle_timeout()`
+- No `set_connect_timeout()`
+- No `set_http1_keepalive()`
+- No `http1::Builder::new().timer(...)` in the server
 
-Un cliente que abre conexión y no envía datos → conexión colgada
-indefinidamente (socket leak / DoS).
+A client that opens a connection and sends no data → connection hung
+indefinitely (socket leak / DoS).
 
-**Hallazgo** 🟠 Medium: Ausencia total de timeouts → DoS por socket leak.
-Aceptable para el spike local con control de carga conocido.
+**Finding** 🟠 Medium: Total absence of timeouts → socket leak DoS.
+Acceptable for the local spike with known load control.
 
-## Hallazgos de Seguridad
+## Security Findings
 
-### 🟠 Medium: Bufferización sin límite de body
-- **Archivo**: `crates/spike-proxy/src/proxy.rs:136`
-- **Descripción**: `body.collect()` sin `max_body_size` → DoS por memoria.
-- **Impacto**: Un cliente malicioso puede agotar RAM del proxy.
-- **Recomendación**: Post-spike, añadir `http1::Builder::max_buf_size()` y
-  límite en `body.collect()` con `take()`.
+### 🟠 Medium: Unbounded body buffering
+- **File**: `crates/spike-proxy/src/proxy.rs:136`
+- **Description**: `body.collect()` without `max_body_size` → memory DoS.
+- **Impact**: A malicious client can exhaust the proxy's RAM.
+- **Recommendation**: Post-spike, add `http1::Builder::max_buf_size()` and
+  a limit on `body.collect()` with `take()`.
 
-### 🟠 Medium: Sin timeouts en cliente ni servidor
-- **Archivo**: `crates/spike-proxy/src/proxy.rs:73`
-- **Descripción**: Cliente HTTP sin connect/request/idle timeout.
-  Servidor HTTP1 sin timer.
-- **Impacto**: Conexiones lentas o colgadas agotan descriptores de archivo
+### 🟠 Medium: No timeouts on client or server
+- **File**: `crates/spike-proxy/src/proxy.rs:73`
+- **Description**: HTTP client without connect/request/idle timeout.
+  HTTP1 server without timer.
+- **Impact**: Slow or hung connections exhaust file descriptors
   (socket leak).
-- **Recomendación**: Post-spike, configurar `HttpConnector::set_connect_timeout()`,
-  `pool_config().set_idle_timeout()`, y timer en `http1::Builder`.
+- **Recommendation**: Post-spike, configure `HttpConnector::set_connect_timeout()`,
+  `pool_config().set_idle_timeout()`, and a timer on `http1::Builder`.
 
-### 🟡 Low: Headers reenviados sin sanitizar
-- **Archivo**: `crates/spike-proxy/src/proxy.rs:147-152`
-- **Descripción**: Todos los headers excepto hop-by-hop se reenvían
-  verbatim. Headers de autenticación (`authorization`, `cookie`,
-  `x-api-key`) se filtran al upstream.
-- **Impacto**: Bajo para el spike. En producción, fuga de credenciales.
-- **Recomendación**: Post-spike, implementar allowlist de headers
-  reenviables.
+### 🟡 Low: Headers forwarded without sanitization
+- **File**: `crates/spike-proxy/src/proxy.rs:147-152`
+- **Description**: All headers except hop-by-hop are forwarded
+  verbatim. Authentication headers (`authorization`, `cookie`,
+  `x-api-key`) are passed to the upstream.
+- **Impact**: Low for the spike. In production, credential leakage.
+- **Recommendation**: Post-spike, implement an allowlist of
+  forwardable headers.
 
-### 🟢 Info: upstream configurable sin restricción (SSRF potencial)
-- **Archivo**: `crates/spike-proxy/src/main.rs:52-56`
-- **Descripción**: `--upstream-addr` acepta cualquier dirección IP, no
-  solo loopback. Sin validación.
-- **Impacto**: En despliegue multi-tenant podría ser usado como SSRF proxy.
-  Para el spike local es intencional.
-- **Recomendación**: En producción, validar que el upstream sea una
-  dirección permitida.
+### 🟢 Info: configurable upstream without restriction (potential SSRF)
+- **File**: `crates/spike-proxy/src/main.rs:52-56`
+- **Description**: `--upstream-addr` accepts any IP address, not
+  only loopback. No validation.
+- **Impact**: In a multi-tenant deployment it could be used as an SSRF proxy.
+  For the local spike it is intentional.
+- **Recommendation**: In production, validate that the upstream is an
+  allowed address.
 
-## Evidencia Reproducible
+## Reproducible Evidence
 
 ```bash
 # Build
@@ -177,15 +177,15 @@ cargo test -p spike-proxy
 # unsafe
 grep -rn 'unsafe' crates/spike-proxy/
 
-# println! / eprintln! / dbg! en proxy.rs
+# println! / eprintln! / dbg! in proxy.rs
 grep -n 'println!\|eprintln!\|dbg!' crates/spike-proxy/src/proxy.rs
 ```
 
-## Decisión
+## Decision
 
-**VEREDICTO: PASS** ✅
+**VERDICT: PASS** ✅
 
-Todos los criterios de seguridad cumplen para un spike local de Fase 0. Se
-documentan 4 hallazgos (2 medium, 1 low, 1 info) para corrección post-spike.
-Ninguno es bloqueante para el MVP: el proxy es funcional, correcto, y seguro
-dentro del alcance del spike de latencia.
+All security criteria are met for a local Phase 0 spike. 4 findings are
+documented (2 medium, 1 low, 1 info) for post-spike correction.
+None is blocking for the MVP: the proxy is functional, correct, and secure
+within the scope of the latency spike.

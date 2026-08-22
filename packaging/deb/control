@@ -8,5 +8,5 @@ Homepage: https://cerberus.dev
 Depends: ca-certificates, libc6 (>= 2.31)
 Description: DLP firewall for LLM agents
  Blocks secrets and PII from leaving your machine. Local CLI/daemon for
- agent DLP (Modo B) with a reverse/forward proxy for egress traffic, rule
+ agent DLP (Mode B) with a reverse/forward proxy for egress traffic, rule
  packs, redaction and reversible vault.

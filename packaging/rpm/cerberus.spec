@@ -7,9 +7,9 @@ License:        MIT OR Apache-2.0
 URL:            https://cerberus.dev
 Source0:        https://github.com/alexeirojas87/cerberus/releases/download/v{{VERSION}}/cerberus-{{VERSION}}-linux-{{ARCH}}.tar.gz
 
-# Binario pre-compilado: BuildArch fijo según el target del artefacto.
-#   - para x86_64  →  BuildArch: x86_64
-#   - para aarch64 →  BuildArch: aarch64
+# Pre-compiled binary: fixed BuildArch according to the artifact target.
+#   - for x86_64  ->  BuildArch: x86_64
+#   - for aarch64 ->  BuildArch: aarch64
 BuildArch:      x86_64
 
 Requires:       glibc >= 2.17
@@ -17,7 +17,7 @@ AutoReqProv:    no
 
 %description
 Cerberus is a DLP firewall for LLM agents: it blocks secrets and PII from
-leaving your machine. Local CLI/daemon (Modo B) with reverse/forward proxy
+leaving your machine. Local CLI/daemon (Mode B) with reverse/forward proxy
 for egress traffic, rule packs, redaction and a reversible vault.
 
 %prep
@@ -25,7 +25,7 @@ for egress traffic, rule packs, redaction and a reversible vault.
 tar xzf "%{SOURCE0}" -C %{_builddir}/%{name}
 
 %build
-# Binario estático pre-compilado: nada que compilar.
+# Pre-compiled static binary: nothing to build.
 
 %install
 install -D -m 0755 "%{_builddir}/%{name}/cerberus" "%{buildroot}%{_bindir}/cerberus"

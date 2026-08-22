@@ -1,21 +1,22 @@
-# F8 — Cadena de release multiplataforma (vending)
+# F8 — Cross-platform release pipeline (vending)
 
-Aquí SOLO los instaladores/empaquetado para macOS, Linux y Windows. Helm y la
-firma de packs los cubre otro agente (no se tocan en este directorio).
+This directory contains ONLY the installers/packaging for macOS, Linux and
+Windows. Helm and pack signing are covered by another agent (not touched in
+this directory).
 
-## 1. Qué produce cada cosa
+## 1. What each thing produces
 
-| Plataforma | Método de instalación | Artefacto | Dónde se produce |
+| Platform | Installation method | Artifact | Where it is produced |
 |---|---|---|---|
-| macOS / Linux | `curl … \| sh` | `install.sh` (con checksum `CERBERUS_SHA256`) | repo `install.sh` |
-| macOS | Homebrew | formula `tools/release/brew.rb` (+ `contrib/homebrew/cerberus.rb` para el tap) | release CI + tap |
+| macOS / Linux | `curl … \| sh` | `install.sh` (with `CERBERUS_SHA256` checksum) | `install.sh` repo |
+| macOS | Homebrew | formula `tools/release/brew.rb` (+ `contrib/homebrew/cerberus.rb` for the tap) | release CI + tap |
 | Linux | `.deb` (Debian/Ubuntu) | `packaging/deb/*` + `build_deb.sh` | release CI (ubuntu) |
-| Linux | `.rpm` (Fedora/RHEL) | `packaging/rpm/cerberus.spec` | release CI (opcional) |
-| Windows | winget/MSI | `packaging/winget/manifests/…` + README de publicación | winget-pkgs PR |
-| Todos | GitHub Release | `.tar.gz`/`.zip` + `SHA256SUMS` | `.github/workflows/release.yml` |
+| Linux | `.rpm` (Fedora/RHEL) | `packaging/rpm/cerberus.spec` | release CI (optional) |
+| Windows | winget/MSI | `packaging/winget/manifests/…` + publish README | winget-pkgs PR |
+| All | GitHub Release | `.tar.gz`/`.zip` + `SHA256SUMS` | `.github/workflows/release.yml` |
 
-El esquema de nombres es canónico y lo comparte `install.sh`, la fórmula y el
-manifest de winget:
+The naming scheme is canonical and shared by `install.sh`, the formula and the
+winget manifest:
 
 ```
 cerberus-<VERSION>-<OS>-<ARCH>.tar.gz      OS: macos|linux
@@ -23,76 +24,76 @@ cerberus-<VERSION>-<OS>-<ARCH>.zip         OS: windows     (contiene cerberus.ex
 SHA256SUMS
 ```
 
-## 2. Flujo de release (local, sin credenciales — reproducible)
+## 2. Release flow (local, without credentials — reproducible)
 
 ```bash
-# 0) prerequisitos: rustup stable + target(s) para cross
+# 0) prerequisites: rustup stable + target(s) for cross
 rustup target add aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu \
                  aarch64-apple-darwin x86_64-apple-darwin
 
-# 1) artefactos del host actual → dist/
-./tools/release/build_release.sh                 # detecta OS/arch
+# 1) host artifacts → dist/
+./tools/release/build_release.sh                 # detects OS/arch
 CERBERUS_OS=linux CERBERUS_ARCH=aarch64 TARGET=aarch64-unknown-linux-gnu \
   ./tools/release/build_release.sh
 
-# 2) firmas (transparente si no hay credenciales: DRY-RUN que no falla)
+# 2) signatures (transparent if no credentials: DRY-RUN that does not fail)
 ./tools/release/macos-notarize.sh dist/cerberus-0.1.0-macos-aarch64.tar.gz
-./tools/release/windows-sign.sh dist/exe/cerberus.exe          # solo en Windows/signtool
+./tools/release/windows-sign.sh dist/exe/cerberus.exe          # only on Windows/signtool
 
-# 3) brew: llenar la fórmula con hashes reales y validar
+# 3) brew: fill the formula with real hashes and validate
 ./tools/release/fill_brew_formula.sh --version 0.1.0 --platforms dist/SHA256SUMS --out dist/cerberus.rb
 ruby -c dist/cerberus.rb
-brew audit --strict --new dist/cerberus.rb      # con tag publicado y sha reales
+brew audit --strict --new dist/cerberus.rb      # with a published tag and real sha
 
-# 4) .deb (requiere dpkg-deb, opcional en CI)
+# 4) .deb (requires dpkg-deb, optional in CI)
 ./packaging/deb/build_deb.sh dist/cerberus-0.1.0-linux-x86_64.tar.gz 0.1.0 --arch amd64
 
-# 5) .rpm (requiere rpmbuild; ver cerberus.spec)
+# 5) .rpm (requires rpmbuild; see cerberus.spec)
 rpmbuild -ba packaging/rpm/cerberus.spec
 ```
 
-## 3. Firma y notarización — qué ocurre en CI (con secretos)
+## 3. Signing and notarization — what happens in CI (with secrets)
 
-Los secretos NO viven en el repo. Se inyectan en `.github/workflows/release.yml`:
+The secrets do NOT live in the repo. They are injected into `.github/workflows/release.yml`:
 
 - **macOS**: `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`,
-  `APPLE_IDENTITY` → job `macos-sign` ejecuta:
+  `APPLE_IDENTITY` → the `macos-sign` job runs:
   `codesign --options runtime --timestamp` → `notarytool submit --wait` →
-  `stapler staple` → `spctl --assess` → re-empaqueta + regenera SHA256SUMS.
-  Sin credenciales: el step se omite (binario sin firmar, notarizado no se).
-- **Windows**: `WINDOWS_SIGN_CERT` (pfx en base64) + `WINDOWS_SIGN_PASSWORD`
-  → `signtool sign /fd SHA256 /tr …` sobre `cerberus.exe`, re-zip + sumas.
-  Sin credenciales: step omitido.
+  `stapler staple` → `spctl --assess` → re-packages + regenerates SHA256SUMS.
+  Without credentials: the step is skipped (unsigned binary, not notarized).
+- **Windows**: `WINDOWS_SIGN_CERT` (pfx in base64) + `WINDOWS_SIGN_PASSWORD`
+  → `signtool sign /fd SHA256 /tr …` on `cerberus.exe`, re-zip + sums.
+  Without credentials: step skipped.
 
-> Como local no hay credenciales, los scripts entran en **DRY-RUN**: muestran la
-> secuencia exacta y terminan con código 0 (nunca rompen el pipeline).
+> Since locally there are no credentials, the scripts enter **DRY-RUN**: they
+> show the exact sequence and exit with code 0 (they never break the pipeline).
 
-## 4. Publicar el release
+## 4. Publish the release
 
-1. Commitear con tag semver: `git tag v0.1.0 && git push origin v0.1.0`.
-2. `.github/workflows/release.yml` construye los 5 targets, sube artefactos
-   como GitHub Actions artifacts, haz la firma si hay secretos y crea el
-   GitHub Release con `SHA256SUMS` global.
+1. Commit with a semver tag: `git tag v0.1.0 && git push origin v0.1.0`.
+2. `.github/workflows/release.yml` builds the 5 targets, uploads the artifacts
+   as GitHub Actions artifacts, performs signing if there are secrets and
+   creates the GitHub Release with the global `SHA256SUMS`.
 3. Homebrew: `tools/release/fill_brew_formula.sh --version 0.1.0
-   --platforms <SHA256SUMS del release> --install` (escribe
-   `contrib/homebrew/cerberus.rb`) y se hace PR al tap
-   de Homebrew (o `brew tap` local).
-4. winget: seguir `packaging/winget/README.md` (PR a `microsoft/winget-pkgs`).
-5. verificar: `install.sh`, `brew install`, `apt install ./cerberus_*.deb`,
+   --platforms <release SHA256SUMS> --install` (writes
+   `contrib/homebrew/cerberus.rb`) and a PR is made to the Homebrew tap
+   (or a local `brew tap`).
+4. winget: follow `packaging/winget/README.md` (PR to `microsoft/winget-pkgs`).
+5. verify: `install.sh`, `brew install`, `apt install ./cerberus_*.deb`,
    `rpm -i`, `winget install Cerberus.Cerberus`.
 
-## 5. Cómo se convierten en artefactos reales
+## 5. How they become real artifacts
 
-- **`build_release.sh`** → `dist/` con los tarballs/zip + `SHA256SUMS`. Nombres
-  exactamente iguales a los que usa `install.sh` (`.tar.gz` con `cerberus` en
-  la raíz; `.zip` con `cerberus.exe`).
-- **CI `release.yml`** → por cada target: el script, sanity, subida de
-  artefactos; luego `release` job: download merge, `SHA256SUMS` global,
+- **`build_release.sh`** → `dist/` with the tarballs/zip + `SHA256SUMS`. Names
+  exactly the same as those used by `install.sh` (`.tar.gz` with `cerberus` at
+  the root; `.zip` with `cerberus.exe`).
+- **CI `release.yml`** → per target: the script, sanity, artifact upload;
+  then the `release` job: download merge, global `SHA256SUMS`,
   `gh release create`.
-- **brew**: el fill transforma los placeholders con los sha reales → una
-  fórmula válida → `brew install`.
+- **brew**: the fill transforms the placeholders with the real sha → a valid
+  formula → `brew install`.
 
-## 6. Verificación del pipeline (integridad, F8)
+## 6. Pipeline verification (integrity, F8)
 
 ```bash
 bash -n tools/release/build_release.sh
@@ -101,19 +102,20 @@ bash -n tools/release/windows-sign.sh
 bash -n tools/release/fill_brew_formula.sh
 ruby -c tools/release/brew.rb
 python3 -c "import yaml,glob;[yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yml')+glob.glob('packaging/winget/manifests/**/*.yaml',recursive=True)]"
-cargo build --release          # el workspace sigue verde
+cargo build --release          # the workspace stays green
 ```
 
-Los pasos que requieren credenciales (firma/notarización reales) SOLO ocurren
-en CI con secretos; la matriz actual de CI (`ci.yml`) queda intacta
+The steps that require credentials (real signing/notarization) ONLY happen
+in CI with secrets; the current CI matrix (`ci.yml`) stays intact
 (build/test/lint).
 
-## 7. Notas operativas
+## 7. Operational notes
 
-- Sin credenciales de firma real el release es funcional pero los binarios no
-  llevan sello de notarización/Authenticode: documentado en las notas del
-  release. Requisito previo para GA: credenciales + steps de CI habilitados.
-- El MSI de winget se produce con WiX (`dotnet tool install --global wix`);
-  hasta fijar el toolchain se sube manualmente al release con el mismo nombre
-  `cerberus-<v>-windows-x86_64.msi` y se rellena `InstallerSha256`.
-- No se tocan: `src/`, daemon, proxy, packs, store, ceremony, CI actual.
+- Without real signing credentials the release is functional but the binaries
+  do not carry a notarization/Authenticode stamp: documented in the release
+  notes. Prerequisite for GA: credentials + CI steps enabled.
+- The winget MSI is produced with WiX (`dotnet tool install --global wix`);
+  until the toolchain is pinned it is uploaded manually to the release with
+  the same name `cerberus-<v>-windows-x86_64.msi` and `InstallerSha256` is
+  filled in.
+- Not touched: `src/`, daemon, proxy, packs, store, ceremony, current CI.

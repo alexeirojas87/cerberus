@@ -1,12 +1,12 @@
 {{/*
-Nombre del git chart (sin overrides).
+Name of the chart (without overrides).
 */}}
 {{- define "cerberus.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
-Nombre totalmente cualificado del deployment.
+Fully qualified name of the deployment.
 */}}
 {{- define "cerberus.fullname" -}}
 {{- if .Values.fullnameOverride }}
@@ -22,7 +22,7 @@ Nombre totalmente cualificado del deployment.
 {{- end }}
 
 {{/*
-Nombre del ServiceAccount.
+Name of the ServiceAccount.
 */}}
 {{- define "cerberus.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
@@ -33,7 +33,7 @@ Nombre del ServiceAccount.
 {{- end }}
 
 {{/*
-Labels comunes.
+Common labels.
 */}}
 {{- define "cerberus.labels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
@@ -42,7 +42,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
-Selector labels (para Service/Deployment selector).
+Selector labels (for Service/Deployment selector).
 */}}
 {{- define "cerberus.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "cerberus.name" . }}

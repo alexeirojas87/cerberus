@@ -1,36 +1,36 @@
-# Evidence Pack: Fase 1 — Revisión de Validators (REVISOR 1 — correctness)
+# Evidence Pack: Phase 1 — Validators Review (REVIEWER 1 — correctness)
 
-**Revisor:** REVISOR 1 (correctness)
-**Fecha:** 2026-08-17
+**Reviewer:** REVIEWER 1 (correctness)
+**Date:** 2026-08-17
 **Worktree:** `cerberus-wt-f1-review-validators`
 **Branch:** `f1/review-validators`
 
 ---
 
-## Resumen de veredicto
+## Verdict summary
 
-| Criterio | Estado | Evidencia |
+| Criterion | Status | Evidence |
 |---|---|---|
-| 1. `cargo build --workspace` | ✅ PASS | Compila sin errores |
-| 2. `cargo test -p cerberus-engine` (164 tests) | ✅ PASS | 115 unit + 38 adversarial + 11 integration — todos OK |
-| 3. `cargo clippy -p cerberus-engine --all-targets -- -D warnings` | ✅ PASS | Sin warnings |
-| 4. `cargo fmt --check` | ✅ PASS | Sin errores de formato |
-| 5. Trait `Validator` bien definido | ✅ PASS | Interfaz minimalista y correcta: `fn validate(&self, value: &str) -> bool` |
-| 6. Luhn: válido/inválido | ✅ PASS | "4111111111111111" → true; "1234567812345678" → false |
-| 7. Luhn: edge cases | ✅ PASS | non-digits, muy corto, muy largo, solo no-dígitos, guiones, alfa alrededor |
-| 8. Shannon entropy: cálculo correcto | ✅ PASS | "aaaa"=0.0, "ab"=1.0, unicode, patrones repetidos, empty=0.0 |
-| 9. Shannon entropy: threshold > vs >= | ✅ PASS | `above(1.0)` falla en "ab", `at_least(1.0)` pasa en "ab" |
-| 10. IBAN/checksum válido | ✅ PASS | BE y GB válidos; check digit inválido, lowercase, special chars, too short/long |
+| 1. `cargo build --workspace` | ✅ PASS | Compiles without errors |
+| 2. `cargo test -p cerberus-engine` (164 tests) | ✅ PASS | 115 unit + 38 adversarial + 11 integration — all OK |
+| 3. `cargo clippy -p cerberus-engine --all-targets -- -D warnings` | ✅ PASS | No warnings |
+| 4. `cargo fmt --check` | ✅ PASS | No format errors |
+| 5. `Validator` trait well-defined | ✅ PASS | Minimalist and correct interface: `fn validate(&self, value: &str) -> bool` |
+| 6. Luhn: valid/invalid | ✅ PASS | "4111111111111111" → true; "1234567812345678" → false |
+| 7. Luhn: edge cases | ✅ PASS | non-digits, too short, too long, only non-digits, hyphens, alpha around |
+| 8. Shannon entropy: correct calculation | ✅ PASS | "aaaa"=0.0, "ab"=1.0, unicode, repeated patterns, empty=0.0 |
+| 9. Shannon entropy: threshold > vs >= | ✅ PASS | `above(1.0)` fails on "ab", `at_least(1.0)` passes on "ab" |
+| 10. IBAN/checksum valid | ✅ PASS | BE and GB valid; invalid check digit, lowercase, special chars, too short/long |
 | 11. `get_validator` factory | ✅ PASS | luhn, checksum, shannon-entropy, shannon-entropy>N, shannon-entropy>=N → Some; nonexistent, empty → None |
-| 12. `ValidatorRegistry.all_pass` | ✅ PASS | empty list → true; unknown → fail closed; mixed → fail closed; todos pasan → true |
-| 13. Integración engine: validadores filtran findings | ✅ PASS | `make_finding()` ejecuta validadores después de regex match; si fallan, finding se descarta (`None`) |
-| 14. Unknown validator fail-closed | ✅ PASS | `all_pass` con `"nonexistent"` retorna `false` |
+| 12. `ValidatorRegistry.all_pass` | ✅ PASS | empty list → true; unknown → fail closed; mixed → fail closed; all pass → true |
+| 13. Engine integration: validators filter findings | ✅ PASS | `make_finding()` runs validators after regex match; if they fail, the finding is discarded (`None`) |
+| 14. Unknown validator fail-closed | ✅ PASS | `all_pass` with `"nonexistent"` returns `false` |
 
-**VEREDICTO FINAL: ✅ PASS**
+**FINAL VERDICT: ✅ PASS**
 
 ---
 
-## 1. Compilación y toolchain
+## 1. Compilation and toolchain
 
 ```bash
 $ rustc --version
@@ -49,12 +49,12 @@ $ cargo clippy -p cerberus-engine --all-targets -- -D warnings 2>&1 | tail -3
     Finished `dev` profile [unoptimized + debuginfo]
 
 $ cargo fmt --check 2>&1 | wc -l
-0   # sin salida = sin errores
+0   # no output = no errors
 ```
 
 ---
 
-## 2. Análisis del trait `Validator` (`validator.rs:15-18`)
+## 2. Analysis of the `Validator` trait (`validator.rs:15-18`)
 
 ```rust
 pub trait Validator {
@@ -62,152 +62,152 @@ pub trait Validator {
 }
 ```
 
-**Veredicto: ✅ Correcto.** Interfaz simple y genérica. Toma `&str` (no consume ownership), devuelve `bool`. Cero dependencias no esenciales. Las tres implementaciones (`LuhnValidator`, `ShannonEntropyValidator`, `ChecksumValidator`) cumplen correctamente el contrato.
+**Verdict: ✅ Correct.** Simple and generic interface. Takes `&str` (does not consume ownership), returns `bool`. Zero non-essential dependencies. The three implementations (`LuhnValidator`, `ShannonEntropyValidator`, `ChecksumValidator`) correctly fulfill the contract.
 
 ---
 
-## 3. LuhnValidator — análisis profundo
+## 3. LuhnValidator — deep analysis
 
-**Código:** `validator.rs:24-31`, implementación en `luhn_valid()` (líneas 206-228).
+**Code:** `validator.rs:24-31`, implementation in `luhn_valid()` (lines 206-228).
 
-| Prueba | Input | Esperado | Real | Resultado |
+| Test | Input | Expected | Actual | Result |
 |---|---|---|---|---|
-| Visa válida | `"4111111111111111"` | true | true | ✅ |
-| MasterCard válida | `"5555555555554444"` | true | true | ✅ |
-| AmEx válida | `"378282246310005"` | true | true | ✅ |
-| Número aleatorio | `"1234567812345678"` | false | false | ✅ |
-| Todos ceros | `"0000000000000000"` | true | true | ✅ (degenerado pero matemáticamente correcto) |
-| Con guiones | `"4111-1111-1111-1111"` | true | true | ✅ |
-| Alfa alrededor | `"card 4111111111111111 here"` | true | true | ✅ |
-| Solo 1 dígito | `"1"` | false | false | ✅ |
-| 2 dígitos inválidos | `"12"` | false | false | ✅ |
-| Solo no-dígitos | `"abcdef"` | false | false | ✅ |
-| 160 dígitos (10x repet) | `"4111111111111111"*10` | true | true | ✅ |
-| 14 dígitos válidos | `"12345678903555"` | true | true | ✅ |
+| Valid Visa | `"4111111111111111"` | true | true | ✅ |
+| Valid MasterCard | `"5555555555554444"` | true | true | ✅ |
+| Valid AmEx | `"378282246310005"` | true | true | ✅ |
+| Random number | `"1234567812345678"` | false | false | ✅ |
+| All zeros | `"0000000000000000"` | true | true | ✅ (degenerate but mathematically correct) |
+| With hyphens | `"4111-1111-1111-1111"` | true | true | ✅ |
+| Alpha around | `"card 4111111111111111 here"` | true | true | ✅ |
+| Only 1 digit | `"1"` | false | false | ✅ |
+| 2 invalid digits | `"12"` | false | false | ✅ |
+| Only non-digits | `"abcdef"` | false | false | ✅ |
+| 160 digits (10× repeated) | `"4111111111111111"*10` | true | true | ✅ |
+| 14 valid digits | `"12345678903555"` | true | true | ✅ |
 
-**Detalle del algoritmo:** 
-1. Filtra caracteres no-dígito (`filter(char::is_ascii_digit)`)
-2. Requiere ≥ 2 dígitos
-3. Invierte, duplica cada segundo dígito (posición impar en el iterador reversed), suma dígitos (para duplicados > 9, suma `d*2 - 9`)
-4. Verifica que la suma total sea múltiplo de 10 (`sum.is_multiple_of(10)` — estabilizado en Rust 1.66)
+**Algorithm detail:** 
+1. Filters non-digit characters (`filter(char::is_ascii_digit)`)
+2. Requires ≥ 2 digits
+3. Reverses, doubles every second digit (odd position in the reversed iterator), sums digits (for doubles > 9, sums `d*2 - 9`)
+4. Verifies that the total sum is a multiple of 10 (`sum.is_multiple_of(10)` — stabilized in Rust 1.66)
 
-**Veredicto: ✅ Correcto.** Implementación canónica sin errores.
+**Verdict: ✅ Correct.** Canonical implementation without errors.
 
 ---
 
-## 4. ShannonEntropyValidator — análisis profundo
+## 4. ShannonEntropyValidator — deep analysis
 
-**Código:** `validator.rs:46-89`, función `shannon_entropy()` (líneas 185-199).
+**Code:** `validator.rs:46-89`, function `shannon_entropy()` (lines 185-199).
 
-| Prueba | Input | Entropía esperada | Resultado |
+| Test | Input | Expected entropy | Result |
 |---|---|---|---|
-| Vacío | `""` | 0.0 | ✅ |
-| 1 carácter | `"x"` | 0.0 | ✅ |
-| 2 iguales | `"aa"` | 0.0 | ✅ |
-| 2 diferentes | `"ab"` | 1.0 | ✅ |
+| Empty | `""` | 0.0 | ✅ |
+| 1 character | `"x"` | 0.0 | ✅ |
+| 2 equal | `"aa"` | 0.0 | ✅ |
+| 2 different | `"ab"` | 1.0 | ✅ |
 | Unicode (3 chars) | `"日本語"` | log₂(3) ≈ 1.585 | ✅ |
-| Patrón repetido | `"abababababababab"` | 1.0 | ✅ |
-| Larga baja diversidad | `"a"*10000 + "b"` | < 0.01 | ✅ |
+| Repeated pattern | `"abababababababab"` | 1.0 | ✅ |
+| Long low diversity | `"a"*10000 + "b"` | < 0.01 | ✅ |
 
-**Fórmula:** H = -Σ p(c) · log₂ p(c), implementada con `p.mul_add(-p.log2(), acc)` que es numéricamente estable.
+**Formula:** H = -Σ p(c) · log₂ p(c), implemented with `p.mul_add(-p.log2(), acc)` which is numerically stable.
 
 **Thresholds:**
-| Prueba | Validator | Input | Esperado | Resultado |
+| Test | Validator | Input | Expected | Result |
 |---|---|---|---|---|
-| above(4.0) rechaza baja | `above(4.0)` | `"aaaa"` | false | ✅ |
-| above(4.0) acepta alta | `above(4.0)` | `"J8sK4mL2pX9qR5vW1nB6tY3cD7fH0gA"` | true | ✅ |
-| at_least(1.0) en frontera | `at_least(1.0)` | `"ab"` | true | ✅ |
-| above(1.0) en frontera | `above(1.0)` | `"ab"` | false | ✅ |
-| empty + above(0.0) | `above(0.0)` | `""` | false | ✅ (0.0 > 0.0 es falso) |
-| empty + at_least(0.0) | `at_least(0.0)` | `""` | true | ✅ (0.0 >= 0.0 es verdadero) |
+| above(4.0) rejects low | `above(4.0)` | `"aaaa"` | false | ✅ |
+| above(4.0) accepts high | `above(4.0)` | `"J8sK4mL2pX9qR5vW1nB6tY3cD7fH0gA"` | true | ✅ |
+| at_least(1.0) on boundary | `at_least(1.0)` | `"ab"` | true | ✅ |
+| above(1.0) on boundary | `above(1.0)` | `"ab"` | false | ✅ |
+| empty + above(0.0) | `above(0.0)` | `""` | false | ✅ (0.0 > 0.0 is false) |
+| empty + at_least(0.0) | `at_least(0.0)` | `""` | true | ✅ (0.0 >= 0.0 is true) |
 
-**Parseo de nombre:**
-| Nombre | Resultado | Threshold |
+**Name parsing:**
+| Name | Result | Threshold |
 |---|---|---|
 | `"shannon-entropy"` | `Above(3.0)` | ✅ |
 | `"shannon-entropy>4.5"` | `Above(4.5)` | ✅ |
 | `"shannon-entropy>=4.5"` | `AtLeast(4.5)` | ✅ |
-| `"shannon-entropy=4.0"` | `None` | ✅ (formato inválido) |
-| `"shannon-entropy>"` | `None` | ✅ (threshold vacío) |
-| `"shannon-entropy>abc"` | `None` | ✅ (no-numérico) |
+| `"shannon-entropy=4.0"` | `None` | ✅ (invalid format) |
+| `"shannon-entropy>"` | `None` | ✅ (empty threshold) |
+| `"shannon-entropy>abc"` | `None` | ✅ (non-numeric) |
 
-**Veredicto: ✅ Correcto.** Cálculo de entropía correcto. Distinción > vs >= correcta. Parseo de nombres robusto.
+**Verdict: ✅ Correct.** Entropy calculation correct. > vs >= distinction correct. Robust name parsing.
 
 ---
 
-## 5. ChecksumValidator (IBAN) — análisis profundo
+## 5. ChecksumValidator (IBAN) — deep analysis
 
-**Código:** `validator.rs:94-101`, función `iban_valid()` (líneas 235-267).
+**Code:** `validator.rs:94-101`, function `iban_valid()` (lines 235-267).
 
-| Prueba | Input | Esperado | Resultado |
+| Test | Input | Expected | Result |
 |---|---|---|---|
-| BE válido | `"BE68539007547034"` | true | ✅ |
-| GB válido | `"GB29NWBK60161331926819"` | true | ✅ |
-| Con espacios | `"BE68 5390 0754 7034"` | true | ✅ |
-| Check digit inválido | `"BE68539007547035"` | false | ✅ |
-| Minúsculas | `"be68539007547034"` | false | ✅ |
-| Vacío | `""` | false | ✅ |
-| Muy corto | `"DE123"` | false | ✅ |
-| Muy largo (35+ chars) | `"DE89370400440532013000000000000000000000"` | false | ✅ |
-| Caracteres especiales | `"BE68!5390?0754&7034"` | false | ✅ |
-| No-ASCII | `"BE68😀39007547034"` | false | ✅ |
+| Valid BE | `"BE68539007547034"` | true | ✅ |
+| Valid GB | `"GB29NWBK60161331926819"` | true | ✅ |
+| With spaces | `"BE68 5390 0754 7034"` | true | ✅ |
+| Invalid check digit | `"BE68539007547035"` | false | ✅ |
+| Lowercase | `"be68539007547034"` | false | ✅ |
+| Empty | `""` | false | ✅ |
+| Too short | `"DE123"` | false | ✅ |
+| Too long (35+ chars) | `"DE89370400440532013000000000000000000000"` | false | ✅ |
+| Special characters | `"BE68!5390?0754&7034"` | false | ✅ |
+| Non-ASCII | `"BE68😀39007547034"` | false | ✅ |
 
-**Algoritmo:** Mod-97 (ISO 7064). Mueve primeros 4 caracteres al final, convierte A→10...Z→35, computa `n % 97`, resultado debe ser 1.
+**Algorithm:** Mod-97 (ISO 7064). Moves the first 4 characters to the end, converts A→10...Z→35, computes `n % 97`, the result must be 1.
 
-**Veredicto: ✅ Correcto.** Implementación completa y robusta.
+**Verdict: ✅ Correct.** Complete and robust implementation.
 
 ---
 
-## 6. Integración con engine (`engine.rs`)
+## 6. Engine integration (`engine.rs`)
 
-En `make_finding()` (engine.rs:258-276):
+In `make_finding()` (engine.rs:258-276):
 
 ```rust
 let trimmed = raw_value.trim();
 if !self.validators.all_pass(&rule.validators, trimmed) {
-    return None;  // finding descartado
+    return None;  // finding discarded
 }
 ```
 
-**Flujo:** `scan()` → regex match → `make_finding()` → `all_pass(validators, trimmed)` → si algún validador falla → `None` (finding se descarta).
+**Flow:** `scan()` → regex match → `make_finding()` → `all_pass(validators, trimmed)` → if any validator fails → `None` (finding discarded).
 
-| Prueba | Escenario | Resultado |
+| Test | Scenario | Result |
 |---|---|---|
-| Sin validators | Match se mantiene | ✅ |
-| Luhn en número válido | Finding se mantiene | ✅ |
-| Luhn en número inválido | Finding se descarta | ✅ |
-| Shannon-entropy en alta entropía | Finding se mantiene | ✅ |
-| Shannon-entropy en baja entropía | Finding se descarta | ✅ |
-| Unknown validator | Fail closed — finding se descarta | ✅ |
-| Múltiples validators (todos pasan) | Finding se mantiene | ✅ |
-| Múltiples validators (uno falla) | Finding se descarta | ✅ |
+| No validators | Match is kept | ✅ |
+| Luhn on valid number | Finding is kept | ✅ |
+| Luhn on invalid number | Finding is discarded | ✅ |
+| Shannon-entropy on high entropy | Finding is kept | ✅ |
+| Shannon-entropy on low entropy | Finding is discarded | ✅ |
+| Unknown validator | Fail closed — finding is discarded | ✅ |
+| Multiple validators (all pass) | Finding is kept | ✅ |
+| Multiple validators (one fails) | Finding is discarded | ✅ |
 
-**Veredicto: ✅ Correcto.** Los validators se ejecutan después del regex match. Si algún validador falla, el finding se descarta. Fail-closed para validators desconocidos.
-
----
-
-## 7. Edge cases cubiertos por pruebas adversariales
-
-Archivo: `crates/cerberus-engine/tests/adversarial_validators.rs` (38 tests nuevos)
-
-**Categorías cubiertas:**
-- **Luhn (12 tests):** Visa, MasterCard, AmEx, inválido, todos ceros, con guiones, alfa alrededor, single digit, dos dígitos, solo no-dígitos, muy largo, 14 dígitos
-- **Entropía (11 tests):** single char, dos iguales, dos diferentes, unicode, patrón repetido, muy larga baja diversidad, rechazo/aceptación threshold, frontera at_least/above, empty+above/at_least
-- **IBAN (10 tests):** BE, GB, espacios, check digit inválido, lowercase, empty, too short, too long, special chars, non-ASCII + checksum validator delegate
-- **Factory/Registry (5 tests):** 11 nombres de get_validator, registry get, all_pass edge cases, all_pass múltiples validators
+**Verdict: ✅ Correct.** Validators run after the regex match. If any validator fails, the finding is discarded. Fail-closed for unknown validators.
 
 ---
 
-## 8. Conclusión
+## 7. Edge cases covered by adversarial tests
 
-El módulo de validators cumple con todos los criterios de correctness para Fase 1:
+File: `crates/cerberus-engine/tests/adversarial_validators.rs` (38 new tests)
 
-- El trait `Validator` está correctamente definido
-- `LuhnValidator` implementa el checksum ISO 7812 correctamente
-- `ShannonEntropyValidator` calcula entropía correctamente con thresholds > y >=
-- `ChecksumValidator` implementa IBAN mod-97 correctamente
-- `get_validator` y `ValidatorRegistry` resuelven nombres correctamente y hacen fail-closed
-- La integración con `engine.rs` ejecuta validators después del regex match y descarta findings que fallen
-- 38 pruebas adversariales nuevas cubren edge cases no cubiertos por tests existentes
+**Categories covered:**
+- **Luhn (12 tests):** Visa, MasterCard, AmEx, invalid, all zeros, with hyphens, alpha around, single digit, two digits, only non-digits, too long, 14 digits
+- **Entropy (11 tests):** single char, two equal, two different, unicode, repeated pattern, very long low diversity, threshold reject/accept, at_least/above boundary, empty+above/at_least
+- **IBAN (10 tests):** BE, GB, spaces, invalid check digit, lowercase, empty, too short, too long, special chars, non-ASCII + checksum validator delegate
+- **Factory/Registry (5 tests):** 11 get_validator names, registry get, all_pass edge cases, all_pass multiple validators
 
-**VEREDICTO FINAL: ✅ PASS**
+---
+
+## 8. Conclusion
+
+The validators module meets all correctness criteria for Phase 1:
+
+- The `Validator` trait is correctly defined
+- `LuhnValidator` implements the ISO 7812 checksum correctly
+- `ShannonEntropyValidator` calculates entropy correctly with > and >= thresholds
+- `ChecksumValidator` implements IBAN mod-97 correctly
+- `get_validator` and `ValidatorRegistry` resolve names correctly and fail-closed
+- Integration with `engine.rs` runs validators after the regex match and discards findings that fail
+- 38 new adversarial tests cover edge cases not covered by existing tests
+
+**FINAL VERDICT: ✅ PASS**

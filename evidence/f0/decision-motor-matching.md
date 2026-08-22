@@ -1,14 +1,14 @@
-# Decisión §9 #3 — Motor de matching: Vectorscan vs regex/RE2
+# Decision §9 #3 — Matching engine: Vectorscan vs regex/RE2
 
-## Contexto
+## Context
 
-El plan §3 recomendaba Vectorscan (fork portable de Hyperscan) como motor de multi-regex de alta
-velocidad, con `regex` crate como plan B. La decisión debía cerrarse en Fase 0 según los datos del
-spike de escaneo.
+The §3 plan recommended Vectorscan (portable fork of Hyperscan) as the high-speed multi-regex
+engine, with `regex` crate as plan B. The decision had to be closed in Phase 0 based on the
+scan spike data.
 
-## Evidencia
+## Evidence
 
-### Vectorscan — no compila en esta máquina
+### Vectorscan — does not compile on this machine
 
 ```
 $ cargo build --features vectorscan
@@ -17,72 +17,74 @@ Caused by:
   is 'cmake' not installed?
 ```
 
-`evidence/f0/raw/scan-vectorscan-attempt.txt` — cmake no está disponible en el sistema. El build
-script de `vectorscan-sys` requiere cmake para compilar la librería C++ nativa de Hyperscan.
-Vectorscan queda como optimización futura, activable vía `--features vectorscan`.
+`evidence/f0/raw/scan-vectorscan-attempt.txt` — cmake is not available on the system. The build
+script of `vectorscan-sys` requires cmake to compile the native Hyperscan C++ library.
+Vectorscan remains a future optimization, activatable via `--features vectorscan`.
 
-### Motor híbrido (Plan B) — cumple el presupuesto con margen
+### Hybrid engine (Plan B) — meets the budget with margin
 
-Benchmark: 300 patrones, 100 KB payload, 1000 iteraciones, release profile:
+Benchmark: 300 patterns, 100 KB payload, 1000 iterations, release profile:
 
-| Motor | scan_p50 | scan_p99 | Throughput | Matches |
+| Engine | scan_p50 | scan_p99 | Throughput | Matches |
 |---|---|---|---|---|
 | **Hybrid (AC + regex)** | **0.469 ms** | **0.623 ms** | **218.5 mbps** | 227 |
-| Regex puro | 158.5 ms | 166.1 ms | 0.65 mbps | 236 |
+| Pure regex | 158.5 ms | 166.1 ms | 0.65 mbps | 236 |
 
-- **Hybrid vs regex puro: ~335× más rápido en p50, ~254× en p99**
-- **Hybrid p99 = 0.60–0.62 ms estable** (3 corridas), muy por debajo del umbral de 1.0 ms (§5)
-- Overhead de AC con 0 prefijos: **0.088 ms p50** (sub-ms)
-- Estabilidad: p50 Δ 10.6%, p99 Δ 10.3% (< 20% / < 50%)
-- Sin ReDoS: patrones sin prefijo caen a `RegexSet` (DFA, tiempo lineal)
+- **Hybrid vs pure regex: ~335× faster in p50, ~254× in p99**
+- **Hybrid p99 = 0.60–0.62 ms stable** (3 runs), well below the 1.0 ms threshold (§5)
+- AC overhead with 0 prefixes: **0.088 ms p50** (sub-ms)
+- Stability: p50 Δ 10.6%, p99 Δ 10.3% (< 20% / < 50%)
+- No ReDoS: patterns without a prefix fall to `RegexSet` (DFA, linear time)
 
-### Precisión
+### Precision
 
-Hybrid: 227 matches vs Regex puro: 236 matches (Δ~4%). La diferencia corresponde a patrones sin
-prefijo literal viable (ej. `\d{5}`) que `extract_prefix` no puede extraer y que el AC prefilter
-no cubre. Estos patrones van directamente a `RegexSet` (unprefixed) y se escanean igual. No hay
-falsos negativos estructurales — verificado en `spike-escaneo-security-v2.md:73-87`.
+Hybrid: 227 matches vs Pure regex: 236 matches (Δ~4%). The difference corresponds to patterns
+without a viable literal prefix (e.g. `\d{5}`) that `extract_prefix` cannot extract and that the
+AC prefilter does not cover. These patterns go directly to `RegexSet` (unprefixed) and are
+scanned the same. There are no structural false negatives — verified in
+`spike-escaneo-security-v2.md:73-87`.
 
-## Decisión
+## Decision
 
-**Plan B = `regex` crate + Aho-Corasick prefilter** como motor de matching del MVP.
+**Plan B = `regex` crate + Aho-Corasick prefilter** as the MVP matching engine.
 
-| Opción | Estado | Motivo |
+| Option | Status | Reason |
 |---|---|---|
-| **Vectorscan** | ⏭️ Futura optimización (NO comprometido en MVP) | No compila sin cmake; el plan B cumple el presupuesto |
-| **RE2** | ❌ Descartado | `regex` crate (DFA nativo) da el mismo resultado sin dependencia externa |
-| **regex crate + AC** | ✅ **SELECCIONADO** | Cumple < 1 ms con margen ~40%; sin dependencias C++; tiempo lineal garantizado |
+| **Vectorscan** | ⏭️ Future optimization (NOT committed in MVP) | Does not compile without cmake; plan B meets the budget |
+| **RE2** | ❌ Discarded | `regex` crate (native DFA) gives the same result without external dependency |
+| **regex crate + AC** | ✅ **SELECTED** | Meets < 1 ms with ~40% margin; no C++ dependencies; guaranteed linear time |
 
-## Propagación de la decisión a fases futuras
+## Decision propagation to future phases
 
-> Qué significa "Vectorscan queda como optimización futura": **el motor activo del MVP es el Plan B
-> (regex + AC)**. Vectorscan NO se descarta ni se compromete en el MVP; queda como **palanca de
-> optimización feature-gated** (`--features vectorscan`), con stub compilable sin la feature. Se
-> activa SOLO si se disparan las condiciones abajo. No es trabajo de "segunda ronda".
+> What "Vectorscan remains a future optimization" means: **the active engine of the MVP is Plan B
+> (regex + AC)**. Vectorscan is NOT discarded nor committed in the MVP; it remains a
+> **feature-gated optimization lever** (`--features vectorscan`), with a stub that compiles
+> without the feature. It is activated ONLY if the conditions below trigger. It is not
+> "second round" work.
 
-| Item | Qué se propaga | Trigger (condición de activación) | Destino de la fase |
+| Item | What is propagated | Trigger (activation condition) | Phase destination |
 |---|---|---|---|
-| **Activar Vectorscan** | Reemplazar/aumentar el motor AC+regex por Vectorscan para el hot path | El margen del scan (~1.5× sobre el presupuesto < 1 ms, §5) se erosiona: más patrones en rule packs, payloads > 100 KB, o evidencia de CI/producción de p99 scan > umbral | **F1** (si el corpus de reglas crece al migrar `cerberus-detection-rules.json`) o **F7** (si un rule pack nuevo lo exige). Requisito: instalar `cmake` y verificar latencia vs presupuesto con el spike de F0 |
-| **Acotar ventana post-AC** | En `engine_hybrid.rs`, limitar `shortest_match` a 128–1024 B tras un hit de prefijo para evitar amplificación superlineal O(N_hits × L_payload) | Ninguno — riesgo conocido 🟠 Medium de seguridad/DoS por CPU | **F1** (obligatorio, junto con fuzzing ReDoS de patrones prefijados) |
-| **Fuzzing ReDoS de ruta prefijada** | Fuzzing con patrones que SÍ tienen prefijo literal + payloads sin match (no solo los 3 patrones ReDoS sin prefijo de F0) | Ninguno — requisito §5 "Sin ReDoS" | **F1** |
-| **Monitorizar p99 del scan en CI** | Bench híbrido 300 patrones / 99 KB en el pipeline de CI, alertar si p99 > 1 ms | Ninguno — el scan es la restricción limitante del sistema | **F1** (desde la primera integración de reglas) |
+| **Activate Vectorscan** | Replace/augment the AC+regex engine with Vectorscan for the hot path | The scan margin (~1.5× over the < 1 ms budget, §5) erodes: more patterns in rule packs, payloads > 100 KB, or CI/production evidence of p99 scan > threshold | **F1** (if the rule corpus grows when migrating `cerberus-detection-rules.json`) or **F7** (if a new rule pack requires it). Requirement: install `cmake` and verify latency vs budget with the F0 spike |
+| **Bound post-AC window** | In `engine_hybrid.rs`, limit `shortest_match` to 128–1024 B after a prefix hit to avoid superlinear amplification O(N_hits × L_payload) | None — known 🟠 Medium security/CPU DoS risk | **F1** (mandatory, along with ReDoS fuzzing of prefixed patterns) |
+| **Prefixed-route ReDoS fuzzing** | Fuzzing with patterns that DO have a literal prefix + non-matching payloads (not only the 3 unprefixed ReDoS patterns from F0) | None — §5 "No ReDoS" requirement | **F1** |
+| **Monitor scan p99 in CI** | Hybrid bench 300 patterns / 99 KB in the CI pipeline, alert if p99 > 1 ms | None — the scan is the limiting constraint of the system | **F1** (from the first rule integration) |
 
-Riesgo relacionado: el margen ~1.5× del scan es la **restricción limitante** (proxy tiene ≥ 18×).
-Ver tabla de propagación completa en `evidence/f0/budget-validation.md`.
+Related risk: the ~1.5× scan margin is the **limiting constraint** (proxy has ≥ 18×).
+See the full propagation table in `evidence/f0/budget-validation.md`.
 
-## Números clave
+## Key numbers
 
-- **p99 escaneo híbrido:** 0.60–0.62 ms (presupuesto §5: < 1.0 ms)
-- **Velocidad relativa vs regex puro:** 335× (p50)
+- **Hybrid scan p99:** 0.60–0.62 ms (§5 budget: < 1.0 ms)
+- **Relative speed vs pure regex:** 335× (p50)
 - **Throughput:** 212–218 mbps @ p50
-- **Compilación de patrones:** 10.3 ms (300 patrones, única vez al arrancar)
-- **Overhead AC prefiltro (0 prefijos):** 0.088 ms
+- **Pattern compilation:** 10.3 ms (300 patterns, once at startup)
+- **AC prefilter overhead (0 prefixes):** 0.088 ms
 
-## Referencias
+## References
 
-- `evidence/f0/spike-escaneo-performance-v2.md` — revisión de rendimiento
-- `evidence/f0/spike-escaneo-fix.md` — implementación del fixer
-- `evidence/f0/spike-escaneo-security-v2.md` — verificación de seguridad (ReDoS, unsafe)
+- `evidence/f0/spike-escaneo-performance-v2.md` — performance review
+- `evidence/f0/spike-escaneo-fix.md` — fixer implementation
+- `evidence/f0/spike-escaneo-security-v2.md` — security verification (ReDoS, unsafe)
 - `evidence/f0/raw/fix-bench-hybrid.json` — raw data hybrid
-- `evidence/f0/raw/scan-vectorscan-attempt.txt` — intento fallido de compilar Vectorscan
-- `evidence/f0/raw/fix-bench-regex.json` — raw data regex puro
+- `evidence/f0/raw/scan-vectorscan-attempt.txt` — failed attempt to compile Vectorscan
+- `evidence/f0/raw/fix-bench-regex.json` — raw data pure regex

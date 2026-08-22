@@ -1,7 +1,7 @@
-//! Inicialización y autodetección de agentes (`cerberus init`).
+//! Initialization and agent auto-detection (`cerberus init`).
 //!
-//! Detecta agentes instalados (Claude Code, Codex, opencode, pi) y
-//! configura sus `*_BASE_URL` para que apunten al proxy Cerberus local.
+//! Detects installed agents (Claude Code, Codex, opencode, pi) and configures
+//! their `*_BASE_URL` to point to the local Cerberus proxy.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -11,20 +11,20 @@ use cerberus_engine::loader::load_rules_from_str;
 
 use crate::packs::default_rules_json;
 
-/// Un agente detectado.
+/// A detected agent.
 #[derive(Debug, Clone)]
 pub(crate) struct DetectedAgent {
-    /// Nombre del agente.
+    /// Name of the agent.
     pub name: String,
-    /// Variable de entorno para la base URL.
+    /// Environment variable for the base URL.
     pub env_var: String,
-    /// Ruta al binario (si se encuentra).
+    /// Path to the binary (if found).
     pub binary_path: Option<String>,
-    /// ¿Está configurado para usar Cerberus?
+    /// Is it configured to use Cerberus?
     pub configured: bool,
 }
 
-/// Agentes conocidos con sus variables de entorno.
+/// Known agents with their environment variables.
 const KNOWN_AGENTS: &[(&str, &str, &[&str])] = &[
     ("Claude Code", "CLAUDE_CODE_BASE_URL", &["claude", "claude-code"]),
     ("Codex", "CODEX_BASE_URL", &["codex"]),
@@ -33,11 +33,11 @@ const KNOWN_AGENTS: &[(&str, &str, &[&str])] = &[
     ("Continue (Cursor)", "CONTINUE_BASE_URL", &["continue", "cursor"]),
 ];
 
-/// Ejecutar `cerberus init`.
+/// Run `cerberus init`.
 ///
 /// # Errors
 ///
-/// Devuelve error si no se puede crear el directorio de configuración.
+/// Returns an error if the configuration directory cannot be created.
 pub(crate) fn run_init(config_dir: &str) -> Result<String, String> {
     let cfg_path = Path::new(config_dir);
     std::fs::create_dir_all(cfg_path).map_err(|e| format!("cannot create config dir: {e}"))?;
@@ -45,31 +45,31 @@ pub(crate) fn run_init(config_dir: &str) -> Result<String, String> {
     let agents = detect_agents();
 
     let mut report = String::from("✦ Cerberus Init ✦\n\n");
-    writeln!(report, "Configuración: {config_dir}").ok();
-    writeln!(report, "Reglas: {} cargadas", load_rule_count()).ok();
-    report.push_str("\n📋 Agentes detectados:\n");
+    writeln!(report, "Config: {config_dir}").ok();
+    writeln!(report, "Rules: {} loaded", load_rule_count()).ok();
+    report.push_str("\n📋 Detected agents:\n");
 
     let mut configured = 0;
     for agent in &agents {
         let status = if agent.configured {
             configured += 1;
-            "✅ configurado"
+            "✅ configured"
         } else if agent.binary_path.is_some() {
-            "⚠️  detectado, requiere configurar var de entorno"
+            "⚠️  detected, requires setting env var"
         } else {
-            "❌ no encontrado"
+            "❌ not found"
         };
         writeln!(report, "  {:<20} {status}", agent.name).ok();
     }
 
-    writeln!(report, "\nResumen: {configured}/{} agentes configurados", agents.len()).ok();
+    writeln!(report, "\nSummary: {configured}/{} agents configured", agents.len()).ok();
 
     let yaml = init_config_yaml();
     let config_path = cfg_path.join("config.yaml");
     std::fs::write(&config_path, yaml).map_err(|e| format!("cannot write config: {e}"))?;
 
     if !agents.iter().any(|a| a.configured) {
-        report.push_str("\n💡 Tip: configura manualmente la variable de entorno de tu agente:\n");
+        report.push_str("\n💡 Tip: manually set your agent's environment variable:\n");
         for agent in &agents {
             if agent.binary_path.is_some() {
                 writeln!(report, "  export {}=http://127.0.0.1:8787", agent.env_var).ok();
@@ -77,27 +77,27 @@ pub(crate) fn run_init(config_dir: &str) -> Result<String, String> {
         }
     }
 
-    report.push_str("\n▶ Siguientes pasos (operación real):\n");
+    report.push_str("\n▶ Next steps (real operation):\n");
     report.push_str("  1. cerberus start --port 8787\n");
-    report.push_str("     (ya hay upstreams por defecto: openai → api.openai.com, anthropic → api.anthropic.com;\n");
+    report.push_str("     (default upstreams already exist: openai → api.openai.com, anthropic → api.anthropic.com;\n");
     report.push_str(
-        "      no necesitas CERBERUS_UPSTREAM_URL en el primer arranque — edita config.yaml si cambias de proveedor)\n",
+        "      you do not need CERBERUS_UPSTREAM_URL on first boot — edit config.yaml if you change provider)\n",
     );
-    report.push_str("  2. export <TU_AGENTE>_BASE_URL=http://127.0.0.1:8787  (ej: OPENCODE_BASE_URL)\n");
+    report.push_str("  2. export <YOUR_AGENT>_BASE_URL=http://127.0.0.1:8787  (e.g. OPENCODE_BASE_URL)\n");
 
     Ok(report)
 }
 
-/// Config YAML de arranque por defecto (cero-config, F4): upstreams EXPLÍCITOS
-/// para openai/anthropic → `cerberus start` arranca sin `CERBERUS_UPSTREAM_URL`.
-/// El operador puede editar `URLs`/`path_prefix` en `config.yaml` sin tocar
-/// código.
+/// Default boot config YAML (zero-config, F4): EXPLICIT upstreams for
+/// openai/anthropic → `cerberus start` boots without `CERBERUS_UPSTREAM_URL`.
+/// The operator can edit `URLs`/`path_prefix` in `config.yaml` without
+/// touching code.
 #[must_use]
 const fn init_config_yaml() -> &'static str {
     "listen: 127.0.0.1:8787\nmode: enforce\nfail_policy: closed\nupstreams:\n  anthropic:\n    url: https://api.anthropic.com\n  openai:\n    url: https://api.openai.com\n"
 }
 
-/// Detectar agentes instalados en el sistema.
+/// Detect installed agents on the system.
 #[must_use]
 pub(crate) fn detect_agents() -> Vec<DetectedAgent> {
     KNOWN_AGENTS
@@ -119,10 +119,10 @@ pub(crate) fn detect_agents() -> Vec<DetectedAgent> {
         .collect()
 }
 
-/// Buscar un binario en el PATH.
+/// Find a binary in the PATH.
 ///
-/// La constante global `KNOWN_AGENTS` guarda nombres **sin** extensión; aquí se
-/// añade `.exe` como candidato prioritario en Windows (nunca en la constante).
+/// The global constant `KNOWN_AGENTS` stores names **without** extension; here
+/// `.exe` is added as a priority candidate on Windows (never in the constant).
 fn find_binary(name: &str) -> Option<String> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|dir| {
@@ -137,9 +137,9 @@ fn find_binary(name: &str) -> Option<String> {
     })
 }
 
-/// Nombres de archivo a probar para un binario: en Windows `name.exe` primero
-/// (evita falsos positivos de un archivo sin extensión) y luego `name`; en el
-/// resto de plataformas solo `name`.
+/// File names to try for a binary: on Windows `name.exe` first (avoids false
+/// positives from an extensionless file) then `name`; on other platforms just
+/// `name`.
 fn binary_candidates(name: &str) -> Vec<String> {
     #[cfg(windows)]
     {
@@ -151,8 +151,8 @@ fn binary_candidates(name: &str) -> Vec<String> {
     }
 }
 
-/// Comprobar que `path` es un candidato ejecutable (bit de ejecución en unix;
-/// en Windows basta con que el archivo exista).
+/// Check that `path` is an executable candidate (execution bit on unix; on
+/// Windows it is enough that the file exists).
 fn is_executable_candidate(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -166,22 +166,22 @@ fn is_executable_candidate(path: &Path) -> bool {
     }
 }
 
-/// Cargar reglas y devolver el conteo.
+/// Load rules and return the count.
 fn load_rule_count() -> usize {
     load_rules_from_str(&default_rules_json()).map_or(0, |rules| rules.len())
 }
 
-/// Escanear un archivo (modo dry-run).
+/// Scan a file (dry-run mode).
 ///
 /// # Errors
 ///
-/// Devuelve error si no se puede leer el archivo.
+/// Returns an error if the file cannot be read.
 pub(crate) fn scan_file(path: &str) -> Result<String, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("cannot read file: {e}"))?;
     Ok(scan_text(&content))
 }
 
-/// Escanear texto (modo dry-run).
+/// Scan text (dry-run mode).
 #[must_use]
 pub(crate) fn scan_text(text: &str) -> String {
     let rules_json = default_rules_json();
@@ -196,13 +196,13 @@ pub(crate) fn scan_text(text: &str) -> String {
 
     let output = engine.scan(text);
     if output.findings.is_empty() {
-        return "✓ No se detectaron datos sensibles.".to_string();
+        return "✓ No sensitive data detected.".to_string();
     }
 
-    let mut report = String::from("🔍 Hallazgos de escaneo:\n\n");
+    let mut report = String::from("🔍 Scan findings:\n\n");
     for f in &output.findings {
-        // Nunca exponer el valor crudo en pantalla (P1-12): solo flag, acción,
-        // posición y hash del valor detectado.
+        // Never expose the raw value on screen (P1-12): only flag, action,
+        // position, and hash of the detected value.
         writeln!(
             report,
             "  [{:>8}] {} (pos {}..{}) hash={}",
@@ -210,11 +210,11 @@ pub(crate) fn scan_text(text: &str) -> String {
         )
         .ok();
     }
-    writeln!(report, "\nAcción global: {}", output.action_overall).ok();
+    writeln!(report, "\nGlobal action: {}", output.action_overall).ok();
     report
 }
 
-/// Diagnóstico del sistema.
+/// System diagnostics.
 #[must_use]
 pub(crate) fn doctor() -> String {
     let mut report = String::new();
@@ -223,18 +223,18 @@ pub(crate) fn doctor() -> String {
     writeln!(report, "Daemon: {}", crate::daemon::status()).ok();
 
     let rules_count = load_rule_count();
-    writeln!(report, "Reglas cargadas: {rules_count}").ok();
+    writeln!(report, "Rules loaded: {rules_count}").ok();
 
-    report.push_str("\nAgentes:\n");
+    report.push_str("\nAgents:\n");
     for agent in detect_agents() {
         let status = if let Some(_path) = &agent.binary_path {
             if agent.configured {
-                "✅ listo"
+                "✅ ready"
             } else {
-                "⚠️  no configurado"
+                "⚠️  not configured"
             }
         } else {
-            "❌ no instalado"
+            "❌ not installed"
         };
         writeln!(report, "  {:<20} {status}", agent.name).ok();
     }
@@ -244,7 +244,7 @@ pub(crate) fn doctor() -> String {
         report,
         "\nConfig dir: {} {}",
         cfg_dir.display(),
-        if cfg_dir.exists() { "✅" } else { "❌ no existe" }
+        if cfg_dir.exists() { "✅" } else { "❌ does not exist" }
     )
     .ok();
 
@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Guard para serializar los tests que mutan `std::env` y el PATH.
+    /// Guard to serialize tests that mutate `std::env` and the PATH.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -266,9 +266,9 @@ mod tests {
         assert!(agents.len() >= 4);
     }
 
-    /// F4 multiplataforma: `find_binary` descubre un binario real en un PATH
-    /// aislado. En Windows prefiere el candidato `.exe` y un archivo sin
-    /// extensión no basta; en unix exige bit de ejecución.
+    /// F4 cross-platform: `find_binary` discovers a real binary in an isolated
+    /// PATH. On Windows it prefers the `.exe` candidate and an extensionless
+    /// file is not enough; on unix it requires the execution bit.
     #[test]
     fn find_binary_discovers_executable_only() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -280,13 +280,13 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&real).expect("metadata").permissions();
-            perms.set_mode(0o755); // ejecutable
+            perms.set_mode(0o755); // executable
             std::fs::set_permissions(&real, perms).expect("chmod");
         }
 
         #[cfg(windows)]
         {
-            // Falso positivo: archivo SIN extensión no debe ganar al .exe.
+            // False positive: an extensionless file must not win over the .exe.
             let plain = dir.path().join("opencode");
             std::fs::write(&plain, "not a real exe").expect("write plain");
         }
@@ -307,16 +307,16 @@ mod tests {
 
     #[test]
     fn scan_empty_text_returns_clean() {
-        let report = scan_text("sin contraseñas aquí");
-        assert!(report.contains("No se detectaron"));
+        let report = scan_text("no secrets here");
+        assert!(report.contains("No sensitive data"));
     }
 
     #[test]
     fn scan_with_skey_detects() {
-        // "openai" es un contextKeyword de la regla secret.openai_api_key →
-        // con constraints aplicadas, se detecta.
+        // "openai" is a contextKeyword of the secret.openai_api_key rule →
+        // with constraints applied, it is detected.
         let report = scan_text("my openai api key is sk-abcDEFghijklmnopqrstuvwxyz1234");
-        assert!(report.contains("Hallazgos"));
+        assert!(report.contains("Scan findings"));
     }
 
     #[test]
@@ -325,7 +325,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ─── F4: cero-config — init deja upstreams por defecto explícitos ──────
+    // ─── F4: zero-config — init leaves explicit default upstreams ─────────
 
     #[test]
     fn init_writes_config_with_default_upstreams() {
@@ -338,26 +338,26 @@ mod tests {
         ));
         let yaml = init_config_yaml();
         let parsed = cerberus_proxy::config::ProxyConfig::parse(yaml).expect("default yaml parses");
-        assert!(parsed.upstreams.contains_key("openai"), "openai por defecto requerido");
+        assert!(parsed.upstreams.contains_key("openai"), "openai default required");
         assert!(
             parsed.upstreams.contains_key("anthropic"),
-            "anthropic por defecto requerido"
+            "anthropic default required"
         );
         assert_eq!(
             parsed.upstreams["openai"].url, "https://api.openai.com",
-            "sin env, el primer arranque debe llegar a OpenAI"
+            "without env, the first boot must reach OpenAI"
         );
 
-        // `cerberus init` en un dir aislado escribe ese YAML en config.yaml.
+        // `cerberus init` in an isolated dir writes that YAML to config.yaml.
         let report = run_init(dir.to_str().expect("utf8")).expect("init");
         assert!(
-            report.contains("no necesitas CERBERUS_UPSTREAM_URL"),
-            "el init debe anunciar cero-config: {report}"
+            report.contains("you do not need CERBERUS_UPSTREAM_URL"),
+            "init must announce zero-config: {report}"
         );
-        let written = std::fs::read_to_string(dir.join("config.yaml")).expect("config escrita por init");
+        let written = std::fs::read_to_string(dir.join("config.yaml")).expect("config written by init");
         assert!(
             written.contains("https://api.openai.com"),
-            "la config escrita debe preservar los upstreams: {written}"
+            "the written config must preserve the upstreams: {written}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

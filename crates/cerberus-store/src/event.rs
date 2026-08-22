@@ -1,7 +1,7 @@
-//! Event schema for audit events (§6 del build plan).
+//! Event schema for audit events (§6 of the build plan).
 //!
-//! Cada evento registra qué se protegió, con **fuga cero** de secretos:
-//! nunca se almacena el valor crudo, solo hashes SHA-256.
+//! Each event records what was protected, with **zero leakage** of secrets:
+//! the raw value is never stored, only SHA-256 hashes.
 
 use std::collections::HashMap;
 
@@ -9,38 +9,38 @@ use cerberus_engine::engine::Finding;
 use cerberus_engine::rule::{Action, Severity};
 use serde::{Deserialize, Serialize};
 
-/// Un evento de auditoría.
+/// An audit event.
 ///
-/// Nunca contiene valores crudos de secretos. Solo flags, categorías,
-/// conteos y hashes.
+/// Never contains raw secret values. Only flags, categories,
+/// counts and hashes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditEvent {
-    /// Identificador único del evento.
+    /// Unique event identifier.
     pub id: String,
     /// Timestamp ISO 8601.
     pub ts: String,
-    /// Modo de operación: "local" o "api".
+    /// Operation mode: "local" or "api".
     pub mode: String,
-    /// Herramienta que originó el request (ej. "claude-code").
+    /// Tool that originated the request (e.g. "claude-code").
     pub tool: String,
-    /// Proveedor LLM destino (ej. "anthropic").
+    /// Target LLM provider (e.g. "anthropic").
     pub provider: String,
-    /// Flags de las reglas que dispararon.
+    /// Flags of the rules that triggered.
     pub flags: Vec<String>,
-    /// Conteo por flag.
+    /// Count per flag.
     pub counts: HashMap<String, usize>,
-    /// Acción tomada globalmente.
+    /// Action taken globally.
     pub action_taken: String,
-    /// SHA-256 hashes de los valores detectados. **Nunca los valores crudos.**
+    /// SHA-256 hashes of the detected values. **Never the raw values.**
     pub hashed_values: Vec<String>,
-    /// Severidad máxima.
+    /// Maximum severity.
     pub severity: String,
-    /// Timestamp Unix (para ordenamiento y retención).
+    /// Unix timestamp (for ordering and retention).
     pub ts_unix: i64,
 }
 
 impl AuditEvent {
-    /// Construir un evento a partir de findings y metadatos.
+    /// Build an event from findings and metadata.
     #[must_use]
     pub fn from_findings(findings: &[Finding], action_taken: Action, mode: &str, tool: &str, provider: &str) -> Self {
         let mut counts: HashMap<String, usize> = HashMap::new();
@@ -79,7 +79,7 @@ impl AuditEvent {
         }
     }
 
-    /// Verificar que ningún valor crudo está presente en el evento.
+    /// Verify that no raw value is present in the event.
     #[must_use]
     pub fn no_raw_values(&self, raw_values: &[&str]) -> bool {
         let serialized = serde_json::to_string(self).unwrap_or_default();

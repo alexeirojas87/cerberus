@@ -1,9 +1,9 @@
-# Evidence Pack — Fase 4 / integration-gate
-- Intento: 1    Revisor: Builder    Veredicto: PASS
+# Evidence Pack — Phase 4 / integration-gate
+- Attempt: 1    Reviewer: Builder    Verdict: PASS
 
-## Verificación de integración: todas las unidades de F4
+## Integration verification: all F4 units
 
-| Unidad | Estado |
+| Unit | Status |
 |--------|--------|
 | local-daemon | ✅ PASS |
 | cerberus-init | ✅ PASS |
@@ -12,24 +12,24 @@
 | windows-support | ✅ PASS |
 | dev-feedback-ux | ✅ PASS |
 
-## Suite completa
-| Comando | Salida | Resultado |
+## Full suite
+| Command | Output | Result |
 |---------|--------|-----------|
 | `cargo build --workspace` | 0 errors (6 crates) | ✅ |
 | `cargo test --workspace` | 285 passed; 0 failed (19 suites) | ✅ |
 | `cargo clippy --all-targets --workspace -- -D warnings` | No issues found | ✅ |
 | `cargo fmt --check` | No diffs | ✅ |
 
-## Resumen
-Fase 4 completa con 6 unidades PASS. Nuevo crate `cerberus` (CLI binario) con:
-- Daemon local con start/stop/status vía PID file
-- Autodetección de agentes (Claude Code, Codex, opencode, pi, Cursor)
-- 10 reglas por defecto embebidas (8 secrets + 2 PII)
-- MITM opt-in vía openssl
-- Soporte multiplataforma (macOS, Linux, Windows)
-- Feedback al dev via CLI + notificaciones desktop
+## Summary
+Phase 4 complete with 6 PASS units. New crate `cerberus` (CLI binary) with:
+- Local daemon with start/stop/status via PID file
+- Agent autodetection (Claude Code, Codex, opencode, pi, Cursor)
+- 10 default rules embedded (8 secrets + 2 PII)
+- MITM opt-in via openssl
+- Cross-platform support (macOS, Linux, Windows)
+- Dev feedback via CLI + desktop notifications
 
-## Pendiente para Fase 5
-- Persistencia SQLite + audit events
-- Escritura async no bloqueante
-- Esquema de eventos sin secretos crudos
+## Pending for Phase 5
+- SQLite persistence + audit events
+- Non-blocking async writes
+- Event schema without raw secrets

@@ -1,9 +1,9 @@
-# Evidence Pack — REVISOR 2 (performance/correctness): multiline-blocks
+# Evidence Pack — REVIEWER 2 (performance/correctness): multiline-blocks
 
-**Revisor:** REVISOR 2
-**Fase:** F1 — Review multiline-blocks
+**Reviewer:** REVIEWER 2
+**Phase:** F1 — Review multiline-blocks
 **Worktree:** `cerberus-wt-f1-review-multiline`
-**Fecha:** 2026-08-17
+**Date:** 2026-08-17
 
 ---
 
@@ -85,7 +85,7 @@ Test `pem_block_captures_full_range` verifies:
 
 Test `pem_block_multi_line_body` verifies headers (Proc-Type, DEK-Info) are captured ✅
 
-**Veredicto**: Findings cubren el bloque completo sin truncamiento.
+**Verdict**: Findings cover the full block without truncation.
 
 ---
 
@@ -118,7 +118,7 @@ Both fixed. `cargo fmt --check` now passes cleanly.
 
 ## 7. Summary
 
-| Criterio | Veredicto |
+| Criterion | Verdict |
 |----------|-----------|
 | Build | ✅ PASS |
 | Tests (multiline) | ✅ 11/11 pass |
@@ -131,4 +131,4 @@ Both fixed. `cargo fmt --check` now passes cleanly.
 | False positives | ✅ None |
 | Integration in engine.rs | ✅ After regex, before entropy |
 
-**Veredicto final: ✅ PASS — REVISOR 2 aprueba multiline-blocks.**
+**Final verdict: ✅ PASS — REVIEWER 2 approves multiline-blocks.**

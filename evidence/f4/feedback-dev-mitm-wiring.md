@@ -1,52 +1,52 @@
-# Evidence Pack — F4/feedback-dev + cero-config + MITM wiring al daemon
+# Evidence Pack — F4/feedback-dev + zero-config + MITM wiring to the daemon
 
-- Fecha: 2026-08-21
-- Unidad: F4 — feedback al dev conectado (desktop/CLI), cero-config (`cerberus init`),
-  y `cerberus mitm enable|disable` hablando con el estado del daemon (wiring real).
-- Builder/verificación: opencode (deepseek-v4-flash), flujo Gauntlet §8B.
-- Veredicto: **PASS** (dentro del repo; bloqueo externo de `crates/cerberus-packs` reportado, ver §Límites).
+- Date: 2026-08-21
+- Unit: F4 — connected dev feedback (desktop/CLI), zero-config (`cerberus init`),
+  and `cerberus mitm enable|disable` talking to the daemon's state (real wiring).
+- Builder/verification: opencode (deepseek-v4-flash), Gauntlet §8B flow.
+- Verdict: **PASS** (within the repo; external breakage of `crates/cerberus-packs` reported, see §Limits).
 
-## Entregables y evidencia
+## Deliverables and evidence
 
-| # | Entregable | Cómo | Comando | Salida citada |
+| # | Deliverable | How | Command | Quoted output |
 |---|---|---|---|---|
-| 1 | Feedback al dev CONECTADO | En el loop del daemon (`daemon.rs`, arm `sleep(1s)` del `tokio::select!`) se drena `ApiContext.events`; cada evento `block`/`redact`/`warn` dispara `feedback_ux::send_dev_feedback`: macOS/Linux `notify-rust` (título “Cerberus bloqueó/redactó/advierte”, cuerpo flag+hash, NUNCA el secreto), tasa ≤1 notif/seg, fallback línea CLI a stderr; fuera de Unix la notificación es una línea a stderr con emoji | `rtk cargo test -p cerberus feedback_ux::tests` | `17 passed, 47 filtered out` (selección de acción, watermark sin replay/trim, línea sin valor crudo, tasa 1/seg) |
-| 2 | Cero-config | `init.rs` escribe upstreams EXPLÍCITOS en `config.yaml` (`openai → https://api.openai.com`, `anthropic → https://api.anthropic.com`) → `cerberus start` arranca sin `CERBERUS_UPSTREAM_URL`; la guía ya no pide exportar env | `rtk cargo test -p cerberus init::tests` | `init_writes_config_with_default_upstreams` PASS |
-| 3 | MITM conectado al daemon | `cerberus mitm enable/disable`: comprueba `daemon::is_running()`; daemon vivo → persiste config + imprime “edita `~/.cerberus/mitm.json` y reinicia (`cerberus stop && cerberus start`)” (no hay `/api/mitm` en caliente: api.rs es de otro agente); daemon parado → escribe config y anuncia que aplica al próximo arranque | `rtk cargo test -p cerberus --test mitm_cli_daemon` y `-p cerberus mitm::tests` | 4 integration PASS (exit codes + mensajes sin/con daemon), `enable_with_running_daemon_warns_restart_and_persists` PASS |
-| 4 | Tests | Unit (feedback/rate-limit/watcher; mitm daemon-state) + integración real del binario con HOME aislado y pid file del proceso vivo | `rtk cargo test -p cerberus --all-targets` | `68 passed (5 suites)` |
-| V | Build | — | `cargo build -p cerberus` | `Finished dev profile` (en copia aislada; ver §6) |
+| 1 | Connected dev feedback | In the daemon loop (`daemon.rs`, the `sleep(1s)` arm of `tokio::select!`) it drains `ApiContext.events`; each `block`/`redact`/`warn` event triggers `feedback_ux::send_dev_feedback`: macOS/Linux `notify-rust` (title "Cerberus blocked/redacted/warns", body flag+hash, NEVER the secret), rate ≤1 notif/sec, CLI line fallback to stderr; off-Unix the notification is a stderr line with an emoji | `rtk cargo test -p cerberus feedback_ux::tests` | `17 passed, 47 filtered out` (action selection, watermark without replay/trim, line without raw value, 1/sec rate) |
+| 2 | Zero-config | `init.rs` writes EXPLICIT upstreams into `config.yaml` (`openai → https://api.openai.com`, `anthropic → https://api.anthropic.com`) → `cerberus start` boots without `CERBERUS_UPSTREAM_URL`; the guide no longer asks to export env | `rtk cargo test -p cerberus init::tests` | `init_writes_config_with_default_upstreams` PASS |
+| 3 | MITM wired to the daemon | `cerberus mitm enable/disable`: checks `daemon::is_running()`; live daemon → persists config + prints "edit `~/.cerberus/mitm.json` and restart (`cerberus stop && cerberus start`)" (there is no hot `/api/mitm`: api.rs belongs to another agent); stopped daemon → writes config and announces it will apply on next boot | `rtk cargo test -p cerberus --test mitm_cli_daemon` and `-p cerberus mitm::tests` | 4 integration PASS (exit codes + messages without/with daemon), `enable_with_running_daemon_warns_restart_and_persists` PASS |
+| 4 | Tests | Unit (feedback/rate-limit/watcher; mitm daemon-state) + real binary integration with isolated HOME and pid file of the live process | `rtk cargo test -p cerberus --all-targets` | `68 passed (5 suites)` |
+| V | Build | — | `cargo build -p cerberus` | `Finished dev profile` (in isolated copy; see §6) |
 | V | Clippy | — | `rtk cargo clippy -p cerberus --all-targets -- -D warnings` | `No issues found` |
-| V | Fmt | — | `cargo fmt --all -- --check` (mis 6 archivos) | 0 diffs; solo diffs ajenos en `platform.rs`/`telemetry.rs` |
+| V | Fmt | — | `cargo fmt --all -- --check` (my 6 files) | 0 diffs; only unrelated diffs in `platform.rs`/`telemetry.rs` |
 
-## Cambios
+## Changes
 
-- `crates/cerberus/src/feedback_ux.rs` — `send_dev_feedback`, `dev_feedback_line`, `is_dev_intervention`, `InterventionWatcher` (watermark posicional con resync por trim), rate limit 1/seg, `notify_desktop` cfg(unix)=notify-rust / cfg(other)=stderr emoji, `emit_interventions` (async) para el daemon. Línea y notificación usan SOLO flag + hash del `AuditEvent` (nunca el valor crudo).
-- `crates/cerberus/src/daemon.rs` — `emit_interventions` en el arm `sleep(1s)` del loop graceful; `api_events` capturado antes de mover `ctx` a los proxies; `is_running` → `pub(crate)`. Startup ya lee `runtime_config()` (MITM al boot, sin cambios).
-- `crates/cerberus/src/init.rs` — `init_config_yaml()` con upstreams explícitos; pasos corregidos (cero env).
-- `crates/cerberus/src/mitm.rs` — `enable`/`disable` ahora anuncian la ruta persistida; `enable_with_daemon_state`/`disable_with_daemon_state` + `daemon_restart_note()`.
-- `crates/cerberus/src/main.rs` — dispatch `mitm enable|disable` usa `daemon::is_running()` y los helpers con estado.
-- `crates/cerberus/tests/mitm_cli_daemon.rs` — integración: status baseline, enable sin CA (exit≠0), init-ca → enable → disable (exit 0), enable con daemon falso (pid vivo) → nota de reinicio.
-- `crates/cerberus/Cargo.toml` — sin cambios de deps: `notify-rust` ya existe en macos/linux; Windows sin notif usa el fallback `cfg`.
+- `crates/cerberus/src/feedback_ux.rs` — `send_dev_feedback`, `dev_feedback_line`, `is_dev_intervention`, `InterventionWatcher` (positional watermark with resync on trim), rate limit 1/sec, `notify_desktop` cfg(unix)=notify-rust / cfg(other)=stderr emoji, `emit_interventions` (async) for the daemon. Line and notification use ONLY flag + hash from the `AuditEvent` (never the raw value).
+- `crates/cerberus/src/daemon.rs` — `emit_interventions` in the `sleep(1s)` arm of the graceful loop; `api_events` captured before moving `ctx` into the proxies; `is_running` → `pub(crate)`. Startup already reads `runtime_config()` (MITM at boot, no changes).
+- `crates/cerberus/src/init.rs` — `init_config_yaml()` with explicit upstreams; corrected steps (zero env).
+- `crates/cerberus/src/mitm.rs` — `enable`/`disable` now announce the persisted path; `enable_with_daemon_state`/`disable_with_daemon_state` + `daemon_restart_note()`.
+- `crates/cerberus/src/main.rs` — `mitm enable|disable` dispatch uses `daemon::is_running()` and the state-aware helpers.
+- `crates/cerberus/tests/mitm_cli_daemon.rs` — integration: status baseline, enable without CA (exit≠0), init-ca → enable → disable (exit 0), enable with fake live daemon (live pid) → restart note.
+- `crates/cerberus/Cargo.toml` — no deps changes: `notify-rust` already exists on macos/linux; Windows without notif uses the `cfg` fallback.
 
-## Casos adversariales
+## Adversarial cases
 
-- Linha de feedback construída con evento sin flags/hashes → `unknown`/`sha256:n/a`, sin panic.
-- Watermark tras trim del buffer 10k (recorte del frente) → resync sin replay; repetir status con el mismo slice → 0 duplications.
-- `mitm enable` con daemon falso vivo → la config se persiste igual (efectiva al reiniciar) Y avisa reinicio.
-- `mitm enable` sin CA → falla en voz alta con `init-ca`, exit ≠ 0, sin tocar `mitm.json`.
-- Tasa: 2ª notificación inmediata bloqueada; permitida tras ≥ 1 s.
+- Feedback line built with an event without flags/hashes → `unknown`/`sha256:n/a`, no panic.
+- Watermark after trim of the 10k buffer (front trim) → resync without replay; repeating status with the same slice → 0 duplications.
+- `mitm enable` with a fake live daemon → config is persisted anyway (effective on restart) AND warns of restart.
+- `mitm enable` without CA → fails loudly with `init-ca`, exit ≠ 0, without touching `mitm.json`.
+- Rate: 2nd immediate notification blocked; allowed after ≥ 1 s.
 
-## Límites y gaps declarados
+## Declared limits and gaps
 
-- En el **working tree real** `cargo build --workspace` está ROTE por trabajo en curso de otro
-  agente en `crates/cerberus-packs/` (`telemetry.rs` usa `reqwest`/`uuid` no declarados en ese
-  `Cargo.toml` y una firma `is_root`/`OsString` mal tipada en `updater`). Todo lo de esta unidad se
-  verificó en una **copiapejo del working tree** (rsync a `/var/folders/.../opencode/cerb-verify`)
-  donde solo se añadieron esas deps, sin tocar los archivos reales de packs. Reportado como ajeno; no se revierte.
-- `cerberus` (mi crate) está limpio ante `-D warnings` y fmt; los diffs de fmt ajenos quedan en
-  `platform.rs` y `telemetry.rs` (no se tocan).
-- No existe `/api/mitm` en caliente y NO se toca `cerberus-proxy/src/api.rs` (otro agente, F6/XSS):
-  el wiring de MITM es por config + reinicio, no por control plane.
-- Windows: `notify-rust` no está declarado (ya era así); el fallback imprime a stderr. No se ejecutó
-  la matriz Windows (solo `aarch64-apple-darwin` instalado), igual que la unidad F4 `windows-support`.
-- Ninguna notificación llamó a proveedores externos ni expuso secretos (solo hashes del evento).
+- In the **real working tree** `cargo build --workspace` is BROKEN by in-progress work from another
+  agent in `crates/cerberus-packs/` (`telemetry.rs` uses `reqwest`/`uuid` not declared in that
+  `Cargo.toml` and a mistyped `is_root`/`OsString` signature in `updater`). Everything in this unit was
+  verified in a **copy of the working tree** (rsync to `/var/folders/.../opencode/cerb-verify`)
+  where only those deps were added, without touching the real packs files. Reported as unrelated; not reverted.
+- `cerberus` (my crate) is clean against `-D warnings` and fmt; the unrelated fmt diffs remain in
+  `platform.rs` and `telemetry.rs` (not touched).
+- There is no hot `/api/mitm` and `cerberus-proxy/src/api.rs` is NOT touched (another agent, F6/XSS):
+  MITM wiring is via config + restart, not via the control plane.
+- Windows: `notify-rust` is not declared (already the case); the fallback prints to stderr. The Windows
+  matrix was not run (only `aarch64-apple-darwin` installed), same as the F4 `windows-support` unit.
+- No notification called external providers or exposed secrets (only event hashes).

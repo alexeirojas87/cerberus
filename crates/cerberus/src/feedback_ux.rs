@@ -1,14 +1,14 @@
-//! Feedback al dev — notificaciones y mensajes CLI.
+//! Dev feedback — notifications and CLI messages.
 //!
-//! Cuando algo se redacta o bloquea, el dev se entera mediante:
-//! - Mensaje en la línea de comandos (stderr, el daemon corre en primer plano)
-//! - Notificación de escritorio (macOS/Linux via notify-rust, tasa limitada;
-//!   en plataformas sin soporte el fallback imprime a stderr con emoji)
+//! When something is redacted or blocked, the dev is notified via:
+//! - A message on the command line (stderr, the daemon runs in the foreground)
+//! - A desktop notification (macOS/Linux via notify-rust, rate-limited;
+//!   on unsupported platforms the fallback prints to stderr with an emoji)
 //!
-//! F4 (feedback al dev): el daemon vigea el buffer de eventos de auditoría
-//! (`ApiContext.events`) y llama a [`send_dev_feedback`] para cada evento de
-//! intervención (`block` | `redact` | `warn`). Todo es best-effort: la fuente
-//! de verdad es el audit store, no las notificaciones.
+//! F4 (dev feedback): the daemon watches the audit event buffer
+//! (`ApiContext.events`) and calls [`send_dev_feedback`] for each intervention
+//! event (`block` | `redact` | `warn`). Everything is best-effort: the source
+//! of truth is the audit store, not the notifications.
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
@@ -19,20 +19,19 @@ use cerberus_engine::feedback::RedactFeedback;
 use cerberus_engine::rule::Action;
 use cerberus_store::event::AuditEvent;
 
-/// Acciones que disparan feedback al dev (del schema de auditoría).
+/// Actions that trigger dev feedback (from the audit schema).
 #[must_use]
 pub(crate) fn is_dev_intervention(action_taken: &str) -> bool {
     matches!(action_taken, "block" | "redact" | "warn")
 }
 
-/// Vigila el buffer en memoria de eventos (`ApiContext.events`) y solo
-/// entrega los NUEVOS desde la última llamada.
+/// Watches the in-memory event buffer (`ApiContext.events`) and only
+/// delivers the NEW ones since the last call.
 ///
-/// El buffer del control plane mantiene los últimos `10_000` eventos (recorta
-/// por el frente). El watcher usa un watermark posicional: si el buffer se
-/// recorta y el watermark queda fuera de rango, se resincroniza sin hacer
-/// replay — el feedback es best-effort y el store durable es la fuente de
-/// verdad.
+/// The control plane buffer keeps the last `10_000` events (trims from the
+/// front). The watcher uses a positional watermark: if the buffer is trimmed
+/// and the watermark falls out of range, it resyncs without doing a replay —
+/// feedback is best-effort and the durable store is the source of truth.
 #[derive(Debug, Default)]
 pub(crate) struct InterventionWatcher {
     processed: usize,
@@ -44,14 +43,14 @@ impl InterventionWatcher {
         Self { processed: 0 }
     }
 
-    /// Devuelve los eventos nuevos con `action_taken` de intervención desde la
-    /// última llamada (referencias al slice dado). Inmutable en cuanto a los
-    /// eventos: solo avanza el watermark.
+    /// Returns the new events with an intervention `action_taken` since the
+    /// last call (references into the given slice). Immutable regarding the
+    /// events: only advances the watermark.
     pub(crate) fn drain_interventions<'a>(&mut self, events: &'a [AuditEvent]) -> Vec<&'a AuditEvent> {
         let len = events.len();
         if len < self.processed {
-            // El buffer recortó por el frente (cap 10k): resincronizar sin
-            // notificar de nuevo lo ya entregado.
+        // The buffer trimmed from the front (cap 10k): resync without
+        // re-notifying what was already delivered.
             self.processed = len;
             return Vec::new();
         }
@@ -64,13 +63,13 @@ impl InterventionWatcher {
     }
 }
 
-/// Enviar feedback al dev por un evento de intervención recién registrado.
+/// Send dev feedback for a freshly logged intervention event.
 ///
-/// Estrategia (F4):
-/// 1. Notificación de escritorio si está disponible (macOS/Linux via
-///    notify-rust), con **tasa limitada a 1 por segundo** para no bombardear.
-/// 2. Si la notificación no existe o falla, se imprime la línea CLI a stderr
-///    (el daemon corre en una terminal; stderr no contamina el stdout).
+/// Strategy (F4):
+/// 1. Desktop notification if available (macOS/Linux via notify-rust), with
+///    **rate limited to 1 per second** so as not to bombard.
+/// 2. If the notification does not exist or fails, the CLI line is printed to
+///    stderr (the daemon runs in a terminal; stderr does not contaminate stdout).
 pub(crate) fn send_dev_feedback(event: &AuditEvent) {
     let line = dev_feedback_line(event);
     if acquire_feedback_slot() {
@@ -86,14 +85,14 @@ pub(crate) fn send_dev_feedback(event: &AuditEvent) {
     }
 }
 
-/// Línea de feedback single-line: flag + hash del valor detectado. NUNCA el
-/// valor crudo (los `AuditEvent` solo transportan hashes SHA-256).
+/// Single-line feedback line: flag + hash of the detected value. NEVER the
+/// raw value (`AuditEvent` only carries SHA-256 hashes).
 #[must_use]
 fn dev_feedback_line(event: &AuditEvent) -> String {
     let verb = match event.action_taken.as_str() {
-        "block" => "bloqueó",
-        "redact" => "redactó",
-        "warn" => "advirtió",
+        "block" => "blocked",
+        "redact" => "redacted",
+        "warn" => "warned",
         other => other,
     };
     let flag = event.flags.first().map_or("unknown", String::as_str);
@@ -104,19 +103,19 @@ fn dev_feedback_line(event: &AuditEvent) -> String {
     )
 }
 
-/// Título corto de la notificación de escritorio según la acción.
+/// Short title for the desktop notification based on the action.
 #[must_use]
 fn title_for(action_taken: &str) -> String {
     match action_taken {
-        "block" => "Cerberus bloqueó tráfico",
-        "redact" => "Cerberus redactó un secreto",
-        "warn" => "Cerberus advierte",
+        "block" => "Cerberus blocked traffic",
+        "redact" => "Cerberus redacted a secret",
+        "warn" => "Cerberus warning",
         _ => "Cerberus",
     }
     .to_string()
 }
 
-// ─── Notificación de escritorio (plataforma-específica) ────────────────────
+// ─── Desktop notification (platform-specific) ──────────────────────────────
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn notify_desktop(title: &str, body: &str) -> Result<(), String> {
@@ -132,20 +131,20 @@ fn notify_desktop(title: &str, body: &str) -> Result<(), String> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn notify_desktop(title: &str, body: &str) -> Result<(), String> {
-    // Plataforma sin soporte nativo (Windows, etc.): la "notificación" es una
-    // línea a stderr con emoji — el dev igual ve qué se bloqueó/redactó.
+    // Unsupported platform (Windows, etc.): the "notification" is a line to
+    // stderr with an emoji — the dev still sees what was blocked/redacted.
     eprintln!("⚠️ {title} — {body}");
     Ok(())
 }
 
-/// Intervalo mínimo entre notificaciones de escritorio (anti-spam).
+/// Minimum interval between desktop notifications (anti-spam).
 const NOTIFY_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Último instante en que se emitió una notificación de escritorio.
+/// Last instant a desktop notification was emitted.
 static LAST_NOTIFICATION: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// ¿La tasa de notificación admite una nueva? (máx 1/seg). Las líneas CLI no
-/// pasan por aquí: solo se amortiguan los popups de escritorio.
+/// Does the notification rate admit a new one? (max 1/sec). CLI lines do not
+/// go through here: only desktop popups are throttled.
 fn acquire_feedback_slot() -> bool {
     let mut last = LAST_NOTIFICATION
         .lock()
@@ -159,7 +158,7 @@ fn acquire_feedback_slot() -> bool {
     }
 }
 
-/// Regla pura del rate limit (testeable sin tocar el estado global).
+/// Pure rate-limit rule (testable without touching global state).
 #[must_use]
 fn does_rate_allow(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|t| now.duration_since(t) >= NOTIFY_MIN_INTERVAL)
@@ -172,11 +171,11 @@ fn reset_feedback_slot() {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
-// ─── Orquestación desde el daemon ──────────────────────────────────────────
+// ─── Orchestration from the daemon ──────────────────────────────────────────
 
-/// Revisar el buffer en memoria de eventos (`ApiContext.events`) y emitir
-/// feedback para las intervenciones nuevas. Bloquea el mutex de eventos
-/// únicamente durante el drenaje (corto y sin await interno).
+/// Review the in-memory event buffer (`ApiContext.events`) and emit feedback
+/// for new interventions. Locks the events mutex only during the drain (short
+/// and with no internal await).
 pub(crate) async fn emit_interventions(
     events: &Arc<tokio::sync::Mutex<Vec<AuditEvent>>>,
     watcher: &mut InterventionWatcher,
@@ -187,11 +186,11 @@ pub(crate) async fn emit_interventions(
     }
 }
 
-// ─── Feedback del engine (scan local) ──────────────────────────────────────
+// ─── Engine feedback (local scan) ───────────────────────────────────────────
 
-/// Mostrar feedback sobre findings al dev (modo `scan`/`test` de la CLI).
+/// Show feedback about findings to the dev (`scan`/`test` CLI mode).
 ///
-/// Devuelve el mensaje de feedback (si lo hay) para que el CLI lo imprima.
+/// Returns the feedback message (if any) for the CLI to print.
 #[must_use]
 pub(crate) fn show_feedback(findings: &[Finding], action_taken: Action) -> String {
     let feedback = RedactFeedback::from_findings(findings, action_taken);
@@ -202,15 +201,15 @@ pub(crate) fn show_feedback(findings: &[Finding], action_taken: Action) -> Strin
 
     let line = feedback.summary_line();
 
-    // Mostrar en stderr para no contaminar stdout del pipeline
+    // Show on stderr so as not to contaminate stdout of the pipeline
     eprintln!("{line}");
 
-    // Notificación de escritorio (opt-in silencioso)
+    // Desktop notification (silent opt-in)
     if let Err(e) = send_notification(&feedback) {
         tracing::debug!("notification failed (non-critical): {e}");
     }
 
-    // Mensajes detallados
+    // Detailed messages
     let mut output = String::new();
     for msg in &feedback.messages {
         output.push_str(msg);
@@ -219,7 +218,7 @@ pub(crate) fn show_feedback(findings: &[Finding], action_taken: Action) -> Strin
     output
 }
 
-/// Enviar notificación de escritorio (baseda en el resumen del engine).
+/// Send a desktop notification (based on the engine summary).
 fn send_notification(feedback: &RedactFeedback) -> Result<(), String> {
     if !feedback.has_intervention() {
         return Ok(());
@@ -254,19 +253,19 @@ fn notify(_summary: &str, _body: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Mostrar el mensaje de bienvenida al iniciar el daemon.
+/// Show the welcome message when starting the daemon.
 #[must_use]
 pub(crate) fn welcome_message(port: u16) -> String {
     format!(
         r"
 ╔══════════════════════════════════════════╗
 ║           Cerberus Local v{}            ║
-║   Cortafuegos de datos sensibles        ║
+║   Sensitive-data firewall                ║
 ║                                          ║
-║   Proxy local: http://127.0.0.1:{port}  ║
-║   Modo: enforce                          ║
+║   Local proxy: http://127.0.0.1:{port}  ║
+║   Mode: enforce                          ║
 ║                                          ║
-║   Configura tu agente:                   ║
+║   Configure your agent:                  ║
 ║     export CLAUDE_CODE_BASE_URL=...      ║
 ║     export OPENCODE_BASE_URL=...         ║
 ╚══════════════════════════════════════════╝
@@ -310,7 +309,7 @@ mod tests {
         }
     }
 
-    // ─── F4: selección y drenaje de intervenciones ─────────────────────────
+    // ─── F4: intervention selection and drain ─────────────────────────────
 
     #[test]
     fn intervention_actions_match_product_set() {
@@ -337,11 +336,11 @@ mod tests {
         let ids: Vec<&str> = first.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["evt_2", "evt_3", "evt_4", "evt_6"]);
 
-        // Sin eventos nuevos → nada nuevo (no reprocessar lo visto).
+        // No new events → nothing new (does not reprocess what was seen).
         assert!(w.drain_interventions(&events).is_empty());
 
-        // Nuevos eventos append: solo los no vistos (el daemon re-pasa el
-        // buffer COMPLETO cada tick, nunca solo la cola).
+        // New events appended: only the unseen ones (the daemon re-passes the
+        // COMPLETE buffer each tick, never just the tail).
         let mut all = events.to_vec();
         all.push(make_event("7", "warn"));
         all.push(make_event("8", "block"));
@@ -358,10 +357,10 @@ mod tests {
         w.drain_interventions(&events);
         assert_eq!(w.processed, 2);
 
-        // Simula el trim del buffer por el cap (recorte del frente).
+        // Simulate the buffer trim by the cap (front trim).
         let trimmed = events[1..].to_vec();
         let out = w.drain_interventions(&trimmed);
-        assert!(out.is_empty(), "el trim no debe reproducir eventos viejos");
+        assert!(out.is_empty(), "the trim must not replay old events");
         assert_eq!(w.processed, 1);
     }
 
@@ -374,13 +373,13 @@ mod tests {
         assert_eq!(out.len(), 1);
     }
 
-    // ─── Fase: línea de feedback ───────────────────────────────────────────
+    // ─── Phase: feedback line ───────────────────────────────────────────────
 
     #[test]
     fn dev_feedback_line_has_flag_and_hash_never_raw() {
         let ev = make_event("x", "block");
         let line = dev_feedback_line(&ev);
-        assert!(line.contains("bloqueó"), "verb acción: {line}");
+        assert!(line.contains("blocked"), "action verb: {line}");
         assert!(line.contains("secret.openai_api_key"), "flag: {line}");
         assert!(line.contains("sha256:deadbeef"), "hash: {line}");
     }
@@ -401,20 +400,20 @@ mod tests {
             ts_unix: 0,
         };
         let line = dev_feedback_line(&ev);
-        assert!(line.contains("advirtió"));
+        assert!(line.contains("warned"));
         assert!(line.contains("unknown"));
         assert!(line.contains("sha256:n/a"));
     }
 
     #[test]
     fn title_changes_with_action() {
-        assert_eq!(title_for("block"), "Cerberus bloqueó tráfico");
-        assert_eq!(title_for("redact"), "Cerberus redactó un secreto");
-        assert_eq!(title_for("warn"), "Cerberus advierte");
+        assert_eq!(title_for("block"), "Cerberus blocked traffic");
+        assert_eq!(title_for("redact"), "Cerberus redacted a secret");
+        assert_eq!(title_for("warn"), "Cerberus warning");
         assert_eq!(title_for("allow"), "Cerberus");
     }
 
-    // ─── Fase: rate limit ──────────────────────────────────────────────────
+    // ─── Phase: rate limit ──────────────────────────────────────────────────
 
     #[test]
     fn rate_limit_allows_first_and_blocks_immediately() {
@@ -428,12 +427,12 @@ mod tests {
     #[test]
     fn acquire_feedback_slot_enforces_min_interval() {
         reset_feedback_slot();
-        assert!(acquire_feedback_slot(), "primera notificación ok");
-        assert!(!acquire_feedback_slot(), "segunda inmediata bloqueada por la tasa");
+        assert!(acquire_feedback_slot(), "first notification ok");
+        assert!(!acquire_feedback_slot(), "immediate second blocked by the rate");
         reset_feedback_slot();
     }
 
-    // ─── Feedback del engine (regresión) ──────────────────────────────────
+    // ─── Engine feedback (regression) ──────────────────────────────────────
 
     #[test]
     fn feedback_empty_no_output() {
@@ -446,7 +445,7 @@ mod tests {
         let findings = vec![make_finding("test.flag", Action::Block)];
         let output = show_feedback(&findings, Action::Block);
         assert!(!output.is_empty());
-        assert!(output.contains("bloqueó") || output.contains("block"));
+        assert!(output.contains("blocked") || output.contains("block"));
     }
 
     #[test]

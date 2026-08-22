@@ -1,6 +1,6 @@
-//! Endpoint de healthcheck para el proxy.
+//! Healthcheck endpoint for the proxy.
 //!
-//! Responde con un JSON de estado: versión, modo, upstreams, uptime.
+//! Responds with a status JSON: version, mode, upstreams, uptime.
 
 use std::time::Instant;
 
@@ -8,24 +8,24 @@ use serde::Serialize;
 
 use crate::config::{OperationMode, ProxyConfig};
 
-/// Estado del proxy para healthcheck.
+/// Proxy status for the healthcheck.
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthStatus {
-    /// Estado general.
+    /// Overall status.
     pub status: &'static str,
-    /// Versión del proxy.
+    /// Proxy version.
     pub version: &'static str,
-    /// Modo de operación.
+    /// Operation mode.
     pub mode: &'static str,
-    /// Cantidad de upstreams configurados.
+    /// Number of configured upstreams.
     pub upstream_count: usize,
-    /// Uptime en segundos.
+    /// Uptime in seconds.
     pub uptime_secs: u64,
 }
 
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
-/// Obtener el health status actual.
+/// Get the current health status.
 #[must_use]
 pub fn get_status(config: &ProxyConfig) -> HealthStatus {
     let start = *START_TIME.get_or_init(Instant::now);
@@ -43,14 +43,14 @@ pub fn get_status(config: &ProxyConfig) -> HealthStatus {
     }
 }
 
-/// Serializar health status a JSON string.
+/// Serialize health status to a JSON string.
 #[must_use]
 pub fn health_json(config: &ProxyConfig) -> String {
     let status = get_status(config);
     serde_json::to_string(&status).unwrap_or_else(|_| r#"{"status":"error"}"#.to_string())
 }
 
-/// ¿El path es el de healthcheck?
+/// Is this the healthcheck path?
 #[must_use]
 pub fn is_health_path(path: &str, config: &ProxyConfig) -> bool {
     path == config.health_path

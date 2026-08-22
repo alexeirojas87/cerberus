@@ -1,49 +1,49 @@
-//! Break-glass / bypass auditado (§4.7 del build plan).
+//! Break-glass / audited bypass (§4.7 of the build plan).
 //!
-//! Permite que un dev fuerce el envío de algo que Cerberus bloquearía,
-//! dejando un registro auditado del bypass. Mecanismos:
+//! Allows a dev to force-send something that Cerberus would block,
+//! leaving an audited record of the bypass. Mechanisms:
 //!
-//! - **Header `X-Cerberus-Bypass`** en el request HTTP.
-//! - **Llamada programática** (`BreakGlass::allow_once`).
+//! - **Header `X-Cerberus-Bypass`** in the HTTP request.
+//! - **Programmatic call** (`BreakGlass::allow_once`).
 //!
-//! El bypass solo se aplica a findings con acción `Block`; los findings
-//! con `Redact`/`Warn`/`Allow` se procesan normalmente.
+//! The bypass only applies to findings with action `Block`; findings
+//! with `Redact`/`Warn`/`Allow` are processed normally.
 
 use crate::engine::Finding;
 use crate::rule::Action;
 
-/// Registro de un bypass: qué se omitió y por qué.
+/// Record of a bypass: what was skipped and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BypassRecord {
-    /// Motivo provisto por el dev.
+    /// Reason provided by the dev.
     pub reason: String,
-    /// Timestamp (Unix epoch nanos) del bypass.
+    /// Timestamp (Unix epoch nanos) of the bypass.
     pub timestamp_nanos: u128,
-    /// Flags de los findings que se omitieron.
+    /// Flags of the findings that were skipped.
     pub bypassed_flags: Vec<String>,
-    /// Cantidad de findings bloqueantes omitidos.
+    /// Number of blocking findings that were skipped.
     pub bypassed_count: usize,
 }
 
-/// Control de break-glass.
+/// Break-glass control.
 #[derive(Debug, Clone, Default)]
 pub struct BreakGlass {
-    /// Si está habilitado el break-glass.
+    /// Whether break-glass is enabled.
     pub enabled: bool,
 }
 
 impl BreakGlass {
-    /// Crear una instancia con break-glass habilitado.
+    /// Create an instance with break-glass enabled.
     #[must_use]
     pub const fn enabled() -> Self {
         Self { enabled: true }
     }
 
-    /// Aplica bypass sobre findings: remueve los `Block` y devuelve
-    /// los findings restantes más un `BypassRecord` si hubo bypass.
+    /// Apply bypass over findings: removes the `Block` ones and returns
+    /// the remaining findings plus a `BypassRecord` if there was a bypass.
     ///
-    /// Si `self.enabled` es `false` o no hay findings `Block`,
-    /// devuelve los findings originales y `None`.
+    /// If `self.enabled` is `false` or there are no `Block` findings,
+    /// returns the original findings and `None`.
     #[must_use]
     pub fn apply(&self, findings: &[Finding], reason: &str) -> (Vec<Finding>, Option<BypassRecord>) {
         if !self.enabled {
@@ -72,7 +72,7 @@ impl BreakGlass {
         (passed, Some(record))
     }
 
-    /// Atajo: `allow_once(reason)` es equivalente a
+    /// Shortcut: `allow_once(reason)` is equivalent to
     /// `BreakGlass::enabled().apply(findings, reason)`.
     #[must_use]
     pub fn allow_once(findings: &[Finding], reason: &str) -> (Vec<Finding>, Option<BypassRecord>) {

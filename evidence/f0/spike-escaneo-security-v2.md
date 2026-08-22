@@ -1,119 +1,119 @@
 # Evidence Pack — f0/spike-escaneo-security-v2
 
-- **Rol**: REVISOR 3 (Security)
-- **Intento**: 2 (segunda verificación)
-- **Veredicto**: PASS
+- **Role**: REVIEWER 3 (Security)
+- **Attempt**: 2 (second verification)
+- **Verdict**: PASS
 
-## Resumen
+## Summary
 
-Verificación de seguridad completa sobre el motor híbrido AC+regex y el workspace. Todos los criterios PASS.
+Complete security verification of the hybrid AC+regex engine and the workspace. All criteria PASS.
 
-## Criterios de Seguridad
+## Security Criteria
 
 ### 1. Build ✅
 
-| Comando | Resultado |
+| Command | Result |
 |---------|-----------|
-| `cargo build --release --workspace` | ✅ 0 errores, 0 warnings |
+| `cargo build --release --workspace` | ✅ 0 errors, 0 warnings |
 | `cargo clippy --workspace --all-targets` | ✅ 0 issues |
 
 ### 2. Tests ✅
 
-| Comando | Resultado |
+| Command | Result |
 |---------|-----------|
 | `cargo test -p spike-scan` | ✅ 26/26 passed (7 unit lib + 11 unit main + 8 integration) |
 
-### 3. ReDoS (tiempo lineal garantizado) ✅
+### 3. ReDoS (guaranteed linear time) ✅
 
-**Escenario**: 3 patrones ReDoS clásicos contra payload de 100KB de `'a'` + `'b'`:
+**Scenario**: 3 classic ReDoS patterns against a 100KB payload of `'a'` + `'b'`:
 
-| Patrón | Categoría | Riesgo |
+| Pattern | Category | Risk |
 |--------|-----------|--------|
-| `(a|aa|aaa)+b` | ReDoS clásico | Catastrophic backtracking en NFA |
+| `(a|aa|aaa)+b` | Classic ReDoS | Catastrophic backtracking on NFA |
 | `(a|aa)*b` | ReDoS | Exponential backtracking |
 | `(a+)+b` | ReDoS | Exponential backtracking |
 
-**Resultado**: `extract_prefix()` retorna `None` para los 3 (empiezan con `(` → break). Van a `RegexSet` (unprefixed). `regex` crate de Rust usa DFA internamente → **tiempo lineal garantizado**.
+**Result**: `extract_prefix()` returns `None` for all 3 (they start with `(` → break). They go to `RegexSet` (unprefixed). The Rust `regex` crate uses a DFA internally → **guaranteed linear time**.
 
-Test directo con payload real de 100KB + `'b'`:
-- `RegexSet::matches()` en 100KB de 'a's completó en **188µs** — sin hang
-- Binary con `--patterns-file /tmp/redos.txt` completó en **0.068ms** (hybrid) y **0.001ms** (regex)
+Direct test with a real 100KB payload + `'b'`:
+- `RegexSet::matches()` on 100KB of 'a's completed in **188µs** — no hang
+- Binary with `--patterns-file /tmp/redos.txt` completed in **0.068ms** (hybrid) and **0.001ms** (regex)
 
-**Evidencia**: `cargo test` con test temporal `redos_hybrid_no_hang_100k` → PASS en 0.01s. Revertido.
+**Evidence**: `cargo test` with a temporary test `redos_hybrid_no_hang_100k` → PASS in 0.01s. Reverted.
 
 ### 4. `unsafe` ✅
 
-| Búsqueda | Resultado |
+| Search | Result |
 |----------|-----------|
-| `grep -rn 'unsafe' crates/spike-scan/src/` | ❌ 0 ocurrencias |
-| `grep -rn 'unsafe' crates/spike-scan/tests/` | ❌ 0 ocurrencias |
-| `grep -rn 'unsafe' crates/benchkit/src/` | ❌ 0 ocurrencias |
-| `grep -rn 'unsafe' crates/cerberus-core/src/` | ❌ 0 ocurrencias |
+| `grep -rn 'unsafe' crates/spike-scan/src/` | ❌ 0 occurrences |
+| `grep -rn 'unsafe' crates/spike-scan/tests/` | ❌ 0 occurrences |
+| `grep -rn 'unsafe' crates/benchkit/src/` | ❌ 0 occurrences |
+| `grep -rn 'unsafe' crates/cerberus-core/src/` | ❌ 0 occurrences |
 
-**Workspace lint**: `unsafe_code = "forbid"` en `[workspace.lints.rust]` — verificado funcionalmente:
-- Se inyectó `unsafe { std::ptr::null() }` en `main.rs` → `cargo clippy` denegó con: `error: usage of an unsafe block`
-- `unsafe_code = "forbid"` bloquea todo `unsafe` en el workspace
+**Workspace lint**: `unsafe_code = "forbid"` in `[workspace.lints.rust]` — verified functionally:
+- `unsafe { std::ptr::null() }` was injected into `main.rs` → `cargo clippy` denied it with: `error: usage of an unsafe block`
+- `unsafe_code = "forbid"` blocks all `unsafe` in the workspace
 
-**Dependencia `aho-corasick`**: usa `unsafe` internamente para SIMD (`memchr`). Esto es normal y esperado. El lint `forbid` solo aplica al código del workspace, no a dependencias externas. Seguro.
+**`aho-corasick` dependency**: uses `unsafe` internally for SIMD (`memchr`). This is normal and expected. The `forbid` lint only applies to workspace code, not external dependencies. Safe.
 
-### 5. Manejo de Errores ✅
+### 5. Error Handling ✅
 
-| Escenario | Comportamiento | Exit Code |
+| Scenario | Behavior | Exit Code |
 |-----------|---------------|-----------|
-| `--engine invalid` | Fallback silencioso a `EngineKind::Hybrid` | 0 |
+| `--engine invalid` | Silent fallback to `EngineKind::Hybrid` | 0 |
 | `--patterns -1` | `unwrap_or(300)` → default 300 | 0 |
 | `--payload-size -1` | `unwrap_or(100)` → default 100 | 0 |
 | `--iterations -1` | `unwrap_or(1000)` → default 1000 | 0 |
-| `--patterns-file /nonexistent` | Error claro: "Cannot read file: No such file or directory" | 1 |
-| `--patterns-file` con JSON inválido | Error claro: "Invalid JSON array: expected value at line 1 column 2" | 1 |
-| `--patterns-file` con JSON válido | Funciona correctamente | 0 |
+| `--patterns-file /nonexistent` | Clear error: "Cannot read file: No such file or directory" | 1 |
+| `--patterns-file` with invalid JSON | Clear error: "Invalid JSON array: expected value at line 1 column 2" | 1 |
+| `--patterns-file` with valid JSON | Works correctly | 0 |
 
-**Hallazgo**: `--engine invalid` no produce error; cae a `EngineKind::Hybrid` silenciosamente por el `match` con catch-all `_ => EngineKind::Hybrid`. Esto es un comportamiento de **fallback silencioso** — aceptable para un spike, pero documentado para futura corrección.
+**Finding**: `--engine invalid` does not produce an error; it silently falls back to `EngineKind::Hybrid` due to the `match` with catch-all `_ => EngineKind::Hybrid`. This is a **silent fallback** behavior — acceptable for a spike, but documented for future correction.
 
-### 6. Prefiltros AC (Falsos Positivos de Prefijo) ✅
+### 6. AC Prefilters (Prefix False Positives) ✅
 
-**Análisis de`engine_hybrid.rs`**:
+**Analysis of `engine_hybrid.rs`**:
 
-- `extract_prefix()` extrae el prefijo literal más largo al inicio del patrón
-- `AhoCorasick::find_iter()` encuentra todas las ocurrencias del prefijo en el payload
-- Por cada hit AC, se ejecuta `regex.shortest_match(&payload[m.start()..])` con la regex completa
+- `extract_prefix()` extracts the longest literal prefix at the start of the pattern
+- `AhoCorasick::find_iter()` finds all occurrences of the prefix in the payload
+- For each AC hit, `regex.shortest_match(&payload[m.start()..])` is run with the full regex
 
-**Seguridad del prefiltro**:
-1. **No falsos negativos**: Si la regex matchea, el prefijo literal debe estar presente en la posición de match. AC encuentra todas las ocurrencias del prefijo. Por lo tanto, ningún match real se pierde.
-2. **No falsos positivos permanentes**: AC puede encontrar un prefijo donde la regex no matchea (ej. `abcXYZ` vs patrón `abc[0-9]+`). La regex se ejecuta igual y rechaza el match. El flag `matched[pat_idx]` evita re-evaluaciones redundantes una vez que el patrón ya matcheó.
-3. **Patrones sin prefijo**: Van a `RegexSet` (unprefixed) que se ejecuta en paralelo con DFA — no hay riesgo de falsos negativos.
+**Prefilter safety**:
+1. **No false negatives**: If the regex matches, the literal prefix must be present at the match position. AC finds all occurrences of the prefix. Therefore, no real match is lost.
+2. **No permanent false positives**: AC may find a prefix where the regex does not match (e.g. `abcXYZ` vs pattern `abc[0-9]+`). The regex still runs and rejects the match. The `matched[pat_idx]` flag avoids redundant re-evaluations once the pattern already matched.
+3. **Patterns without a prefix**: They go to `RegexSet` (unprefixed) which runs in parallel with the DFA — no risk of false negatives.
 
-**Veredicto**: La lógica de prefiltros es correcta y completa. Ni un falso positivo de prefijo puede llevar a omitir un match real.
+**Verdict**: The prefilter logic is correct and complete. Not even a prefix false positive can lead to omitting a real match.
 
 ### 7. No Debug Leaks ✅
 
-| Búsqueda | Resultado |
+| Search | Result |
 |----------|-----------|
-| `dbg!` en `crates/spike-scan/` | ❌ 0 ocurrencias |
-| `dbg!` en `crates/` (todo el workspace) | ❌ 0 ocurrencias |
-| `println!` en `crates/spike-scan/` | 1 ocurrencia → `main.rs:182`: **intencional** (salida JSON del benchmark) |
-| `eprintln!` en `crates/spike-scan/` | 3 ocurrencias → `main.rs:95,100,111`: **intencionales** (errores de compilación/archivo) |
+| `dbg!` in `crates/spike-scan/` | ❌ 0 occurrences |
+| `dbg!` in `crates/` (whole workspace) | ❌ 0 occurrences |
+| `println!` in `crates/spike-scan/` | 1 occurrence → `main.rs:182`: **intentional** (benchmark JSON output) |
+| `eprintln!` in `crates/spike-scan/` | 3 occurrences → `main.rs:95,100,111`: **intentional** (compilation/file errors) |
 
-## Hallazgos de Seguridad
+## Security Findings
 
-### 🔴 Medium: `--engine invalid` fallback silencioso
-- **Archivo**: `crates/spike-scan/src/main.rs:80-83`
-- **Descripción**: El flag `--engine` con valor inválido cae al catch-all `_ => EngineKind::Hybrid` sin warning.
-- **Impacto**: El usuario puede pensar que está usando otro engine (ej. `--engine vectorscan`) y obtener resultados híbridos sin notarlo.
-- **Recomendación**: Añadir `eprintln!("Warning: unknown engine '...', falling back to hybrid")` o retornar error. Post-spike.
+### 🔴 Medium: `--engine invalid` silent fallback
+- **File**: `crates/spike-scan/src/main.rs:80-83`
+- **Description**: The `--engine` flag with an invalid value falls to the catch-all `_ => EngineKind::Hybrid` without a warning.
+- **Impact**: The user may think they are using another engine (e.g. `--engine vectorscan`) and get hybrid results without noticing.
+- **Recommendation**: Add `eprintln!("Warning: unknown engine '...', falling back to hybrid")` or return an error. Post-spike.
 
-### 🟢 Info: Manejo de valores negativos con `unwrap_or`
-- **Archivo**: `crates/spike-scan/src/main.rs:61-69`
-- **Descripción**: `--patterns -1`, `--payload-size -1`, `--iterations -1` son silenciosamente reemplazados por defaults.
-- **Impacto**: Bajo. `unwrap_or` es intencional para parseo robusto en un benchmark.
-- **Recomendación**: Post-spike, usar `--patterns -1` como error explícito. Aceptable para MVP.
+### 🟢 Info: Handling of negative values with `unwrap_or`
+- **File**: `crates/spike-scan/src/main.rs:61-69`
+- **Description**: `--patterns -1`, `--payload-size -1`, `--iterations -1` are silently replaced by defaults.
+- **Impact**: Low. `unwrap_or` is intentional for robust parsing in a benchmark.
+- **Recommendation**: Post-spike, treat `--patterns -1` as an explicit error. Acceptable for MVP.
 
-### 🟢 Info: Payload-size 0 produce throughput 0
-- **Archivo**: `crates/spike-scan/src/main.rs:210-215`
-- **Descripción**: Con `payload_size_bytes = 0`, `throughput_mbps` se calcula como 0.0 (división por cero evitada con `if p50_secs > 0.0`).
-- **Impacto**: Ninguno — manejo correcto del edge case.
+### 🟢 Info: Payload-size 0 produces throughput 0
+- **File**: `crates/spike-scan/src/main.rs:210-215`
+- **Description**: With `payload_size_bytes = 0`, `throughput_mbps` is computed as 0.0 (division by zero avoided with `if p50_secs > 0.0`).
+- **Impact**: None — correct handling of the edge case.
 
-## Evidencia Reproducible
+## Reproducible Evidence
 
 ```bash
 # Build
@@ -134,8 +134,8 @@ target/release/spike-scan --engine invalid --patterns -1 --payload-size -1 --ite
 cargo clippy --workspace --all-targets
 ```
 
-## Decisión
+## Decision
 
-**VEREDICTO: PASS** ✅
+**VERDICT: PASS** ✅
 
-Todos los criterios de seguridad cumplen el estándar del Gauntlet. El motor híbrido es resistente a ReDoS (regex DFA + AC lineal), no contiene `unsafe` en código del workspace, maneja errores correctamente (con hallazgo menor documentado), y el prefiltro AC no introduce falsos negativos. Sin bloqueos de seguridad.
+All security criteria meet the Gauntlet standard. The hybrid engine is resistant to ReDoS (regex DFA + linear AC), contains no `unsafe` in workspace code, handles errors correctly (with a documented minor finding), and the AC prefilter introduces no false negatives. No security blockers.

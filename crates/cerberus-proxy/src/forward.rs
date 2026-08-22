@@ -1,9 +1,11 @@
-//! Forward proxy TLS opt-in para endpoints que no permiten cambiar su base URL.
+//! Forward proxy TLS opt-in for endpoints that do not allow changing their
+//! base URL.
 //!
-//! El listener es deliberadamente independiente del reverse proxy: sólo puede
-//! escuchar en loopback, sólo acepta `CONNECT host:443`, y únicamente emite un
-//! certificado para hosts exactos configurados por el usuario. La CA debe
-//! existir antes del arranque; este módulo nunca la instala en un trust store.
+//! The listener is deliberately independent of the reverse proxy: it can
+//! only listen on loopback, only accepts `CONNECT host:443`, and only
+//! issues a certificate for exact hosts configured by the user. The CA
+//! must exist before startup; this module never installs it in a trust
+//! store.
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -52,17 +54,17 @@ type UpstreamClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<B
 type ConnectionPermit = Arc<Mutex<Option<OwnedSemaphorePermit>>>;
 type TunnelJob = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// Material de la CA local. Las rutas se reciben explícitamente para que el
-/// core no dependa de un home directory ni cree estado de forma implícita.
+/// Local CA material. Paths are received explicitly so the core does not
+/// depend on a home directory or create state implicitly.
 #[derive(Clone, Debug)]
 pub struct CaPaths {
-    /// Certificado público PEM.
+    /// Public PEM certificate.
     pub cert: PathBuf,
-    /// Clave privada PEM.
+    /// PEM private key.
     pub key: PathBuf,
 }
 
-/// Configuración efectiva del listener forward/MITM.
+/// Effective configuration of the forward/MITM listener.
 #[derive(Clone, Debug)]
 pub struct ForwardProxyConfig {
     listen: SocketAddr,
@@ -73,8 +75,8 @@ pub struct ForwardProxyConfig {
 }
 
 impl ForwardProxyConfig {
-    /// Construye una configuración segura. Rechaza interfaces públicas,
-    /// puertos efímeros persistidos y allowlists vacías/demasiado grandes.
+    /// Builds a safe configuration. Rejects public interfaces, persisted
+    /// ephemeral ports and empty/too-large allowlists.
     pub fn new(listen: SocketAddr, allowed_hosts: &[String], ca: CaPaths) -> Result<Self, String> {
         if !listen.ip().is_loopback() {
             return Err("MITM forward proxy only accepts loopback listen addresses".to_string());
@@ -100,8 +102,8 @@ impl ForwardProxyConfig {
     }
 }
 
-/// Normaliza y valida una allowlist de DNS exacta. No se admiten wildcards,
-/// IPs, URLs, puertos ni sufijos implícitos.
+/// Normalize and validate an exact DNS allowlist. Wildcards, IPs, URLs,
+/// ports and implicit suffixes are not allowed.
 pub fn normalize_allowed_hosts(hosts: &[String]) -> Result<Vec<String>, String> {
     if hosts.is_empty() {
         return Err("MITM requires at least one explicit --host".to_string());
@@ -141,8 +143,8 @@ fn normalize_host(raw: &str) -> Result<String, String> {
     Ok(host)
 }
 
-/// Genera una CA local sin confiarla ni instalarla. La operación es
-/// `create_new`: nunca sobreescribe material previo.
+/// Generates a local CA without trusting or installing it. The operation is
+/// `create_new`: it never overwrites previous material.
 pub fn generate_local_ca(paths: &CaPaths) -> Result<(), String> {
     if paths.cert.exists() || paths.key.exists() {
         return Err("refusing to overwrite existing CA material".to_string());
@@ -190,8 +192,8 @@ pub fn generate_local_ca(paths: &CaPaths) -> Result<(), String> {
     validate_ca_files(paths)
 }
 
-/// Valida existencia, tipo, tamaño y permisos de la CA. En Unix una clave
-/// legible por grupo/otros hace fallar el arranque (fail closed).
+/// Validate existence, type, size and permissions of the CA. On Unix a key
+/// readable by group/others makes startup fail (fail closed).
 pub fn validate_ca_files(paths: &CaPaths) -> Result<(), String> {
     LocalCa::load(paths).map(|_| ())
 }
@@ -431,7 +433,7 @@ impl ForwardTestState {
     }
 }
 
-/// Handle administrado del listener forward.
+/// Managed handle of the forward listener.
 pub struct ManagedForwardProxyHandle {
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
@@ -467,7 +469,7 @@ impl ManagedForwardProxyHandle {
         }
     }
 
-    /// Cierra admisión y túneles activos, esperando como máximo `grace`.
+    /// Closes admission and active tunnels, waiting at most `grace`.
     pub async fn shutdown(mut self, grace: Duration) -> Result<(), String> {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -484,8 +486,8 @@ impl ManagedForwardProxyHandle {
     }
 }
 
-/// Arranca el listener forward. La carga/validación de la CA y la generación
-/// acotada de certificados ocurren antes del bind.
+/// Starts the forward listener. CA loading/validation and the bounded
+/// certificate generation happen before the bind.
 #[allow(clippy::unused_async)] // Preserve the public async startup API after switching to TcpSocket.
 pub async fn spawn_forward_proxy(
     config: ForwardProxyConfig,

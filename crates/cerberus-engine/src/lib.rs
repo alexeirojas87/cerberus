@@ -1,12 +1,12 @@
 //! Cerberus detection engine — pure library that turns text into findings.
 //!
-//! # Fase 1 — rule-loader
+//! # Phase 1 — rule-loader
 //!
 //! Loads rules from JSON/YAML, compiles them into the hybrid AC+regex engine
 //! (decided in F0, see `evidence/f0/decision-motor-matching.md`), and scans
 //! text producing [`Finding`]s with SHA-256 hashed values (never the raw secret).
 //!
-//! This crate is **pure** — no network, no persistence. Later fases build on it.
+//! This crate is **pure** — no network, no persistence. Later phases build on it.
 
 pub mod break_glass;
 pub mod constraints;

@@ -1,37 +1,37 @@
-# Evidence Pack — Fase 0: spike-escaneo · Correctness v3
+# Evidence Pack — Phase 0: spike-escaneo · Correctness v3
 
-## Contexto
-- **Objetivo**: verificar que el criterio que falló en el intento 2 (manejo de `--engine invalid`) AHORA pasa, y que no se rompió nada.
+## Context
+- **Objective**: verify that the criterion that failed in attempt 2 (handling of `--engine invalid`) NOW passes, and that nothing broke.
 - **Worktree**: `/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/cerberus-wt-f0-scan-rv3-verify`
-- **Rol**: revisor de verificación rápida.
-- **Fecha**: 2026-08-16
+- **Role**: quick verification reviewer.
+- **Date**: 2026-08-16
 
-## Veredicto: **PASS**
+## Verdict: **PASS**
 
-El criterio clave (`--engine bogus` → exit=1 + error claro en stderr) fue corregido y el resto de la batería permanece verde. No se detectó regresión.
+The key criterion (`--engine bogus` → exit=1 + clear error on stderr) was corrected and the rest of the battery remains green. No regression detected.
 
-## Resultados por comando
+## Results per command
 
 ### 1. Build workspace
 `cargo build --workspace 2>&1`
 ```
 Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.09s
 ```
-**PASS** — compila sin errores (crates: benchkit, cerberus-core, spike-scan).
+**PASS** — compiles without errors (crates: benchkit, cerberus-core, spike-scan).
 
-### 2. Formato
+### 2. Format
 `cargo fmt --check 2>&1`
 ```
-(exit 0, sin salida)
+(exit 0, no output)
 ```
-**PASS** — sin diferencias.
+**PASS** — no differences.
 
 ### 3. Clippy
 `cargo clippy -p spike-scan --all-targets -- -D warnings 2>&1`
 ```
 Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.74s
 ```
-**PASS** — 0 errores / 0 warnings.
+**PASS** — 0 errors / 0 warnings.
 
 ### 4. Tests
 `cargo test -p spike-scan 2>&1`
@@ -44,14 +44,14 @@ Total: 26 passed; 0 failed (3 suites)
 ```
 **PASS** — 26/26 (7 lib + 11 unit + 8 integration).
 
-### 5. Criterio clave
-a) Engine inválido — `cargo run --bin spike-scan -- --engine bogus --patterns 5 --payload-size 1 --iterations 1`:
-- stdout (con `2>/dev/null`): vacío
+### 5. Key criterion
+a) Invalid engine — `cargo run --bin spike-scan -- --engine bogus --patterns 5 --payload-size 1 --iterations 1`:
+- stdout (with `2>/dev/null`): empty
 - stderr: `invalid engine 'bogus' (expected 'regex' or 'hybrid')`
 - `exit=1`
-**PASS** — error claro en stderr y exit code 1 (el fallo del intento 2).
+**PASS** — clear error on stderr and exit code 1 (the attempt 2 failure).
 
-b) `--engine regex` (con `2>/dev/null`):
+b) `--engine regex` (with `2>/dev/null`):
 ```
 {
   "engine": "regex",
@@ -62,9 +62,9 @@ b) `--engine regex` (con `2>/dev/null`):
   "vectorscan": null
 }
 ```
-Validado con `python3 -c 'import json,sys; json.load(sys.stdin)'` → **JSON válido**.
+Validated with `python3 -c 'import json,sys; json.load(sys.stdin)'` → **valid JSON**.
 
-c) `--engine hybrid` (con `2>/dev/null`):
+c) `--engine hybrid` (with `2>/dev/null`):
 ```
 {
   "engine": "hybrid",
@@ -75,9 +75,9 @@ c) `--engine hybrid` (con `2>/dev/null`):
   "vectorscan": null
 }
 ```
-Validado con el mismo parser → **JSON válido**.
+Validated with the same parser → **valid JSON**.
 
-## Conclusión
-- Fix del disparador confirmado: `--engine invalid` retorna `exit=1` con mensaje `invalid engine 'bogus' (expected 'regex' or 'hybrid')` exclusivamente en stderr, sin fuga a stdout.
-- Sin regresión: build, fmt, clippy (-D warnings) y 26/26 tests verdes; salida JSON correcta para regex y hybrid.
-- **Veredicto: PASS** — gate de correctness autorizado.
+## Conclusion
+- Trigger fix confirmed: `--engine invalid` returns `exit=1` with message `invalid engine 'bogus' (expected 'regex' or 'hybrid')` exclusively on stderr, with no leakage to stdout.
+- No regression: build, fmt, clippy (-D warnings) and 26/26 tests green; correct JSON output for regex and hybrid.
+- **Verdict: PASS** — correctness gate authorized.

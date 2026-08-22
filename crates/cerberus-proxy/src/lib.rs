@@ -1,7 +1,7 @@
-//! Cerberus proxy core — Fase 3 del build plan.
+//! Cerberus proxy core — Phase 3 of the build plan.
 //!
-//! Reverse proxy provider-agnostic que escanea y redacta el egress
-//! hacia cualquier LLM. Reusa el motor de detección de `cerberus-engine`.
+//! Provider-agnostic reverse proxy that scans and redacts egress
+//! toward any LLM. Reuses the detection engine from `cerberus-engine`.
 
 pub mod adapters;
 pub mod api;

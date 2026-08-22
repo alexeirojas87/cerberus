@@ -1,17 +1,17 @@
-//! Integration test: `cerberus license` lee y verifica una licencia firmada
-//! desde el archivo señalado por `CERBERUS_LICENSE_PATH` (F7 en el producto,
+//! Integration test: `cerberus license` reads and verifies a signed license
+//! from the file pointed to by `CERBERUS_LICENSE_PATH` (F7 in the product,
 //! code review item 12).
 //!
-//! El binario del crate (`CARGO_BIN_EXE_cerberus`) es el MISMO código que el
-//! daemon usa en `start()` (vía `daemon::load_license` + `license_summary`), de
-//! modo que esta prueba demuestra que el arranque del producto reconoce una
-//! licencia Pro válida y NO cae cuando la licencia falta/invalida.
+//! The crate binary (`CARGO_BIN_EXE_cerberus`) is the SAME code that the
+//! daemon uses in `start()` (via `daemon::load_license` + `license_summary`),
+//! so this test demonstrates that the product boot recognizes a valid Pro
+//! license and does NOT crash when the license is missing/invalid.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Genera una licencia Pro firmada y la escribe en `dir/license.json`.
-/// Devuelve (ruta, trust-root hex).
+/// Generates a signed Pro license and writes it to `dir/license.json`.
+/// Returns (path, trust-root hex).
 fn write_signed_pro_license(dir: &std::path::Path) -> (PathBuf, String) {
     use ed25519_dalek::Signer;
 
@@ -63,11 +63,11 @@ fn cli_license_activates_pro_from_signed_file() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "exit 0 — daemon path no cae\nstderr: {stderr}"
+        "exit 0 — daemon path does not crash\nstderr: {stderr}"
     );
     assert!(
         stdout.contains("tier=pro"),
-        "el log del producto debe incluir tier=pro:\n{stdout}"
+        "the product log must include tier=pro:\n{stdout}"
     );
 
     std::fs::remove_dir_all(&dir).ok();
@@ -85,8 +85,8 @@ fn cli_license_falls_back_to_free_without_trust_root() {
     std::fs::create_dir_all(&dir).expect("create tmp dir");
     let (license_file, _root) = write_signed_pro_license(&dir);
 
-    // Licencia firmada presente pero SIN trust root: el producto responde
-    // fail-open → Free, exit 0 (el daemon no cae).
+    // Signed license present but WITHOUT trust root: the product responds
+    // fail-open → Free, exit 0 (the daemon does not crash).
     let out = Command::new(binary())
         .arg("license")
         .env("CERBERUS_LICENSE_PATH", &license_file)
@@ -98,7 +98,7 @@ fn cli_license_falls_back_to_free_without_trust_root() {
     assert_eq!(out.status.code(), Some(0), "exit 0; stderr: {stderr}");
     assert!(
         stdout.contains("tier=free"),
-        "sin trust root el producto responde Free:\n{stdout}"
+        "without trust root the product responds Free:\n{stdout}"
     );
 
     std::fs::remove_dir_all(&dir).ok();

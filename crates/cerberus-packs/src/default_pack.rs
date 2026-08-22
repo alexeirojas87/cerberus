@@ -1,17 +1,17 @@
-//! Default rule pack — reglas de detección incluidas out-of-the-box.
+//! Default rule pack — out-of-the-box detection rules.
 //!
-//! Fuente única de verdad del pack por defecto. Lo consumen:
-//! - El CLI/daemon (`cerberus`) al arrancar sin config.
-//! - Los tests de hardening de F9 (redos-fuzz, load-test) para fuzzear y
-//!   benchmarkear el pack **real** que shipamos, no una copia inline.
+//! Single source of truth for the default pack. Consumed by:
+//! - The CLI/daemon (`cerberus`) when booting without config.
+//! - The F9 hardening tests (redos-fuzz, load-test) to fuzz and benchmark the
+//!   **real** pack we ship, not an inline copy.
 //!
-//! Cualquier cambio aquí se refleja en producción y en los tests
-//! simultáneamente (no hay drift).
+//! Any change here is reflected in production and in the tests
+//! simultaneously (no drift).
 
-/// JSON del pack por defecto (13 reglas: OpenAI, Anthropic, AWS, Bearer,
+/// Default pack JSON (13 rules: OpenAI, Anthropic, AWS, Bearer,
 /// GitHub, Stripe, Google, Slack, email, phone, PEM, id_rsa, .env).
 ///
-/// Mantener en sincronía con `evidence/f9/redos-fuzz.md` y
+/// Keep in sync with `evidence/f9/redos-fuzz.md` and
 /// `evidence/f9/load-test.md`.
 #[allow(clippy::doc_markdown)]
 pub const DEFAULT_PACK_JSON: &str = r#"[

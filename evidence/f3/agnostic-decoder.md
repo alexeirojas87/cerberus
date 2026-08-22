@@ -1,29 +1,29 @@
-# Evidence Pack — Fase 3 / agnostic-decoder
-- Intento: 1    Revisor: Builder    Veredicto: PASS
+# Evidence Pack — Phase 3 / agnostic-decoder
+- Attempt: 1    Reviewer: Builder    Verdict: PASS
 
-## Criterios de aceptación
-| Criterio | Comando ejecutado | Salida | Resultado |
+## Acceptance criteria
+| Criterion | Command executed | Output | Result |
 |----------|-------------------|--------|-----------|
 | `cargo test -p cerberus-proxy` | `cargo test -p cerberus-proxy` | 46 passed; 0 failed | ✅ |
-| Decodificar JSON object extrae strings | `test::decode_json_object` | Pass | ✅ |
-| Decodificar JSON array extrae contenido | `test::decode_json_array` | Pass | ✅ |
-| JSON anidado extrae texto profundo | `test::decode_json_nested` | Pass | ✅ |
-| Plain text pasa igual | `test::decode_plain_text` | Pass | ✅ |
-| Body vacío → string vacío | `test::decode_empty_body` | Pass | ✅ |
-| Números/bools no generan texto falso | `test::decode_json_ignores_numbers_and_bools` | Pass | ✅ |
-| UTF-8 inválido no panic (lossy fallback) | `test::decode_invalid_utf8_fallback` | Pass | ✅ |
+| Decode JSON object extracts strings | `test::decode_json_object` | Pass | ✅ |
+| Decode JSON array extracts content | `test::decode_json_array` | Pass | ✅ |
+| Nested JSON extracts deep text | `test::decode_json_nested` | Pass | ✅ |
+| Plain text passes through | `test::decode_plain_text` | Pass | ✅ |
+| Empty body → empty string | `test::decode_empty_body` | Pass | ✅ |
+| Numbers/bools do not generate false text | `test::decode_json_ignores_numbers_and_bools` | Pass | ✅ |
+| Invalid UTF-8 does not panic (lossy fallback) | `test::decode_invalid_utf8_fallback` | Pass | ✅ |
 
-## Casos adversariales probados
-- JSON con solo números → texto vacío
-- Array de objetos anidados → texto extraído recursivamente
-- Bytes inválidos → no panic, lossy fallback
-- Content type hint ignorado (decodificación autodetected)
+## Adversarial cases tested
+- JSON with only numbers → empty text
+- Array of nested objects → text extracted recursively
+- Invalid bytes → no panic, lossy fallback
+- Content type hint ignored (autodetected decoding)
 
-## NFR aplicables
+## Applicable NFRs
 - N/A
 
-## Archivos
+## Files
 - `crates/cerberus-proxy/src/decoder.rs`
 
-## Desviaciones del plan
-Ninguna. Agnostic by construction: extrae todo el texto de cualquier JSON.
+## Deviations from plan
+None. Agnostic by construction: extracts all text from any JSON.

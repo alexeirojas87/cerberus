@@ -1,17 +1,16 @@
-//! Telemetría opt-in para Cerberus.
+//! Opt-in telemetry for Cerberus.
 //!
-//! Nunca envía datos sensibles. Solo estadísticas de uso anónimas:
-//! versión, sistema operativo, conteo de reglas, eventos agregados, uptime
-//! y un ID de instalación aleatorio persistente (`~/.cerberus/install_id`).
+//! Never sends sensitive data. Only anonymous usage statistics:
+//! version, operating system, rule count, aggregate events, uptime
+//! and a persistent random installation ID (`~/.cerberus/install_id`).
 //!
-//! Deshabilitada por defecto (`config.telemetry.enabled = false`): con la
-//! telemetría apagada, o sin endpoint configurado, [`Telemetry::send`] **no
-//! hace ninguna petición HTTP**. Cuando está habilitada, hace un POST real y
-//! silencioso: cualquier fallo se loguea y se devuelve `Ok`, nunca bloquea ni
-//! rompe al daemon.
+//! Disabled by default (`config.telemetry.enabled = false`): with telemetry
+//! off, or without a configured endpoint, [`Telemetry::send`] **makes NO HTTP
+//! request**. When enabled, it makes a real, silent POST: any failure is
+//! logged and returns `Ok`, it never blocks or breaks the daemon.
 //!
-//! El payload NO puede llevar secretos, rutas locales, ni findings/valores
-//! hash del escaneo — ver [`privacy_policy`].
+//! The payload MUST NOT carry secrets, local paths, or scan findings/hashed
+//! values — see [`privacy_policy`].
 
 use std::ffi::{OsStr, OsString};
 use std::sync::OnceLock;
@@ -19,29 +18,29 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Timeout de la petición de telemetría.
+/// Telemetry request timeout.
 const TELEMETRY_TIMEOUT_SECS: u64 = 5;
 
-/// Variable de entorno que sobreescribe el endpoint configurado (si está
-/// presente y no vacía).
+/// Environment variable that overrides the configured endpoint (if present
+/// and non-empty).
 pub const TELEMETRY_ENDPOINT_ENV: &str = "CERBERUS_TELEMETRY_ENDPOINT";
 
-/// Variable de entorno (uso avanzado/tests) que redirige el directorio donde
-/// se persiste el `install_id`.
+/// Environment variable (advanced/tests use) that redirects the directory
+/// where the `install_id` is persisted.
 pub const INSTALL_ID_DIR_ENV: &str = "CERBERUS_INSTALL_ID_DIR";
 
-/// Configuración de telemetría.
+/// Telemetry configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryConfig {
-    /// ¿Telemetría habilitada? Deshabilitada por defecto (opt-in).
+    /// Is telemetry enabled? Disabled by default (opt-in).
     #[serde(default)]
     pub enabled: bool,
-    /// URL del endpoint de telemetría. Si está vacía, no se hace red aunque
-    /// `enabled` sea `true`. Se puede sobreescribir con
-    /// `CERBERUS_TELEMETRY_ENDPOINT` (no vacío).
+    /// Telemetry endpoint URL. If empty, no network is made even if
+    /// `enabled` is `true`. Can be overridden with
+    /// `CERBERUS_TELEMETRY_ENDPOINT` (non-empty).
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
-    /// Intervalo de envío en segundos.
+    /// Send interval in seconds.
     #[serde(default = "default_interval")]
     pub interval_secs: u64,
 }
@@ -51,7 +50,7 @@ fn default_endpoint() -> String {
 }
 
 const fn default_interval() -> u64 {
-    86_400 // 24 horas
+    86_400 // 24 hours
 }
 
 impl Default for TelemetryConfig {
@@ -64,53 +63,53 @@ impl Default for TelemetryConfig {
     }
 }
 
-/// Payload de telemetría.
+/// Telemetry payload.
 ///
-/// # Contrato de privacidad
+/// # Privacy contract
 ///
-/// Este struct es la superficie acordada de lo que sale de la máquina.
-/// NO añadir campos con secretos, valores detectados, flags, rutas, hosts,
-/// nombres de usuario, emails ni nada que pueda identificar al operador o a
-/// una víctima de DLP. Ver [`privacy_policy`].
+/// This struct is the agreed surface of what leaves the machine. Do NOT add
+/// fields with secrets, detected values, flags, paths, hosts, user names,
+/// emails or anything that could identify the operator or a DLP victim. See
+/// [`privacy_policy`].
 #[derive(Debug, Clone, Serialize)]
 pub struct TelemetryPayload {
-    /// Versión de Cerberus.
+    /// Cerberus version.
     pub version: String,
-    /// Uptime en segundos.
+    /// Uptime in seconds.
     pub uptime_secs: u64,
-    /// Conteo de reglas cargadas.
+    /// Count of loaded rules.
     pub rule_count: usize,
-    /// Cantidad de eventos de auditoría.
+    /// Number of audit events.
     pub event_count: usize,
-    /// Tier de licencia.
+    /// License tier.
     pub license_tier: String,
-    /// Sistema operativo.
+    /// Operating system.
     pub os: String,
-    /// ID anónimo y persistente de instalación (uuid v4).
+    /// Anonymous persistent installation ID (uuid v4).
     pub install_id: String,
 }
 
-/// Gestor de telemetría.
+/// Telemetry manager.
 #[derive(Debug, Clone)]
 pub struct Telemetry {
-    /// Configuración.
+    /// Configuration.
     pub config: TelemetryConfig,
-    /// ID de instalación (persistente).
+    /// Installation ID (persistent).
     pub install_id: String,
 }
 
 impl Telemetry {
-    /// Crear un nuevo gestor de telemetría.
+    /// Create a new telemetry manager.
     ///
-    /// Carga o genera (y persiste en `~/.cerberus/install_id`) el ID de
-    /// instalación.
+    /// Loads or generates (and persists to `~/.cerberus/install_id`) the
+    /// installation ID.
     #[must_use]
     pub fn new(config: TelemetryConfig) -> Self {
         let install_id = Self::load_or_generate_id();
         Self { config, install_id }
     }
 
-    /// Construir payload de telemetría.
+    /// Build a telemetry payload.
     #[must_use]
     pub fn build_payload(&self, rule_count: usize, event_count: usize, uptime_secs: u64) -> TelemetryPayload {
         TelemetryPayload {
@@ -124,30 +123,30 @@ impl Telemetry {
         }
     }
 
-    /// Enviar telemetría.
+    /// Send telemetry.
     ///
-    /// Devuelve `Ok` siempre que todo vaya bien **o que el fallo sea de red**:
-    /// la telemetría nunca debe bloquear al daemon ni propagar un error que
-    /// detenga la operación. Los fallos se loguean a nivel `warn`.
+    /// Returns `Ok` as long as everything goes well **or the failure is a
+    /// network one**: telemetry must never block the daemon or propagate an
+    /// error that halts operation. Failures are logged at `warn` level.
     ///
-    /// # Garantías de red
+    /// # Network guarantees
     ///
-    /// - `config.enabled == false` → no hace nada, sin tráfico.
-    /// - No hay endpoint (vacío en config y en
-    ///   `CERBERUS_TELEMETRY_ENDPOINT`) → no hace nada, sin tráfico.
+    /// - `config.enabled == false` → does nothing, no traffic.
+    /// - No endpoint (empty in config and in `CERBERUS_TELEMETRY_ENDPOINT`)
+    ///   → does nothing, no traffic.
     ///
     /// # Errors
     ///
-    /// Devuelve `Err` solo si el payload no se puede serializar.
+    /// Returns `Err` only if the payload cannot be serialized.
     pub fn send(&self, payload: &TelemetryPayload) -> Result<(), String> {
         send_inner(&self.config, payload)
     }
 
-    /// Enviar telemetría en segundo plano (`std::thread`) para no bloquear al
-    /// llamante (el daemon) ni siquiera los pocos segundos del timeout.
+    /// Send telemetry in the background (`std::thread`) so as not to block the
+    /// caller (the daemon), even for the few seconds of the timeout.
     ///
-    /// Respeta los mismos guarados: sin `enabled` o sin endpoint no levanta
-    /// hilo.
+    /// Respects the same guarantees: without `enabled` or without an endpoint
+    /// it does not spawn a thread.
     pub fn send_background(&self, payload: &TelemetryPayload) {
         if !self.config.enabled || effective_endpoint(&self.config.endpoint).is_none() {
             return;
@@ -159,7 +158,7 @@ impl Telemetry {
         });
     }
 
-    /// Ruta al archivo de `install_id`.
+    /// Path to the `install_id` file.
     fn install_id_file() -> std::path::PathBuf {
         if let Ok(dir) = std::env::var(INSTALL_ID_DIR_ENV) {
             if !dir.is_empty() {
@@ -187,32 +186,32 @@ impl Telemetry {
     }
 }
 
-/// Directorio HOME del usuario actual.
+/// HOME directory of the current user.
 fn home_dir() -> Option<OsString> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|home| !is_root(home))
 }
 
-/// `None` para `/root` (HOME pseudo-raíz del contenedor, donde los mounts
-/// K8s bajo `/root/.cerberus` son el lugar correcto para el `install_id`).
+/// `None` for `/root` (the container's pseudo-root HOME, where K8s mounts under
+/// `/root/.cerberus` is the right place for the `install_id`).
 fn is_root(home: &OsStr) -> bool {
     home.is_empty() || home == "/root" || home == "/root/"
 }
 
-/// Generar un uuid v4 como ID de instalación.
+/// Generate a uuid v4 as the installation ID.
 fn generate_install_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Un ID de instalación debe ser un uuid no-vacío (36 chars), Y el contenido
-/// es un token aleatorio sin datos privados.
+/// An installation ID must be a non-empty uuid (36 chars), AND its content is a
+/// random token without private data.
 fn is_plausible_id(id: &str) -> bool {
     let trimmed = id.trim();
     !trimmed.is_empty() && trimmed.len() <= 64 && !trimmed.contains('\n')
 }
 
-/// Endpoint efectivo: env no vacío > config no vacía > `None`.
+/// Effective endpoint: non-empty env > non-empty config > `None`.
 fn effective_endpoint(config_endpoint: &str) -> Option<String> {
     std::env::var(TELEMETRY_ENDPOINT_ENV)
         .ok()
@@ -228,8 +227,8 @@ fn effective_endpoint(config_endpoint: &str) -> Option<String> {
         })
 }
 
-/// Cliente HTTP compartido (bloqueante, con timeout). Solo se crea la primera
-/// vez que hay un envío real.
+/// Shared HTTP client (blocking, with timeout). Only created the first time
+/// there is a real send.
 fn blocking_client() -> reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT
@@ -245,9 +244,9 @@ fn blocking_client() -> reqwest::blocking::Client {
         .clone()
 }
 
-/// Enviar un payload con la lógica idéntica para `send` y `send_background`.
+/// Send a payload with the identical logic for `send` and `send_background`.
 ///
-/// Nunca hace red con `enabled=false` ni sin endpoint.
+/// Never makes a network call with `enabled=false` or without an endpoint.
 fn send_inner(config: &TelemetryConfig, payload: &TelemetryPayload) -> Result<(), String> {
     if !config.enabled {
         tracing::debug!("telemetry disabled; skipping HTTP send (no network)");
@@ -270,11 +269,11 @@ fn send_inner(config: &TelemetryConfig, payload: &TelemetryPayload) -> Result<()
     }
 }
 
-/// POST JSON contra el endpoint con timeout.
+/// POST JSON to the endpoint with a timeout.
 ///
 /// # Errors
 ///
-/// Devuelve `Err` si la petición falla a cualquier nivel (red, timeout, status).
+/// Returns `Err` if the request fails at any level (network, timeout, status).
 fn post_json(endpoint: &str, body: &str) -> Result<(), String> {
     let _resp = blocking_client()
         .post(endpoint)
@@ -287,7 +286,7 @@ fn post_json(endpoint: &str, body: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Política de privacidad (texto Legible).
+/// Privacy policy (human-readable text).
 #[must_use]
 pub const fn privacy_policy() -> &'static str {
     "Cerberus Telemetry Privacy Policy\n\
@@ -317,10 +316,10 @@ mod tests {
 
     use super::*;
 
-    /// Serializa los tests que tocan variables de entorno del proceso.
+    /// Serializes tests that touch process environment variables.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Guard que restaura una variable de entorno al salir del test.
+    /// Guard that restores an environment variable on test exit.
     struct EnvVarGuard {
         key: &'static str,
         old: Option<String>,
@@ -352,8 +351,8 @@ mod tests {
     #[test]
     fn telemetry_disabled_no_http() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Endpoint válido y vivo: si `send` hiciera red, conectaría (y el
-        // assert de abajo lo detectaría).
+        // Valid, live endpoint: if `send` made a network call, it would
+        // connect (and the assertion below would catch it).
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("local addr");
         let config = TelemetryConfig {
@@ -386,14 +385,14 @@ mod tests {
         assert!(telemetry.send(&payload).is_ok());
         listener.set_nonblocking(true).expect("nonblocking");
         assert!(listener.accept().is_err(), "no HTTP when no endpoint is configured");
-        // El listener no debe recibir nada (solo comprobamos ausencia de red).
+        // The listener must not receive anything (only checking absence of network).
         let _ = addr;
     }
 
     #[test]
     fn telemetry_enabled_http_failure_is_ok() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Endpoint inalcanzable (puerto 1) → conexión rechazada al instante.
+        // Unreachable endpoint (port 1) → connection refused immediately.
         let config = TelemetryConfig {
             enabled: true,
             endpoint: "http://127.0.0.1:1/v1/telemetry".to_string(),
@@ -407,8 +406,8 @@ mod tests {
     #[test]
     fn send_simulated_fail_ok_when_disabled() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // "Fail simulado": endpoint apunta a un socket muerto. Con la telemetría
-        // deshabilitada, `send` devuelve Ok sin tocar la red.
+        // "Simulated failure": endpoint points to a dead socket. With telemetry
+        // disabled, `send` returns Ok without touching the network.
         let config = TelemetryConfig {
             enabled: false,
             endpoint: "http://127.0.0.1:1/v1/telemetry".to_string(),
@@ -422,8 +421,8 @@ mod tests {
     #[test]
     fn telemetry_enabled_posts_to_endpoint() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Servidor HTTP de juguete: comprueba que con `enabled=true` SÍ se
-        // envía una petición POST con el payload serializado.
+        // Toy HTTP server: verifies that with `enabled=true` it DOES send a
+        // POST request with the serialized payload.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test");
         let addr = listener.local_addr().expect("local addr");
         let (tx, rx) = mpsc::channel();
@@ -454,7 +453,7 @@ mod tests {
     #[test]
     fn env_endpoint_overrides_config() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Garantiza el estado "sin env" aunque el entorno la tenga puesta.
+        // Guarantees the "no env" state even if the environment has it set.
         let _initial = EnvVarGuard::set(TELEMETRY_ENDPOINT_ENV, "");
         let config = TelemetryConfig {
             endpoint: "https://config.example/v1/ping".to_string(),
@@ -470,7 +469,7 @@ mod tests {
             assert_eq!(
                 effective_endpoint(&config.endpoint).as_deref(),
                 Some("https://env.example/v1/ping"),
-                "env no vacía override config endpoint"
+                "non-empty env overrides config endpoint"
             );
         }
         assert_eq!(
@@ -519,8 +518,8 @@ mod tests {
             assert!(obj.contains_key(key), "missing key {key}");
         }
 
-        // Y, defensiva: ningún valor puede ser un secreto, ruta, token, flag
-        // ni hash del escaneo.
+        // And, defensively: no value may be a secret, path, token, flag
+        // or scan hash.
         let lower = json.to_lowercase();
         for forbidden in ["admin", "secret", "token", "api_key", "bearer", "/", "c:", "\\"] {
             assert!(!lower.contains(forbidden), "payload leaks {forbidden:?}: {json}");

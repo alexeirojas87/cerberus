@@ -1,15 +1,15 @@
-//! ReDoS fuzzing — verifica que ningún patrón cause backtracking catastrófico.
+//! ReDoS fuzzing — verifies that no pattern causes catastrophic backtracking.
 //!
-//! Fuzzing sobre el **pack por defecto real** (13 reglas, fuente
-//! `cerberus_packs::default_pack::DEFAULT_PACK_JSON`) — no sobre una copia
-//! inline. Esto cubre el criterio de aceptación de F9:
-//! "redos-fuzz(todos los packs)".
+//! Fuzzing over the **real default pack** (13 rules, source
+//! `cerberus_packs::default_pack::DEFAULT_PACK_JSON`) — not over an inline
+//! copy. This covers acceptance criterion F9:
+//! "redos-fuzz(all packs)".
 //!
-//! Rust `regex` crate usa un motor de tiempo lineal (RE2-like), por lo que
-//! ReDoS no es posible en teoría. Verificamos que todos los patrones del pack
-//! real compilan y matchean en tiempo predecible contra entradas diseñadas
-//! para causar backtracking catastrófico en motores vulnerables, incluyendo
-//! los patrones multilínea (PEM / id_rsa / .env).
+//! The Rust `regex` crate uses a linear-time engine (RE2-like), so ReDoS is
+//! theoretically impossible. We verify that every pattern in the real pack
+//! compiles and matches in predictable time against inputs designed to cause
+//! catastrophic backtracking in vulnerable engines, including multiline
+//! patterns (PEM / id_rsa / .env).
 
 use std::time::{Duration, Instant};
 
@@ -18,20 +18,20 @@ use cerberus_engine::loader::load_rules_from_str;
 use cerberus_engine::rule::Rule;
 use cerberus_packs::default_pack::DEFAULT_PACK_JSON;
 
-/// Tiempo máximo permitido por escaneo.
+/// Maximum time allowed per scan.
 const MAX_SCAN_TIME_MS: u64 = 100;
 
-/// Cargar todas las reglas del pack por defecto real (13 reglas).
+/// Load all rules from the real default pack (13 rules).
 fn load_all_rules() -> Vec<Rule> {
     load_rules_from_str(DEFAULT_PACK_JSON).unwrap_or_else(|e| panic!("default pack must parse: {e:?}"))
 }
 
-/// Generar payload adversarial clásico de backtracking.
+/// Generate classic adversarial backtracking payload.
 fn backtracking_payload(length: usize) -> String {
     "a".repeat(length)
 }
 
-/// Probar que ningún patrón del pack real cause escaneo lento.
+/// Test that no pattern in the real pack causes a slow scan.
 #[test]
 fn redos_fuzz_short_payloads() {
     let rules = load_all_rules();
@@ -56,7 +56,7 @@ fn redos_fuzz_short_payloads() {
     }
 }
 
-/// Probar cada patrón del pack real individualmente contra entrada adversarial.
+/// Test each pattern in the real pack individually against adversarial input.
 #[test]
 fn redos_fuzz_each_pattern() {
     let rules = load_all_rules();
@@ -79,7 +79,7 @@ fn redos_fuzz_each_pattern() {
     }
 }
 
-/// Probar que el engine no se cuelga con payloads vacíos.
+/// Test that the engine does not hang on empty payloads.
 #[test]
 fn redos_fuzz_empty_input() {
     let rules = load_all_rules();
@@ -91,7 +91,7 @@ fn redos_fuzz_empty_input() {
     assert!(result.findings.is_empty());
 }
 
-/// Probar payloads con caracteres especiales regex.
+/// Test payloads with special regex characters.
 #[test]
 fn redos_fuzz_special_chars() {
     let rules = load_all_rules();
@@ -119,15 +119,15 @@ fn redos_fuzz_special_chars() {
     }
 }
 
-/// Adversarial multiline: un bloque PEM truncado/malformado que tentaría al
-/// patrón multilínea a consumir toda la entrada. Debe terminar en tiempo lineal.
+/// Adversarial multiline: a truncated/malformed PEM block that would tempt
+/// the multiline pattern to consume the entire input. Must finish in linear time.
 #[test]
 fn redos_fuzz_malformed_pem_multiline() {
     let rules = load_all_rules();
     let engine = EngineBuilder::new(&rules).build().expect("engine build");
 
-    // Bloque BEGIN sin END — el patrón multiline intenta matchear toda la
-    // entrada; al no hallar END, debe fallar rápido (no lineal-explosivo).
+    // BEGIN block without END — the multiline pattern attempts to match the
+    // entire input; on not finding END, it must fail fast (not linear-explosive).
     let truncated_pem = format!("-----BEGIN RSA PRIVATE KEY-----\n{}", "A".repeat(10_000));
     let start = Instant::now();
     let result = engine.scan(&truncated_pem);
@@ -137,14 +137,14 @@ fn redos_fuzz_malformed_pem_multiline() {
         "malformed PEM scan took {}ms",
         elapsed.as_millis(),
     );
-    // Sin END, no debe producir hallazgo espurio.
+    // Without END, it must not produce a spurious finding.
     assert!(
         result.findings.iter().all(|f| f.flag != "secret.pem_private_key"),
         "truncated PEM should not spuriously match pem_private_key: {:?}",
         result.findings
     );
 
-    // Muchos bloques BEGIN anidados (caso patológico para regex multiline).
+    // Many nested BEGIN blocks (pathological case for multiline regex).
     let nested = format!(
         "{}{}",
         "-----BEGIN PRIVATE KEY-----\n".repeat(100),
@@ -160,8 +160,8 @@ fn redos_fuzz_malformed_pem_multiline() {
     );
 }
 
-/// Adversarial .env: muchas líneas `KEY=value` largas — el patrón multiline
-/// `(?m)^...=.{10,}` no debe degradar con input grande.
+/// Adversarial .env: many long `KEY=value` lines — the multiline pattern
+/// `(?m)^...=.{10,}` must not degrade with large input.
 #[test]
 fn redos_fuzz_env_block_large() {
     let rules = load_all_rules();
@@ -186,16 +186,16 @@ fn redos_fuzz_env_block_large() {
     );
 }
 
-/// Adversarial: clave con prefijo válido pero sufijo de longitud explosiva
-/// para probar el quantifier acotado `{20,}` del patrón openai.
+/// Adversarial: key with a valid prefix but an explosively long suffix to
+/// test the bounded quantifier `{20,}` of the openai pattern.
 #[test]
 fn redos_fuzz_long_suffix_after_prefix() {
     let rules = load_all_rules();
     let engine = EngineBuilder::new(&rules).build().expect("engine build");
 
-    // "sk-" + 100k chars: el patrón `\\bsk-[A-Za-z0-9]{20,}\\b` debe escanear
-    // en tiempo lineal. El constraint `maxLength=128` puede descartar el
-    // hallazgo (anti-FP correcto); aquí sólo verificamos latencia, no match.
+    // "sk-" + 100k chars: the pattern `\\bsk-[A-Za-z0-9]{20,}\\b` must scan
+    // in linear time. The `maxLength=128` constraint may discard the finding
+    // (correct anti-FP); here we only verify latency, not the match.
     let payload = format!("openai api key sk-{}", "a".repeat(100_000));
     let start = Instant::now();
     let _result = engine.scan(&payload);
@@ -206,8 +206,8 @@ fn redos_fuzz_long_suffix_after_prefix() {
         elapsed.as_millis(),
     );
 
-    // Un key dentro de bounds (maxLength 128) con keyword de contexto debe
-    // producir hallazgo — confirma que el setup es válido y el motor detecta.
+    // A key within bounds (maxLength 128) with a context keyword must
+    // produce a finding — confirms that the setup is valid and the engine detects.
     let valid_payload = format!("openai api key sk-{}", "a".repeat(30));
     let result = engine.scan(&valid_payload);
     assert!(
@@ -224,7 +224,7 @@ mod tests {
     fn load_all_rules_returns_default_pack() {
         let rules = load_all_rules();
         assert!(!rules.is_empty(), "default pack should load at least one rule");
-        // El pack por defecto tiene 13 reglas; permitimos crecimiento.
+        // The default pack has 13 rules; we allow growth.
         assert!(
             rules.len() >= 13,
             "default pack should have >=13 rules, got {}",

@@ -1,11 +1,11 @@
 //! Load/performance benchmark tests.
 //!
-//! Verifica que el motor de escaneo cumple el presupuesto de latencia
-//! (< 3-5 ms p99 para payloads ≤ 50 KB, según §5 del build plan).
+//! Verifies that the scan engine meets the latency budget
+//! (< 3-5 ms p99 for payloads ≤ 50 KB, per §5 of the build plan).
 //!
-//! Las benchmarks corren contra el **pack por defecto real** (13 reglas,
-//! fuente `cerberus_packs::default_pack::DEFAULT_PACK_JSON`) — el mismo
-//! pack que shipamos en producción, no una copia inline.
+//! Benchmarks run against the **real default pack** (13 rules, source
+//! `cerberus_packs::default_pack::DEFAULT_PACK_JSON`) — the same pack we
+//! ship in production, not an inline copy.
 
 use std::time::{Duration, Instant};
 
@@ -14,17 +14,17 @@ use cerberus_engine::loader::load_rules_from_str;
 use cerberus_engine::rule::Rule;
 use cerberus_packs::default_pack::DEFAULT_PACK_JSON;
 
-/// Presupuesto de latencia: p99 < 5 ms (release, plan §5).
+/// Latency budget: p99 < 5 ms (release, plan §5).
 const P99_BUDGET_MS: f64 = 5.0;
 
-/// Assert que p99 cumple el presupuesto del perfil actual.
+/// Assert that p99 meets the budget for the current profile.
 ///
-/// El presupuesto de latencia p99 < 3–5 ms (plan §5) es un criterio de
-/// **release**. En debug, la CPU compartida del workspace (tests en paralelo,
-/// sin optimizar) hace que los presupuestos estrictos no sean reproducibles.
-/// Por eso en debug **sólo registramos** el p99 (sin assert de budget): el
-/// gate de release es el que decide. Aun así, en debug guardamos contra
-/// comportamiento patológico no-lineal con un techo holgado (30× release).
+/// The p99 latency budget < 3–5 ms (plan §5) is a **release** criterion. In
+/// debug, the shared CPU of the workspace (tests in parallel, unoptimized)
+/// makes strict budgets non-reproducible. That is why in debug **we only
+/// log** the p99 (without a budget assert): the release gate is what
+/// decides. Even so, in debug we guard against pathological non-linear
+/// behavior with a loose ceiling (30× release).
 fn assert_p99_budget(p99_ms: f64, name: &str, release_budget: f64) {
     let is_release = !cfg!(debug_assertions);
     let profile = if is_release { "release" } else { "debug" };
@@ -36,8 +36,8 @@ fn assert_p99_budget(p99_ms: f64, name: &str, release_budget: f64) {
             "{name}: p99 {p99_ms:.3}ms exceeds {profile} budget {budget}ms"
         );
     } else {
-        // Debug: techo holgado (30× release) sólo para detectar patología
-        // no-lineal grotesca. El gate de perf real es release.
+        // Debug: loose ceiling (30× release) only to detect grotesque
+        // non-linear pathology. The real perf gate is release.
         let debug_ceiling = release_budget * 30.0;
         println!("load_test_{name}: profile={profile} (release gate) p99={p99_ms:.3} ms ceiling={debug_ceiling:.1}ms");
         assert!(
@@ -47,12 +47,12 @@ fn assert_p99_budget(p99_ms: f64, name: &str, release_budget: f64) {
     }
 }
 
-/// Cargar el pack por defecto REAL (13 reglas) — fuente única de verdad.
+/// Load the REAL default pack (13 rules) — single source of truth.
 fn load_bench_rules() -> Vec<Rule> {
     load_rules_from_str(DEFAULT_PACK_JSON).expect("default pack must parse for benchmarks")
 }
 
-/// Generar payload sintético.
+/// Generate a synthetic payload.
 fn synthetic_payload(size_kb: usize) -> String {
     let filler = "the quick brown fox jumps over the lazy dog. ";
     let target = size_kb * 1024;
@@ -64,7 +64,7 @@ fn synthetic_payload(size_kb: usize) -> String {
     body
 }
 
-/// Generar payload con secretos intercalados.
+/// Generate a payload with interspersed secrets.
 fn payload_with_secrets(size_kb: usize) -> String {
     let secret = "my api key is sk-abcDEFghijklmnopqrstuvwxyz1234 and email is test@example.com ";
     let target = size_kb * 1024;
@@ -76,7 +76,7 @@ fn payload_with_secrets(size_kb: usize) -> String {
     body
 }
 
-/// Calcular percentil p.
+/// Compute percentile p.
 fn percentile(timings: &[Duration], p: f64) -> Duration {
     assert!(!timings.is_empty());
     let mut sorted = timings.to_vec();
@@ -87,7 +87,7 @@ fn percentile(timings: &[Duration], p: f64) -> Duration {
     sorted[idx]
 }
 
-/// Benchmark: escanear payload de N KB con el pack real completo.
+/// Benchmark: scan an N KB payload with the full real pack.
 #[test]
 fn load_test_1kb_clean() {
     let engine = EngineBuilder::new(&load_bench_rules()).build().expect("engine build");
@@ -162,7 +162,7 @@ fn load_test_100kb_clean() {
     assert_p99_budget(p99_ms, "100kb_clean", 5.0);
 }
 
-/// Verificar que escanear sin reglas es rápido.
+/// Verify that scanning with no rules is fast.
 #[test]
 fn load_test_empty_engine() {
     let engine = EngineBuilder::new(&[]).build().expect("engine build");
@@ -173,8 +173,8 @@ fn load_test_empty_engine() {
     }
     let elapsed = start.elapsed();
     let avg_ms = elapsed.as_secs_f64() * 1000.0 / 100.0;
-    // Mismo enfoque que assert_p99_budget: release = gate estricto, debug =
-    // techo holgado (30×) sólo para patología grotesca.
+    // Same approach as assert_p99_budget: release = strict gate, debug =
+    // loose ceiling (30×) only for grotesque pathology.
     let is_release = !cfg!(debug_assertions);
     let profile = if is_release { "release" } else { "debug" };
     let ceiling = if is_release { 5.0 } else { 5.0 * 30.0 };
@@ -185,7 +185,7 @@ fn load_test_empty_engine() {
     );
 }
 
-/// Verificar que el decode + scan es rápido.
+/// Verify that decode + scan is fast.
 #[test]
 fn load_test_decode_and_scan() {
     use bytes::Bytes;
@@ -207,7 +207,7 @@ fn load_test_decode_and_scan() {
     assert_p99_budget(p99_ms, "decode_and_scan", 5.0);
 }
 
-/// Verificar que scan + redact es rápido.
+/// Verify that scan + redact is fast.
 #[test]
 fn load_test_scan_and_redact() {
     use cerberus_engine::redact::{apply_redaction, RedactOptions};
@@ -228,7 +228,7 @@ fn load_test_scan_and_redact() {
     assert_p99_budget(p99_ms, "scan_and_redact", 5.0);
 }
 
-/// Sanity: el pack real carga exactamente 13 reglas (guarda contra drift).
+/// Sanity: the real pack loads exactly 13 rules (drift guard).
 #[test]
 fn load_test_default_pack_rule_count() {
     let rules = load_bench_rules();

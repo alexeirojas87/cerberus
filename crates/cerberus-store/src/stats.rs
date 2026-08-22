@@ -6,46 +6,46 @@ use serde::Serialize;
 
 use crate::event::AuditEvent;
 
-/// Estadisticas agregadas por proveedor.
+/// Statistics aggregated by provider.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProviderStats {
-    /// Nombre del proveedor.
+    /// Provider name.
     pub provider: String,
-    /// Total de eventos.
+    /// Total number of events.
     pub total: usize,
-    /// Conteo por acción.
+    /// Count per action.
     pub by_action: HashMap<String, usize>,
     /// Top flags.
     pub top_flags: Vec<(String, usize)>,
 }
 
-/// Estadisticas agregadas por herramienta.
+/// Statistics aggregated by tool.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ToolStats {
-    /// Nombre de la herramienta.
+    /// Tool name.
     pub tool: String,
-    /// Total de eventos.
+    /// Total number of events.
     pub total: usize,
-    /// Conteo por acción.
+    /// Count per action.
     pub by_action: HashMap<String, usize>,
 }
 
-/// Resumen de estadísticas.
+/// Statistics summary.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatsSummary {
-    /// Total de eventos.
+    /// Total number of events.
     pub total: usize,
-    /// Por proveedor.
+    /// Per provider.
     pub by_provider: Vec<ProviderStats>,
-    /// Por herramienta.
+    /// Per tool.
     pub by_tool: Vec<ToolStats>,
-    /// Top flags globales.
+    /// Global top flags.
     pub top_flags: Vec<(String, usize)>,
-    /// Conteo por acción.
+    /// Count per action.
     pub by_action: HashMap<String, usize>,
 }
 
-/// Agrupar eventos por proveedor y computar estadísticas.
+/// Group events by provider and compute statistics.
 #[must_use]
 pub fn by_provider(events: &[AuditEvent]) -> Vec<ProviderStats> {
     let mut grouped: HashMap<String, Vec<&AuditEvent>> = HashMap::new();
@@ -84,7 +84,7 @@ pub fn by_provider(events: &[AuditEvent]) -> Vec<ProviderStats> {
     stats
 }
 
-/// Agrupar eventos por herramienta.
+/// Group events by tool.
 #[must_use]
 pub fn by_tool(events: &[AuditEvent]) -> Vec<ToolStats> {
     let mut grouped: HashMap<String, Vec<&AuditEvent>> = HashMap::new();
@@ -110,7 +110,7 @@ pub fn by_tool(events: &[AuditEvent]) -> Vec<ToolStats> {
     stats
 }
 
-/// Computar resumen completo de estadísticas.
+/// Compute a complete statistics summary.
 #[must_use]
 pub fn summary(events: &[AuditEvent]) -> StatsSummary {
     let total = events.len();

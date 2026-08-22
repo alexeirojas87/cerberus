@@ -23,7 +23,7 @@ pub struct TestProxy {
     pub handle: JoinHandle<()>,
     /// Events recorded so far.
     pub events: Arc<tokio::sync::Mutex<Vec<AuditEvent>>>,
-    /// Config compartida: la allowlist de triage vive en `policy.allowlist`.
+    /// Shared config: the triage allowlist lives in `policy.allowlist`.
     pub config: Arc<std::sync::RwLock<ProxyConfig>>,
 }
 

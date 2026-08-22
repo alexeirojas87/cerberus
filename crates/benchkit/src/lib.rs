@@ -79,8 +79,8 @@ mod tests {
     #[test]
     fn time_n_results_are_non_zero() {
         let results = time_n(3, || {
-            // En release el busy-wait se optimiza; un sleep breve garantiza
-            // una duración medible determinista.
+            // In release the busy-wait gets optimized away; a brief sleep
+            // guarantees a deterministic measurable duration.
             std::thread::sleep(std::time::Duration::from_micros(500));
         });
         for d in &results {

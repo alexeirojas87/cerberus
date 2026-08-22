@@ -1,34 +1,35 @@
-//! Política de detección **persistente** (F6, fix review v6.1).
+//! **Persistent** detection policy (F6, fix review v6.1).
 //!
-//! Cierra la deuda declarada por el builder de la unidad `config-api`: el
-//! overlay de política (categorías, reglas propias, allowlist) vivía sólo en
-//! la memoria del proceso, no se serializaba al YAML y no llegaba al motor de
-//! detección. Aquí vive el modelo que:
+//! Closes the debt declared by the `config-api` unit builder: the policy
+//! overlay (categories, custom rules, allowlist) lived only in the
+//! process memory, was not serialized to YAML and never reached the
+//! detection engine. Here lives the model that:
 //!
-//! 1. **persiste** en [`crate::config::ProxyConfig`] → sobrevive al reinicio;
-//! 2. **compone** el engine efectivo a partir de las reglas base (default +
-//!    rule packs) y la política del operador, sin perder reglas de packs ni
-//!    duplicar reglas custom;
-//! 3. se **publica en caliente** ([`EngineControl`]) → el dataplane cambia de
-//!    reglas sin reiniciar el proxy.
+//! 1. **persists** in [`crate::config::ProxyConfig`] → survives restart;
+//! 2. **composes** the effective engine from the base rules (default +
+//!    rule packs) and the operator's policy, without losing pack rules or
+//!    duplicating custom rules;
+//! 3. is **published hot** ([`EngineControl`]) → the dataplane changes
+//!    rules without restarting the proxy.
 //!
-//! ## Precedencia de acciones (una sola regla, sin asimetrías)
+//! ## Action precedence (a single rule, no asymmetries)
 //!
 //! ```text
-//! rule_actions[flag]  >  categories[category]  >  action declarada en la regla
+//! rule_actions[flag]  >  categories[category]  >  action declared in the rule
 //! ```
 //!
-//! Es decir: la tabla de categorías es el mando grueso y aplica **también** a
-//! las reglas custom del operador (si `secrets: redact` está activo, una regla
-//! custom de categoría `secrets` redacta aunque declare `block`). Para
-//! exceptuar una regla concreta existe el override por flag, que gana siempre.
+//! That is: the category table is the coarse control and applies **also**
+//! to the operator's custom rules (if `secrets: redact` is active, a custom
+//! rule of category `secrets` redacts even if it declares `block`). To
+//! except a specific rule there is the per-flag override, which always wins.
 //!
-//! ## Reglas custom vs reglas de packs
+//! ## Custom rules vs pack rules
 //!
-//! Una regla custom cuyo `flag` coincide con una regla base **la sustituye**
-//! (no se duplica el flag en el engine). El resto de reglas base sobrevive
-//! intacto: instalar un pack no borra las reglas custom y editar la política
-//! no borra las reglas del pack ([`EngineControl::rebase`]).
+//! A custom rule whose `flag` matches a base rule **replaces it**
+//! (the flag is not duplicated in the engine). The rest of the base rules
+//! survive intact: installing a pack does not delete custom rules and
+//! editing the policy does not delete pack rules
+//! ([`EngineControl::rebase`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -37,27 +38,28 @@ use cerberus_engine::engine::{CompiledEngine, EngineBuilder};
 use cerberus_engine::rule::{Action, Category, Rule};
 use serde::{Deserialize, Serialize};
 
-/// Acciones válidas para una categoría o una regla (§A.1 del build plan).
+/// Valid actions for a category or a rule (§A.1 of the build plan).
 pub const POLICY_ACTIONS: [&str; 4] = ["allow", "warn", "redact", "block"];
 
-/// Categorías válidas del MVP (§A.1): las del enum [`Category`], nada más.
+/// Valid MVP categories (§A.1): those of the [`Category`] enum, nothing else.
 pub const POLICY_CATEGORIES: [&str; 3] = ["secrets", "pii", "internal_code"];
 
-/// Máximo de reglas custom persistidas. Cota defensiva: la política viaja por
-/// el control plane (body ≤ 1 MiB) y se compila en el hot-path del engine.
+/// Maximum number of persisted custom rules. Defensive bound: the policy
+/// travels over the control plane (body ≤ 1 MiB) and is compiled in the
+/// engine hot path.
 pub const MAX_CUSTOM_RULES: usize = 256;
 
-/// Máximo de entradas de allowlist persistidas (triage de falsos positivos).
+/// Maximum number of persisted allowlist entries (false-positive triage).
 pub const MAX_ALLOWLIST_ENTRIES: usize = 1024;
 
-/// Longitud máxima de una entrada de allowlist.
+/// Maximum length of an allowlist entry.
 pub const MAX_ALLOWLIST_ENTRY_LEN: usize = 512;
 
-/// Parsear una acción del wire (`"block"`, …) al enum del motor.
+/// Parse an action from the wire (`"block"`, …) into the engine enum.
 ///
 /// # Errors
 ///
-/// Mensaje accionable (con las acciones válidas) si `raw` no es una de ellas.
+/// Actionable message (with the valid actions) if `raw` is not one of them.
 pub fn parse_action(raw: &str) -> Result<Action, String> {
     match raw {
         "allow" => Ok(Action::Allow),
@@ -71,11 +73,11 @@ pub fn parse_action(raw: &str) -> Result<Action, String> {
     }
 }
 
-/// Parsear una categoría del wire (`"secrets"`, …) al enum del motor.
+/// Parse a category from the wire (`"secrets"`, …) into the engine enum.
 ///
 /// # Errors
 ///
-/// Mensaje accionable (con las categorías válidas) si `raw` no es una de ellas.
+/// Actionable message (with the valid categories) if `raw` is not one of them.
 pub fn parse_category(raw: &str) -> Result<Category, String> {
     match raw {
         "secrets" => Ok(Category::Secrets),
@@ -88,26 +90,26 @@ pub fn parse_category(raw: &str) -> Result<Category, String> {
     }
 }
 
-/// Política de detección del operador, **persistida en el YAML** de
-/// [`crate::config::ProxyConfig`] bajo la clave `policy`.
+/// Operator detection policy, **persisted in the YAML** of
+/// [`crate::config::ProxyConfig`] under the `policy` key.
 ///
-/// Los nombres del wire se mantienen estables respecto a la API v6.1: la
-/// tabla de overrides por regla se serializa como `rules` (lo que consume el
-/// dashboard), y las reglas custom reales como `custom_rules`.
+/// The wire names are kept stable with respect to API v6.1: the per-rule
+/// override table is serialized as `rules` (what the dashboard consumes),
+/// and the real custom rules as `custom_rules`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DetectionPolicy {
-    /// Acción por categoría de alto nivel. Mando grueso.
+    /// Action per high-level category. Coarse control.
     pub categories: BTreeMap<Category, Action>,
-    /// Override de acción por `flag` concreto. Gana sobre la categoría.
+    /// Action override per specific `flag`. Wins over the category.
     #[serde(rename = "rules")]
     pub rule_actions: BTreeMap<String, Action>,
-    /// Reglas propias del operador, con la forma [`Rule`] del MVP (`flag`,
-    /// `category`, `severity`, `action`, `patterns`, `validators` y las
-    /// constraints `minLength`/`maxLength`/`contextKeywords`/
-    /// `allowedExamples`).
+    /// Operator's own rules, with the MVP [`Rule`] shape (`flag`,
+    /// `category`, `severity`, `action`, `patterns`, `validators` and the
+    /// `minLength`/`maxLength`/`contextKeywords`/`allowedExamples`
+    /// constraints).
     pub custom_rules: Vec<Rule>,
-    /// Valores exactos que NO deben generar hallazgo (triage de FP).
+    /// Exact values that must NOT produce a finding (FP triage).
     pub allowlist: Vec<String>,
 }
 
@@ -118,13 +120,13 @@ impl Default for DetectionPolicy {
 }
 
 impl DetectionPolicy {
-    /// Política inicial sin overrides del operador.
+    /// Initial policy without operator overrides.
     ///
-    /// Las acciones por defecto viven en cada regla y se honran tal como exige
-    /// el §4.3 del build plan. `categories` y `rule_actions` sólo contienen
-    /// decisiones que el operador configuró explícitamente (API/YAML); esto
-    /// evita que un preset implícito rebaje, por ejemplo, una regla `block` a
-    /// `redact` durante el arranque cero-config.
+    /// The default actions live in each rule and are honored as the §4.3 of
+    /// the build plan requires. `categories` and `rule_actions` only contain
+    /// decisions the operator configured explicitly (API/YAML); this prevents
+    /// an implicit preset from downgrading, for example, a `block` rule to
+    /// `redact` during zero-config startup.
     #[must_use]
     pub const fn seeded() -> Self {
         Self {
@@ -135,8 +137,8 @@ impl DetectionPolicy {
         }
     }
 
-    /// Política vacía (ninguna categoría, ninguna regla): útil en tests y
-    /// cuando el operador borra explícitamente el overlay.
+    /// Empty policy (no category, no rules): useful in tests and when the
+    /// operator explicitly clears the overlay.
     #[must_use]
     pub const fn empty() -> Self {
         Self {
@@ -147,15 +149,15 @@ impl DetectionPolicy {
         }
     }
 
-    /// Validar la política ANTES de persistirla o publicarla.
+    /// Validate the policy BEFORE persisting or publishing it.
     ///
-    /// Comprueba lo que un YAML editado a mano o un patch del control plane
-    /// pueden romper: flags vacíos o duplicados, reglas sin patrón, patrones
-    /// que no compilan, constraints incoherentes y cotas de tamaño.
+    /// Checks what a hand-edited YAML or a control-plane patch can break:
+    /// empty or duplicated flags, rules without a pattern, patterns that
+    /// do not compile, incoherent constraints and size bounds.
     ///
     /// # Errors
     ///
-    /// Un mensaje accionable por el primer problema encontrado.
+    /// An actionable message for the first problem found.
     pub fn validate(&self) -> Result<(), String> {
         if self.custom_rules.len() > MAX_CUSTOM_RULES {
             return Err(format!(
@@ -206,31 +208,31 @@ impl DetectionPolicy {
                 ));
             }
         }
-        // Los patrones se validan compilándolos: es el MISMO compilador que
-        // usa el engine, así que un regex que aquí pasa no puede tumbar el
-        // rebuild del dataplane después.
+        // Patterns are validated by compiling them: it is the SAME compiler
+        // the engine uses, so a regex that passes here cannot break the
+        // dataplane rebuild later.
         EngineBuilder::new(&self.custom_rules)
             .build()
             .map(|_| ())
             .map_err(|e| format!("custom rules do not compile: {e}"))
     }
 
-    /// ¿Está el valor exacto `value` en la allowlist?
+    /// Is the exact `value` in the allowlist?
     #[must_use]
     pub fn allows(&self, value: &str) -> bool {
         self.allowlist.iter().any(|a| a == value)
     }
 }
 
-/// Reglas efectivas del engine: reglas base (default + packs) fusionadas con
-/// las reglas custom y con la precedencia de acciones aplicada.
+/// Effective engine rules: base rules (default + packs) merged with the
+/// custom rules and with action precedence applied.
 ///
-/// - Una regla custom **sustituye** a la regla base con el mismo `flag`
-///   (nunca se duplica un flag).
-/// - El resto de reglas base sobrevive: instalar un pack no borra lo custom y
-///   editar la política no borra el pack.
-/// - Precedencia: `rule_actions[flag]` > `categories[category]` > la acción
-///   declarada en la propia regla.
+/// - A custom rule **replaces** the base rule with the same `flag`
+///   (a flag is never duplicated).
+/// - The rest of the base rules survive: installing a pack does not delete
+///   custom rules and editing the policy does not delete the pack.
+/// - Precedence: `rule_actions[flag]` > `categories[category]` > the action
+///   declared in the rule itself.
 #[must_use]
 pub fn effective_rules(base: &[Rule], policy: &DetectionPolicy) -> Vec<Rule> {
     let custom_flags: BTreeSet<&str> = policy.custom_rules.iter().map(|r| r.flag.as_str()).collect();
@@ -250,11 +252,11 @@ pub fn effective_rules(base: &[Rule], policy: &DetectionPolicy) -> Vec<Rule> {
     out
 }
 
-/// Compilar el engine efectivo (reglas base + política) sin publicarlo.
+/// Compile the effective engine (base rules + policy) without publishing it.
 ///
 /// # Errors
 ///
-/// El error del compilador de reglas (p.ej. un patrón que no compila).
+/// The error from the rule compiler (e.g. a pattern that does not compile).
 pub fn build_engine(
     base: &[Rule],
     policy: &DetectionPolicy,
@@ -268,17 +270,17 @@ pub fn build_engine(
     builder.build()
 }
 
-/// Mando del engine vivo del dataplane.
+/// Control handle for the dataplane's live engine.
 ///
-/// Guarda (a) el `Arc<RwLock<Arc<CompiledEngine>>>` que lee el hot-path, (b)
-/// las reglas **base** del último snapshot de packs y (c) el secreto de
-/// payload-hash. Con eso puede recomponer el engine efectivo desde dos
-/// direcciones sin perder nada:
+/// Holds (a) the `Arc<RwLock<Arc<CompiledEngine>>>` the hot path reads, (b)
+/// the **base** rules of the last pack snapshot and (c) the payload-hash
+/// secret. With that it can rebuild the effective engine from two
+/// directions without losing anything:
 ///
-/// - el control plane cambia la política → [`EngineControl::compile`] +
-///   [`EngineControl::publish`] (las reglas de packs siguen ahí);
-/// - el worker de packs instala/revierte un pack → [`EngineControl::rebase`]
-///   (las reglas custom y los overrides se re-aplican encima).
+/// - the control plane changes the policy → [`EngineControl::compile`] +
+///   [`EngineControl::publish`] (the pack rules stay there);
+/// - the pack worker installs/reverts a pack → [`EngineControl::rebase`]
+///   (custom rules and overrides are re-applied on top).
 #[derive(Clone)]
 pub struct EngineControl {
     live: Arc<RwLock<Arc<CompiledEngine>>>,
@@ -288,7 +290,7 @@ pub struct EngineControl {
 
 impl std::fmt::Debug for EngineControl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // El secreto de payload-hash NUNCA se imprime.
+        // The payload-hash secret is NEVER printed.
         f.debug_struct("EngineControl")
             .field("live", &self.live_rules())
             .field("base_rules", &self.base_rules().len())
@@ -298,7 +300,7 @@ impl std::fmt::Debug for EngineControl {
 }
 
 impl EngineControl {
-    /// Crear el mando sobre un engine vivo ya publicado.
+    /// Create the control handle over an already-published live engine.
     #[must_use]
     pub fn new(live: Arc<RwLock<Arc<CompiledEngine>>>, base_rules: Vec<Rule>, payload_secret: Option<Vec<u8>>) -> Self {
         Self {
@@ -308,7 +310,7 @@ impl EngineControl {
         }
     }
 
-    /// Snapshot de las reglas base vigentes (default + packs, sin custom).
+    /// Snapshot of the current base rules (default + packs, without custom).
     #[must_use]
     pub fn base_rules(&self) -> Arc<Vec<Rule>> {
         self.base_rules
@@ -317,7 +319,7 @@ impl EngineControl {
             .clone()
     }
 
-    /// Número de reglas del engine vivo.
+    /// Number of rules in the live engine.
     #[must_use]
     pub fn live_rules(&self) -> usize {
         self.live
@@ -326,19 +328,19 @@ impl EngineControl {
             .num_rules()
     }
 
-    /// Compilar el engine efectivo para `policy` **sin publicarlo**: así el
-    /// control plane puede rechazar (400) una política que no compila antes de
-    /// tocar el YAML o la memoria viva.
+    /// Compile the effective engine for `policy` **without publishing it**: so
+    /// the control plane can reject (400) a policy that does not compile
+    /// before touching the YAML or the live memory.
     ///
     /// # Errors
     ///
-    /// El error del compilador de reglas.
+    /// The error from the rule compiler.
     pub fn compile(&self, policy: &DetectionPolicy) -> Result<CompiledEngine, String> {
         build_engine(&self.base_rules(), policy, self.payload_secret.as_deref())
     }
 
-    /// Publicar un engine ya compilado en el dataplane (hot-swap). Devuelve el
-    /// número de reglas activas.
+    /// Publish an already-compiled engine into the dataplane (hot-swap).
+    /// Returns the number of active rules.
     #[must_use]
     pub fn publish(&self, engine: CompiledEngine) -> usize {
         let arc = Arc::new(engine);
@@ -347,14 +349,13 @@ impl EngineControl {
         rules
     }
 
-    /// Sustituir las reglas base (nuevo snapshot de packs) y republicar
-    /// aplicando `policy` encima. No pierde reglas de packs ni duplica reglas
-    /// custom.
+    /// Replace the base rules (new pack snapshot) and re-publish applying
+    /// `policy` on top. Does not lose pack rules or duplicate custom rules.
     ///
     /// # Errors
     ///
-    /// El error del compilador de reglas; en ese caso NO se cambia ni la base
-    /// ni el engine vivo.
+    /// The error from the rule compiler; in that case NEITHER the base nor
+    /// the live engine is changed.
     pub fn rebase(&self, base: Vec<Rule>, policy: &DetectionPolicy) -> Result<usize, String> {
         let engine = build_engine(&base, policy, self.payload_secret.as_deref())?;
         *self
@@ -365,14 +366,14 @@ impl EngineControl {
     }
 }
 
-/// Helpers compartidos por los tests de otros módulos del crate (p.ej. los de
-/// `api.rs`, que necesitan un engine base creíble para probar el hot-swap).
+/// Helpers shared by the tests of other modules in the crate (e.g. those of
+/// `api.rs`, which need a credible base engine to test the hot-swap).
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::{Action, Category, Rule};
     use cerberus_engine::rule::Severity;
 
-    /// Regla base ficticia (hace de "regla que trajo un pack").
+    /// Fictional base rule (acts as the "rule a pack brought").
     pub(crate) fn base_rule(flag: &str) -> Rule {
         Rule {
             flag: flag.to_string(),
@@ -414,8 +415,8 @@ mod tests {
     #[test]
     fn default_openai_rule_keeps_its_declared_block_action() {
         let p = DetectionPolicy::seeded();
-        assert!(p.categories.is_empty(), "sin overrides implícitos por categoría");
-        assert!(p.rule_actions.is_empty(), "sin overrides implícitos por flag");
+        assert!(p.categories.is_empty(), "no implicit category overrides");
+        assert!(p.rule_actions.is_empty(), "no implicit flag overrides");
         assert!(p.custom_rules.is_empty());
         assert!(p.allowlist.is_empty());
 
@@ -429,7 +430,7 @@ mod tests {
         assert_eq!(
             effective[0].action,
             Action::Block,
-            "cero-config debe honrar el block declarado por la regla OpenAI"
+            "zero-config must honor the block declared by the OpenAI rule"
         );
     }
 
@@ -448,7 +449,7 @@ mod tests {
         assert_eq!(
             effective[0].action,
             Action::Redact,
-            "una categoría configurada explícitamente sí manda sobre la regla"
+            "an explicitly configured category does win over the rule"
         );
     }
 
@@ -466,7 +467,7 @@ mod tests {
         p.allowlist.push("sk-EXAMPLE".to_string());
 
         let yaml = serde_yaml::to_string(&p).expect("serialize");
-        // El wire del dashboard usa `rules` para los overrides por flag.
+        // The dashboard wire uses `rules` for per-flag overrides.
         assert!(yaml.contains("rules:"), "{yaml}");
         assert!(yaml.contains("custom_rules:"), "{yaml}");
         assert!(yaml.contains("internal_code"), "{yaml}");
@@ -477,12 +478,12 @@ mod tests {
 
     #[test]
     fn missing_policy_keys_fall_back_to_the_seeded_defaults() {
-        // `policy: {}` y `policy` ausente deben dar lo MISMO (struct-level default).
+        // `policy: {}` and an absent `policy` must give the SAME result (struct-level default).
         let from_empty_map: DetectionPolicy = serde_yaml::from_str("{}").expect("parse");
         assert_eq!(from_empty_map, DetectionPolicy::seeded());
 
-        // Backward compatibility: un YAML v6.1 que ya persistió categorías
-        // mantiene esas decisiones como overrides explícitos.
+        // Backward compatibility: a v6.1 YAML that already persisted
+        // categories keeps those decisions as explicit overrides.
         let legacy: DetectionPolicy =
             serde_yaml::from_str("categories:\n  secrets: redact\n  pii: warn\n").expect("parse");
         assert_eq!(legacy.categories.get(&Category::Secrets), Some(&Action::Redact));
@@ -499,7 +500,7 @@ mod tests {
         assert_eq!(
             effective[0].action,
             Action::Redact,
-            "las categorías de YAML v6.1 siguen siendo overrides explícitos"
+            "v6.1 YAML categories are still explicit overrides"
         );
     }
 
@@ -521,10 +522,10 @@ mod tests {
             .push(rule("secret.a", Category::Secrets, Action::Block, "AAA-v2"));
 
         let eff = effective_rules(&base, &policy);
-        assert_eq!(eff.len(), 2, "no se duplica el flag: {eff:?}");
-        let a = eff.iter().find(|r| r.flag == "secret.a").expect("custom gana");
+        assert_eq!(eff.len(), 2, "the flag is not duplicated: {eff:?}");
+        let a = eff.iter().find(|r| r.flag == "secret.a").expect("custom wins");
         assert_eq!(a.patterns, vec!["AAA-v2".to_string()]);
-        assert!(eff.iter().any(|r| r.flag == "secret.b"), "la regla base sobrevive");
+        assert!(eff.iter().any(|r| r.flag == "secret.b"), "the base rule survives");
     }
 
     #[test]
@@ -539,13 +540,13 @@ mod tests {
         policy.rule_actions.insert("pii.b".to_string(), Action::Block);
 
         let eff = effective_rules(&base, &policy);
-        let by = |flag: &str| eff.iter().find(|r| r.flag == flag).expect("regla").action;
-        assert_eq!(by("secret.a"), Action::Redact, "gana la categoría");
-        assert_eq!(by("pii.b"), Action::Block, "gana el override por flag");
+        let by = |flag: &str| eff.iter().find(|r| r.flag == flag).expect("rule").action;
+        assert_eq!(by("secret.a"), Action::Redact, "the category wins");
+        assert_eq!(by("pii.b"), Action::Block, "the per-flag override wins");
         assert_eq!(
             by("code.c"),
             Action::Block,
-            "sin categoría ni override: la acción declarada"
+            "no category or override: the declared action"
         );
     }
 
@@ -557,9 +558,9 @@ mod tests {
             .custom_rules
             .push(rule("custom.s", Category::Secrets, Action::Block, "SSS"));
         let eff = effective_rules(&[], &policy);
-        assert_eq!(eff[0].action, Action::Redact, "el mando grueso aplica a lo custom");
+        assert_eq!(eff[0].action, Action::Redact, "the coarse control applies to custom rules too");
 
-        // …y el override por flag es la vía para exceptuarla.
+        // …and the per-flag override is the way to except it.
         policy.rule_actions.insert("custom.s".to_string(), Action::Block);
         let eff = effective_rules(&[], &policy);
         assert_eq!(eff[0].action, Action::Block);
@@ -637,7 +638,7 @@ mod tests {
         let control = EngineControl::new(live.clone(), base_v1, None);
         assert_eq!(control.live_rules(), 2);
 
-        // Un pack nuevo trae 2 reglas: las custom no se pierden ni se duplican.
+        // A new pack brings 2 rules: the custom ones are not lost or duplicated.
         let base_v2 = vec![
             rule("pack.a", Category::Secrets, Action::Warn, "AAA"),
             rule("pack.b", Category::Pii, Action::Warn, "BBB"),
@@ -649,7 +650,7 @@ mod tests {
         assert_eq!(
             flags.iter().filter(|f| *f == "custom.x").count(),
             1,
-            "la regla custom no se duplica: {flags:?}"
+            "the custom rule is not duplicated: {flags:?}"
         );
     }
 
@@ -666,7 +667,7 @@ mod tests {
             .push(rule("custom.x", Category::Secrets, Action::Block, "XXX"));
         let compiled = control.compile(&policy).expect("compile");
         assert_eq!(compiled.num_rules(), 2);
-        assert_eq!(control.live_rules(), 1, "compile no publica");
+        assert_eq!(control.live_rules(), 1, "compile does not publish");
         assert_eq!(control.publish(compiled), 2);
         assert_eq!(control.live_rules(), 2);
     }
@@ -683,8 +684,8 @@ mod tests {
             .custom_rules
             .push(rule("custom.bad", Category::Secrets, Action::Block, "([unclosed"));
         assert!(control.rebase(vec![], &broken).is_err());
-        assert_eq!(control.live_rules(), 1, "el engine vivo no cambió");
-        assert_eq!(control.base_rules().len(), 1, "la base tampoco");
+        assert_eq!(control.live_rules(), 1, "the live engine did not change");
+        assert_eq!(control.base_rules().len(), 1, "the base did not either");
     }
 
     #[test]

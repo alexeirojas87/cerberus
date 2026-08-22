@@ -1,36 +1,36 @@
-# Evidence Pack — Fase 2 / redaction-inplace
-- Intento: 1    Revisor: Builder    Veredicto: PASS (mantenido en F2.1)
+# Evidence Pack — Phase 2 / redaction-inplace
+- Attempt: 1    Reviewer: Builder    Verdict: PASS (maintained in F2.1)
 
-## Criterios de aceptación
-| Criterio | Comando ejecutado | Salida | Resultado |
+## Acceptance criteria
+| Criterion | Command executed | Output | Result |
 |----------|-------------------|--------|-----------|
 | `cargo build --workspace` | `cargo build --workspace` | 0 errors | ✅ |
 | `cargo test -p cerberus-engine` | `cargo test -p cerberus-engine` | 152 passed; 0 failed | ✅ |
 | `cargo clippy --all-targets -- -D warnings` | `cargo clippy --all-targets -- -D warnings` | No issues found | ✅ |
 | `cargo fmt --check` | `cargo fmt --check` | No diffs | ✅ |
-| Redact reemplaza span con token | `test::single_redact_replaces_span` | Pass | ✅ |
-| Block devuelve error | `test::block_returns_error` | Pass | ✅ |
-| Warn/Allow no modifican texto | `test::warn_does_not_modify_text`, `test::allow_does_not_modify_text` | Pass | ✅ |
-| JSON sigue siendo válido después de redactar | `test::json_remains_valid_after_redaction` | Pass | ✅ |
-| Spans solapados manejados correctamente | `test::redact_wins_over_warn_for_overlapping_spans`, `test::warn_over_redact_overlap_redact_wins`, `test::two_redacts_overlap_first_wins`, `test::multiple_severity_overlap_complex` | All Pass | ✅ |
+| Redact replaces span with token | `test::single_redact_replaces_span` | Pass | ✅ |
+| Block returns error | `test::block_returns_error` | Pass | ✅ |
+| Warn/Allow do not modify text | `test::warn_does_not_modify_text`, `test::allow_does_not_modify_text` | Pass | ✅ |
+| JSON still valid after redaction | `test::json_remains_valid_after_redaction` | Pass | ✅ |
+| Overlapping spans handled correctly | `test::redact_wins_over_warn_for_overlapping_spans`, `test::warn_over_redact_overlap_redact_wins`, `test::two_redacts_overlap_first_wins`, `test::multiple_severity_overlap_complex` | All Pass | ✅ |
 
-## Casos adversariales probados
-- Findings en orden incorrecto → se ordenan correctamente
-- Texto vacío → string vacío
-- Redact al inicio y final del texto
-- Dos Redact solapados → primero gana
-- Preserve length: token más corto → rellena con `*`
-- Preserve length: token más largo → trunca
-- Block con otros findings → error antes de procesar otros
-- Multiple severity overlap complejo (Warn+Redact+Allow)
-- JSON anidado con string secreto → JSON parseable después de redactar
+## Adversarial cases tested
+- Findings in wrong order → correctly sorted
+- Empty text → empty string
+- Redact at start and end of text
+- Two overlapping Redact → first wins
+- Preserve length: shorter token → padded with `*`
+- Preserve length: longer token → truncated
+- Block with other findings → error before processing others
+- Complex multiple severity overlap (Warn+Redact+Allow)
+- Nested JSON with secret string → JSON parseable after redaction
 
-## NFR aplicables
-- N/A (no aplica latencia/seguridad para esta unidad)
+## Applicable NFRs
+- N/A (no latency/security applies to this unit)
 
-## Archivos
-- `crates/cerberus-engine/src/redact.rs` (nuevo)
-- `crates/cerberus-engine/src/lib.rs` (modificado: +pub mod redact)
+## Files
+- `crates/cerberus-engine/src/redact.rs` (new)
+- `crates/cerberus-engine/src/lib.rs` (modified: +pub mod redact)
 
 ## SHAs
 ```
@@ -38,5 +38,5 @@
 e96001251768aed9b159b36cfe064b215e695154d6ad3d0aa587ce3927ac2a65  crates/cerberus-engine/src/lib.rs
 ```
 
-## Desviaciones del plan
-Ninguna. La implementación sigue exactamente el diseño especificado en la tarea.
+## Deviations from plan
+None. The implementation follows exactly the design specified in the task.

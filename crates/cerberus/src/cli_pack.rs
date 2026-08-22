@@ -1,16 +1,16 @@
-//! `cerberus pack` — cliente HTTP del control plane (revisor v6).
+//! `cerberus pack` — HTTP client of the control plane (reviewer v6).
 //!
-//! Cuando el daemon está en marcha, el CLI es un CLIENTE del control plane del
-//! daemon: NO abre otro `PackManager` ni toca disco. Las rutas `/api/packs/*`
-//! las sirve el worker del daemon, que es el ÚNICO escritor del manifest en
-//! runtime (la conmutación del engine vivo la hace el propio worker). Sin
-//! daemon (modo local, un solo proceso) el CLI delega en `daemon::pack_*`.
+//! When the daemon is running, the CLI is a CLIENT of the daemon's control
+//! plane: it does NOT open another `PackManager` nor touch disk. The
+//! `/api/packs/*` routes are served by the daemon's worker, which is the ONLY
+//! writer of the manifest at runtime (the live engine swap is done by the
+//! worker itself). Without a daemon (local mode, a single process) the CLI
+//! delegates to `daemon::pack_*`.
 //!
-//! v6.1 — `install` envía los **bytes del pack firmado**, no un path. El path
-//! lo resuelve el CLIENTE contra SU cwd (canonicalizado localmente); el
-//! control plane nunca interpreta rutas ajenas ni depende de compartir
-//! filesystem con el CLI. El contrato de cable vive en
-//! [`cerberus_packs::wire`].
+//! v6.1 — `install` sends the **signed pack bytes**, not a path. The path is
+//! resolved by the CLIENT against ITS cwd (canonicalized locally); the control
+//! plane never interprets foreign paths nor depends on sharing a filesystem
+//! with the CLI. The wire contract lives in [`cerberus_packs::wire`].
 
 use std::process::Command as StdCommand;
 
@@ -26,7 +26,7 @@ use cerberus_proxy::config::ProxyConfig;
 const ADMIN_TOKEN_HEADER: &str = "x-cerberus-admin-token";
 const DEFAULT_PORT: u16 = 8787;
 
-/// ¿El daemon está corriendo? (pid file presente + proceso vivo).
+/// Is the daemon running? (pid file present + live process).
 #[must_use]
 pub(crate) fn daemon_is_running() -> bool {
     let pid_path = pid_path();
@@ -42,7 +42,7 @@ pub(crate) fn daemon_is_running() -> bool {
     process_alive(pid)
 }
 
-/// ¿El proceso con `pid` sigue vivo? (`kill -0` en unix).
+/// Is the process with `pid` still alive? (`kill -0` on unix).
 fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -65,67 +65,67 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// Valor de env no vacío como `Option<String>`.
+/// Non-empty env value as `Option<String>`.
 fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.is_empty())
 }
 
-/// De dónde salió el endpoint efectivo (para diagnósticos y tests).
+/// Where the effective endpoint came from (for diagnostics and tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EndpointSource {
-    /// Override explícito por entorno (`CERBERUS_LISTEN`).
+    /// Explicit override via environment (`CERBERUS_LISTEN`).
     Env,
-    /// Descriptor publicado por el daemon (`~/.cerberus/endpoint.json`).
+    /// Descriptor published by the daemon (`~/.cerberus/endpoint.json`).
     Descriptor,
-    /// `listen` de `~/.cerberus/config.yaml`.
+    /// `listen` from `~/.cerberus/config.yaml`.
     Config,
-    /// Default compilado.
+    /// Compiled default.
     Default,
 }
 
-/// Endpoint efectivo del control plane resuelto por el CLI.
+/// Effective control plane endpoint resolved by the CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedEndpoint {
-    /// Puerto al que hablar.
+    /// Port to talk to.
     pub(crate) port: u16,
-    /// Procedencia del puerto.
+    /// Origin of the port.
     pub(crate) source: EndpointSource,
 }
 
 impl ResolvedEndpoint {
-    /// URL base: SIEMPRE loopback. El daemon puede ligar `0.0.0.0` (Docker),
-    /// pero el CLI local nunca sale de `127.0.0.1`.
+    /// Base URL: ALWAYS loopback. The daemon may bind `0.0.0.0` (Docker),
+    /// but the local CLI never leaves `127.0.0.1`.
     fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
 }
 
-/// Ruta del descriptor de endpoint publicado por el daemon.
+/// Path of the endpoint descriptor published by the daemon.
 pub(crate) fn endpoint_descriptor_path() -> std::path::PathBuf {
     config_dir().join(ENDPOINT_FILE)
 }
 
-/// Descriptor de endpoint publicado por el daemon, si es legible y válido.
+/// Endpoint descriptor published by the daemon, if readable and valid.
 ///
-/// Fail-safe: un descriptor ausente, corrupto o con puerto 0 no aborta nada —
-/// se ignora y la resolución sigue con la config.
+/// Fail-safe: a missing, corrupt, or port-0 descriptor does not abort
+/// anything — it is ignored and resolution continues with the config.
 fn endpoint_descriptor() -> Option<ControlPlaneEndpoint> {
     let path = endpoint_descriptor_path();
     let raw = std::fs::read_to_string(&path).ok()?;
     match ControlPlaneEndpoint::from_json(&raw) {
         Ok(ep) => Some(ep),
         Err(e) => {
-            eprintln!("aviso: {} inválido ({e}); usando la configuración", path.display());
+            eprintln!("warning: {} invalid ({e}); using the config", path.display());
             None
         }
     }
 }
 
-/// Descubrir el endpoint efectivo del control plane. Precedencia:
-///   1. env `CERBERUS_LISTEN` (formato `host:port`) — override explícito;
-///   2. `~/.cerberus/endpoint.json` publicado por el daemon (puerto REAL,
-///      incluyendo puertos efímeros o un `listen` cambiado en caliente);
-///   3. `listen` de `~/.cerberus/config.yaml`;
+/// Discover the effective control plane endpoint. Precedence:
+///   1. env `CERBERUS_LISTEN` (format `host:port`) — explicit override;
+///   2. `~/.cerberus/endpoint.json` published by the daemon (the REAL port,
+///      including ephemeral ports or a `listen` changed at runtime);
+///   3. `listen` from `~/.cerberus/config.yaml`;
 ///   4. default `8787`.
 pub(crate) fn resolve_endpoint() -> ResolvedEndpoint {
     if let Some(listen) = env_nonempty("CERBERUS_LISTEN") {
@@ -152,13 +152,13 @@ pub(crate) fn resolve_endpoint() -> ResolvedEndpoint {
     }
 }
 
-/// El puerto de un `listen` (`host:port`), o el default si no parsea.
+/// The port of a `listen` (`host:port`), or the default if it doesn't parse.
 #[must_use]
 fn port_from_listen(listen: &str) -> u16 {
     cerberus_packs::wire::port_from_listen(listen).unwrap_or(DEFAULT_PORT)
 }
 
-/// `listen` de la config.yaml, si existe y parsea.
+/// `listen` from config.yaml, if it exists and parses.
 fn config_listen() -> Option<String> {
     let cfg = config_dir().join("config.yaml");
     if !cfg.exists() {
@@ -167,8 +167,8 @@ fn config_listen() -> Option<String> {
     ProxyConfig::from_file(cfg).ok().map(|c| c.listen)
 }
 
-/// Token de admin del control plane: env `CERBERUS_ADMIN_TOKEN` > `admin_token`
-/// de la configuración YAML.
+/// Control plane admin token: env `CERBERUS_ADMIN_TOKEN` > `admin_token`
+/// from the YAML configuration.
 #[must_use]
 fn admin_token() -> Option<String> {
     if let Some(t) = env_nonempty("CERBERUS_ADMIN_TOKEN") {
@@ -185,21 +185,21 @@ fn config_admin_token() -> Option<String> {
     ProxyConfig::from_file(cfg).ok().and_then(|c| c.admin_token)
 }
 
-/// Base URL del control plane (siempre contra loopback; el puerto denota al
-/// daemon). El daemon puede ligar en `0.0.0.0` (Docker) pero el CLI local
-/// siempre habla con `127.0.0.1`.
+/// Control plane base URL (always against loopback; the port identifies the
+/// daemon). The daemon may bind `0.0.0.0` (Docker) but the local CLI always
+/// talks to `127.0.0.1`.
 #[must_use]
 fn base_url() -> String {
     resolve_endpoint().base_url()
 }
 
-/// Enviar un comando de pack al control plane del daemon y devolver su mensaje.
-/// `body` véase solo en los POST con payload (install); list/rollback van sin
-/// body. Cualquier status no-2xx o `{"error":...}` se propaga como `Err`.
+/// Send a pack command to the daemon's control plane and return its message.
+/// `body` is only used in POSTs with a payload (install); list/rollback go
+/// without a body. Any non-2xx status or `{"error":...}` is propagated as `Err`.
 async fn call(method: &str, path: &str, body: Option<String>) -> Result<String, String> {
     let token = admin_token().ok_or_else(|| {
-        "el control plane exige un X-Cerberus-Admin-Token: define CERBERUS_ADMIN_TOKEN \
-         o 'admin_token' en ~/.cerberus/config.yaml"
+        "the control plane requires an X-Cerberus-Admin-Token: set CERBERUS_ADMIN_TOKEN \
+         or 'admin_token' in ~/.cerberus/config.yaml"
             .to_string()
     })?;
     let url = format!("{}{path}", base_url());
@@ -253,57 +253,57 @@ async fn call(method: &str, path: &str, body: Option<String>) -> Result<String, 
     }
 }
 
-/// Extraer el campo `error` de un JSON de error del control plane.
+/// Extract the `error` field from a control plane error JSON.
 #[must_use]
 fn json_error(json: &serde_json::Value, fallback: &str) -> String {
     json.get("error")
         .map_or_else(|| fallback.to_string(), |err| format!("{err}"))
 }
 
-/// `cerberus pack install <file>` vía control plane, **por bytes**.
+/// `cerberus pack install <file>` via control plane, **by bytes**.
 ///
-/// El CLI resuelve el path contra SU cwd (canonicalizándolo), lee el pack
-/// firmado y lo envía dentro del body ([`PackInstallRequest`]). El daemon
-/// verifica firma, gate de licencia Pro y hace el swap del engine en caliente;
-/// nunca abre rutas del cliente ni hereda su cwd. El CLI no abre el
-/// `PackManager` (`P1`).
+/// The CLI resolves the path against ITS cwd (canonicalizing it), reads the
+/// signed pack and sends it inside the body ([`PackInstallRequest`]). The
+/// daemon verifies the signature, the Pro license gate, and swaps the engine
+/// at runtime; it never opens client paths nor inherits its cwd. The CLI does
+/// not open the `PackManager` (`P1`).
 pub(crate) async fn install(pack_file: &str) -> Result<String, String> {
     let request = read_pack_request(pack_file)?;
     let body = request.to_body().map_err(|e| e.to_string())?;
     call("post", PACK_INSTALL_PATH, Some(body)).await
 }
 
-/// Leer y validar localmente el pack a instalar, produciendo la request.
+/// Read and locally validate the pack to install, producing the request.
 ///
-/// Toda la semántica de rutas es LOCAL: se canonicaliza contra el cwd del CLI
-/// (resolviendo relativos y symlinks) y del nombre solo viaja el basename
-/// saneado, como etiqueta informativa.
+/// All path semantics are LOCAL: it is canonicalized against the CLI's cwd
+/// (resolving relatives and symlinks) and only the sanitized basename travels
+/// from the name, as an informational label.
 fn read_pack_request(pack_file: &str) -> Result<PackInstallRequest, String> {
     let raw = std::path::Path::new(pack_file);
     let path =
-        std::fs::canonicalize(raw).map_err(|e| format!("no se puede resolver el pack '{}': {e}", raw.display()))?;
-    let meta = std::fs::metadata(&path).map_err(|e| format!("no se puede leer '{}': {e}", path.display()))?;
+        std::fs::canonicalize(raw).map_err(|e| format!("cannot resolve pack '{}': {e}", raw.display()))?;
+    let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
     if !meta.is_file() {
-        return Err(format!("'{}' no es un archivo de pack", path.display()));
+        return Err(format!("'{}' is not a pack file", path.display()));
     }
     if meta.len() > MAX_PACK_BYTES as u64 {
         return Err(format!(
-            "pack '{}' demasiado grande: {} bytes (máximo {MAX_PACK_BYTES})",
+            "pack '{}' too large: {} bytes (maximum {MAX_PACK_BYTES})",
             path.display(),
             meta.len()
         ));
     }
-    let bytes = std::fs::read(&path).map_err(|e| format!("no se puede leer '{}': {e}", path.display()))?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
     let origin = path.file_name().and_then(|s| s.to_str());
-    PackInstallRequest::from_pack_bytes(&bytes, origin).map_err(|e| format!("pack '{}' inválido: {e}", path.display()))
+    PackInstallRequest::from_pack_bytes(&bytes, origin).map_err(|e| format!("pack '{}' invalid: {e}", path.display()))
 }
 
-/// `cerberus pack list` vía control plane.
+/// `cerberus pack list` via control plane.
 pub(crate) async fn list() -> Result<String, String> {
     call("get", PACK_LIST_PATH, None).await
 }
 
-/// `cerberus pack rollback` vía control plane.
+/// `cerberus pack rollback` via control plane.
 pub(crate) async fn rollback() -> Result<String, String> {
     call("post", PACK_ROLLBACK_PATH, None).await
 }
@@ -312,11 +312,11 @@ pub(crate) async fn rollback() -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// Serializa los tests que mutan `HOME`/`CERBERUS_LISTEN` (proceso global).
+    /// Serializes tests that mutate `HOME`/`CERBERUS_LISTEN` (global process).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// `SignedRulePack` mínimo estructuralmente válido (la firma la verifica el
-    /// daemon contra SU trust root; el CLI solo valida la forma).
+    /// Minimal structurally valid `SignedRulePack` (the signature is verified
+    /// by the daemon against ITS trust root; the CLI only validates the form).
     fn sample_signed_pack() -> String {
         serde_json::json!({
             "pack_json": r#"{"metadata":{"name":"demo","version":"1.0.0","description":"d","author":"a","published":"2026-01-01","min_engine_version":"0.1.0"},"rules":[]}"#,
@@ -337,8 +337,8 @@ mod tests {
         dir
     }
 
-    /// [v6.1] El CLI envía BYTES: la request lleva el pack completo y del path
-    /// solo sobrevive el basename informativo.
+    /// [v6.1] The CLI sends BYTES: the request carries the full pack and only
+    /// the informational basename survives from the path.
     #[test]
     fn install_request_carries_bytes_not_path() {
         let home = temp_home("bytes");
@@ -349,21 +349,21 @@ mod tests {
         std::fs::write(&file, &pack).expect("write pack");
 
         let req = read_pack_request(file.to_str().expect("utf8 path")).expect("request");
-        assert_eq!(req.pack, pack, "viajan los bytes exactos del pack firmado");
+        assert_eq!(req.pack, pack, "the exact signed pack bytes travel");
         assert_eq!(req.origin_name.as_deref(), Some("demo-pack.json"));
         let body = req.to_body().expect("body");
         assert!(
             !body.contains("deep dir"),
-            "el body NO debe contener la ruta del cliente: {body}"
+            "the body must NOT contain the client path: {body}"
         );
-        // El servidor lo acepta con el mismo contrato.
+        // The server accepts it with the same contract.
         let parsed = PackInstallRequest::parse_body(body.as_bytes()).expect("parse server-side");
         assert_eq!(parsed.pack, pack);
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// El path se canonicaliza LOCALMENTE: un relativo con `..` se resuelve en
-    /// el cliente y no viaja semántica de cwd al daemon.
+    /// The path is canonicalized LOCALLY: a relative with `..` is resolved on
+    /// the client and no cwd semantics travel to the daemon.
     #[test]
     fn install_request_canonicalizes_locally() {
         let home = temp_home("canon");
@@ -378,22 +378,22 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// Fallo seguro: archivos ausentes, directorios y packs no-pack se rechazan
-    /// ANTES de tocar la red, con un mensaje accionable.
+    /// Fail-safe: missing files, directories, and non-pack packs are rejected
+    /// BEFORE touching the network, with an actionable message.
     #[test]
     fn install_request_fails_safe() {
         let home = temp_home("failsafe");
         let missing = home.join("nope.json");
-        let err = read_pack_request(missing.to_str().expect("utf8")).expect_err("ausente");
-        assert!(err.contains("no se puede resolver el pack"), "{err}");
+        let err = read_pack_request(missing.to_str().expect("utf8")).expect_err("missing");
+        assert!(err.contains("cannot resolve pack"), "{err}");
 
-        let dir_err = read_pack_request(home.to_str().expect("utf8")).expect_err("directorio");
-        assert!(dir_err.contains("no es un archivo de pack"), "{dir_err}");
+        let dir_err = read_pack_request(home.to_str().expect("utf8")).expect_err("directory");
+        assert!(dir_err.contains("is not a pack file"), "{dir_err}");
 
         let junk = home.join("junk.json");
         std::fs::write(&junk, "{\"not\":\"a pack\"}").expect("write");
-        let junk_err = read_pack_request(junk.to_str().expect("utf8")).expect_err("no es pack");
-        assert!(junk_err.contains("inválido"), "{junk_err}");
+        let junk_err = read_pack_request(junk.to_str().expect("utf8")).expect_err("not a pack");
+        assert!(junk_err.contains("invalid"), "{junk_err}");
 
         let empty = home.join("empty.json");
         std::fs::write(&empty, "").expect("write");
@@ -401,8 +401,8 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// Descubrimiento del endpoint efectivo: env > endpoint.json > config.yaml
-    /// > default, y el descriptor corrupto degrada sin abortar.
+    /// Effective endpoint discovery: env > endpoint.json > config.yaml
+    /// > default, and a corrupt descriptor degrades without aborting.
     #[test]
     fn endpoint_discovery_precedence() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -431,7 +431,7 @@ mod tests {
             }
         );
 
-        // 2. endpoint.json publicado por el daemon (puerto efímero real).
+        // 2. endpoint.json published by the daemon (real ephemeral port).
         let ep = ControlPlaneEndpoint::new("0.0.0.0:54321", 4242).expect("endpoint");
         std::fs::write(endpoint_descriptor_path(), ep.to_json().expect("json")).expect("write ep");
         let resolved = resolve_endpoint();
@@ -442,9 +442,9 @@ mod tests {
                 source: EndpointSource::Descriptor
             }
         );
-        assert_eq!(resolved.base_url(), "http://127.0.0.1:54321", "siempre loopback");
+        assert_eq!(resolved.base_url(), "http://127.0.0.1:54321", "always loopback");
 
-        // Descriptor corrupto ⇒ fail-safe hacia la config, sin panic.
+        // Corrupt descriptor ⇒ fail-safe to the config, no panic.
         std::fs::write(endpoint_descriptor_path(), "{ not json").expect("write junk");
         assert_eq!(
             resolve_endpoint(),
@@ -454,7 +454,7 @@ mod tests {
             }
         );
 
-        // 1. env gana sobre todo.
+        // 1. env wins over everything.
         std::env::set_var("CERBERUS_LISTEN", "127.0.0.1:7777");
         assert_eq!(
             resolve_endpoint(),
@@ -463,7 +463,7 @@ mod tests {
                 source: EndpointSource::Env
             }
         );
-        // Un listen sin puerto válido cae al default (no aborta).
+        // A listen without a valid port falls back to the default (no abort).
         std::env::set_var("CERBERUS_LISTEN", "host:noport");
         assert_eq!(resolve_endpoint().port, DEFAULT_PORT);
 

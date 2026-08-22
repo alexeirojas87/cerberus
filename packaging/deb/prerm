@@ -1,5 +1,5 @@
 #!/bin/sh
-# prerm — sample (Mínimo: detener el daemon antes de remover el binario).
+# prerm — sample (Minimal: stop the daemon before removing the binary).
 set -e
 
 if [ -x /usr/bin/cerberus ]; then

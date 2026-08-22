@@ -1,19 +1,19 @@
-//! Integration test: `cerberus pack` como CLIENTE del control plane (revisor v6).
+//! Integration test: `cerberus pack` as a CLIENT of the control plane (reviewer v6).
 //!
-//! Revisor v6 (P1): cuando el daemon está en marcha, el CLI NO abre otro
-//! `PackManager` ni modifica disco — invoca `/api/packs/*` del control plane.
-//! El daemon (su worker) es el ÚNICO escritor del manifest en runtime.
+//! Reviewer v6 (P1): when the daemon is running, the CLI does NOT open another
+//! `PackManager` nor modify disk — it invokes `/api/packs/*` of the control
+//! plane. The daemon (its worker) is the ONLY writer of the manifest at runtime.
 //!
-//! Estrategia determinista (sin sb daemon real):
-//!   1. se levanta un mini control plane (mock HTTP TCP) en un hilo propio
-//!      que registra la request cruda y responde `{"status":"ok",...}`;
-//!   2. se escribe `~/.cerberus/config.yaml` con `listen` apuntando al mock y
-//!      `~/.cerberus/cerberus.pid` con el PID de este proceso VIVO → el CLI
-//!      deduce que el daemon "está en marcha" y decide ir por HTTP;
-//!   3. se lanza `cerberus pack install <f>` y se comprueba que (a) el CLI
-//!      llama a la API (el mock lo registra) y (b) NO crea manif en disco
-//!      (no toca `.cerberus/packs`).
-//!   4. Sin pid file → fallback al modo local (un solo proceso).
+//! Deterministic strategy (no real daemon):
+//!   1. a mini control plane (mock HTTP TCP) is spun up in its own thread
+//!      that records the raw request and responds `{"status":"ok",...}`;
+//!   2. `~/.cerberus/config.yaml` is written with `listen` pointing to the mock
+//!      and `~/.cerberus/cerberus.pid` with the PID of this LIVE process → the
+//!      CLI deduces that the daemon "is running" and decides to go over HTTP;
+//!   3. `cerberus pack install <f>` is launched and it is checked that (a) the
+//!      CLI calls the API (the mock records it) and (b) does NOT create a
+//!      manifest on disk (does not touch `.cerberus/packs`).
+//!   4. Without a pid file → fallback to local mode (single process).
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -24,10 +24,10 @@ const fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_cerberus")
 }
 
-/// Token ≥ 24 bytes (el control plane exige mínimo 24, review v4 #1).
+/// Token ≥ 24 bytes (the control plane requires at least 24, review v4 #1).
 const ADMIN_TOKEN: &str = "cerberus-cli-control-plane-test-token-0123";
 
-/// Respuesta de éxito del mock control plane.
+/// Success response from the mock control plane.
 const MOCK_RESPONSE: &str = r#"{"status":"ok","message":"installed via control plane API"}"#;
 
 fn temp_dir(prefix: &str) -> PathBuf {
@@ -42,8 +42,8 @@ fn temp_dir(prefix: &str) -> PathBuf {
     d.canonicalize().unwrap_or(d)
 }
 
-/// Mini control plane del daemon en un hilo propio (con su propio runtime
-/// tokio). Registra la request cruda en `hits` y responde
+/// Mini daemon control plane in its own thread (with its own tokio runtime).
+/// Records the raw request in `hits` and responds
 /// `{"status":"ok","message":"installed via control plane API"}`.
 fn spawn_mock_control_plane() -> (
     SocketAddr,
@@ -97,7 +97,7 @@ fn cli_pack_uses_control_plane_when_daemon_running() {
     let cfg_dir = dir.join(".cerberus");
     std::fs::create_dir_all(&cfg_dir).expect("create .cerberus");
 
-    // El control plane apunta al mock y el pid a un proceso vivo.
+    // The control plane points to the mock and the pid to a live process.
     std::fs::write(
         cfg_dir.join("config.yaml"),
         format!("listen: {addr}\nadmin_token: {ADMIN_TOKEN}\n"),
@@ -105,8 +105,9 @@ fn cli_pack_uses_control_plane_when_daemon_running() {
     .expect("write config.yaml");
     std::fs::write(cfg_dir.join("cerberus.pid"), std::process::id().to_string()).expect("write pid");
 
-    // v6.1: el CLI lee el pack y envía sus BYTES (nunca el path). El pack
-    // vive en un subdirectorio con espacio para probar que la ruta no viaja.
+    // v6.1: the CLI reads the pack and sends its BYTES (never the path). The
+    // pack lives in a subdirectory with a space to prove that the path does
+    // not travel.
     let pack_dir = dir.join("packs origin");
     std::fs::create_dir_all(&pack_dir).expect("create pack dir");
     let pack_file = pack_dir.join("wire-demo.json");
@@ -125,47 +126,47 @@ fn cli_pack_uses_control_plane_when_daemon_running() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "el CLI debe salir OK por la API — stderr: {stderr}\nstdout: {stdout}"
+        "the CLI must exit OK via the API — stderr: {stderr}\nstdout: {stdout}"
     );
     assert!(
         stdout.contains("installed via control plane API"),
-        "el CLI imprime el mensaje del control plane: {stdout}"
+        "the CLI prints the control plane message: {stdout}"
     );
 
-    // El control plane REGISTRÓ la llamada con el token y los BYTES del pack.
+    // The control plane RECORDED the call with the token and the pack BYTES.
     let pack_path = pack_file.to_string_lossy().to_string();
     let recv = hits.lock().unwrap().join("\n");
-    assert!(recv.contains("/api/packs/install"), "mock no vio el install: {recv}");
+    assert!(recv.contains("/api/packs/install"), "mock did not see the install: {recv}");
     assert!(
         recv.contains(ADMIN_TOKEN),
-        "mock no recibió X-Cerberus-Admin-Token: {recv}"
+        "mock did not receive X-Cerberus-Admin-Token: {recv}"
     );
     assert!(
         recv.contains("\"wire_version\":2"),
-        "el body debe declarar el contrato v2 (bytes): {recv}"
+        "the body must declare the v2 contract (bytes): {recv}"
     );
     assert!(
         recv.contains("signer_public_key_hex"),
-        "el body debe transportar el pack firmado completo: {recv}"
+        "the body must carry the full signed pack: {recv}"
     );
     assert!(
         recv.contains("wire-demo.json"),
-        "el body debe llevar el basename informativo: {recv}"
+        "the body must carry the informational basename: {recv}"
     );
     assert!(
         !recv.contains(pack_path.as_str()),
-        "el body NO debe llevar la ruta del cliente (semántica de cwd remota): {recv}"
+        "the body must NOT carry the client path (remote cwd semantics): {recv}"
     );
     assert!(
         !recv.contains("packs origin"),
-        "ningún componente de la ruta del cliente debe viajar: {recv}"
+        "no component of the client path must travel: {recv}"
     );
 
-    // El CLI NO creó el layout local de packs (no toca disco en modo API →
-    // un solo escritor en runtime: el worker del daemon).
+    // The CLI did NOT create the local packs layout (does not touch disk in
+    // API mode → a single runtime writer: the daemon's worker).
     assert!(
         !cfg_dir.join("packs").exists(),
-        "el CLI no debe crear ~/.cerberus/packs en modo API"
+        "the CLI must not create ~/.cerberus/packs in API mode"
     );
 
     std::fs::remove_dir_all(&dir).ok();
@@ -177,8 +178,8 @@ fn cli_pack_falls_back_to_local_without_daemon() {
     let dir = temp_dir("pack_cli_local");
     let cfg_dir = dir.join(".cerberus");
     std::fs::create_dir_all(&cfg_dir).expect("create .cerberus");
-    // SIN pid file → el daemon NO está en marcha → modo local.
-    // El mock no debe recibir ninguna llamada (no hay daemon que consultar).
+    // WITHOUT a pid file → the daemon is NOT running → local mode.
+    // The mock must not receive any call (no daemon to query).
 
     let out = Command::new(binary())
         .arg("pack")
@@ -191,15 +192,16 @@ fn cli_pack_falls_back_to_local_without_daemon() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}\nstdout: {stdout}");
     assert!(
-        stdout.contains("no se encontraron"),
-        "modo local esperado — stdout: {stdout}"
+        stdout.contains("no rule packs found"),
+        "local mode expected — stdout: {stdout}"
     );
 
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// `SignedRulePack` estructuralmente válido (firma ficticia: el daemon es quien
-/// la verifica contra su trust root; el CLI solo valida la forma del archivo).
+/// Structurally valid `SignedRulePack` (fictitious signature: the daemon is
+/// the one that verifies it against its trust root; the CLI only validates the
+/// file's form).
 fn sample_signed_pack() -> String {
     let pack_json = r#"{"metadata":{"name":"wire-demo","version":"1.0.0","description":"d","author":"a","published":"2026-01-01T00:00:00Z","min_engine_version":"0.1.0"},"rules":[]}"#;
     format!(
@@ -209,8 +211,8 @@ fn sample_signed_pack() -> String {
     )
 }
 
-/// [v6.1] Fallo seguro del cliente: si el pack no existe (o no es un pack), el
-/// CLI falla ANTES de llamar al control plane — el mock no ve nada.
+/// [v6.1] Client fail-safe: if the pack does not exist (or is not a pack),
+/// the CLI fails BEFORE calling the control plane — the mock sees nothing.
 #[test]
 fn cli_pack_install_rejects_missing_pack_without_calling_api() {
     let (addr, handle, hits) = spawn_mock_control_plane();
@@ -234,31 +236,31 @@ fn cli_pack_install_rejects_missing_pack_without_calling_api() {
         .expect("run cerberus pack install (missing)");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_ne!(out.status.code(), Some(0), "debe fallar: {stdout}{stderr}");
+    assert_ne!(out.status.code(), Some(0), "must fail: {stdout}{stderr}");
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("no se puede resolver el pack"),
-        "mensaje accionable esperado: {combined}"
+        combined.contains("cannot resolve pack"),
+        "expected actionable message: {combined}"
     );
     assert!(
         hits.lock().unwrap().is_empty(),
-        "el CLI no debe llamar al control plane con un pack ilegible"
+        "the CLI must not call the control plane with an unreadable pack"
     );
 
     std::fs::remove_dir_all(&dir).ok();
     drop(handle);
 }
 
-/// [v6.1] Descubrimiento del endpoint efectivo: `endpoint.json` (publicado por
-/// el daemon) gana sobre el `listen` de `config.yaml`, que aquí apunta a un
-/// puerto muerto. Si el CLI no usara el descriptor, la llamada no llegaría.
+/// [v6.1] Effective endpoint discovery: `endpoint.json` (published by the
+/// daemon) wins over the `listen` of `config.yaml`, which here points to a
+/// dead port. If the CLI did not use the descriptor, the call would not arrive.
 #[test]
 fn cli_pack_discovers_effective_endpoint_from_descriptor() {
     let (addr, handle, hits) = spawn_mock_control_plane();
     let dir = temp_dir("pack_cli_endpoint");
     let cfg_dir = dir.join(".cerberus");
     std::fs::create_dir_all(&cfg_dir).expect("create .cerberus");
-    // config.yaml miente sobre el puerto (p.ej. el daemon ligó un efímero).
+    // config.yaml lies about the port (e.g. the daemon bound an ephemeral one).
     std::fs::write(
         cfg_dir.join("config.yaml"),
         format!("listen: 127.0.0.1:9\nadmin_token: {ADMIN_TOKEN}\n"),
@@ -286,12 +288,12 @@ fn cli_pack_discovers_effective_endpoint_from_descriptor() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "el CLI debe alcanzar el endpoint publicado — stderr: {stderr}\nstdout: {stdout}"
+        "the CLI must reach the published endpoint — stderr: {stderr}\nstdout: {stdout}"
     );
     let recv = hits.lock().unwrap().join("\n");
     assert!(
         recv.contains("/api/packs"),
-        "el mock (puerto del descriptor) debe recibir la llamada: {recv}"
+        "the mock (descriptor port) must receive the call: {recv}"
     );
 
     std::fs::remove_dir_all(&dir).ok();

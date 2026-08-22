@@ -1,24 +1,24 @@
-# Evidence Pack — Fase 4 / dev-feedback-ux
-- Intento: 1    Revisor: Builder    Veredicto: PASS
+# Evidence Pack — Phase 4 / dev-feedback-ux
+- Attempt: 1    Reviewer: Builder    Verdict: PASS
 
-## Criterios de aceptación
-| Criterio | Comando ejecutado | Salida | Resultado |
+## Acceptance criteria
+| Criterion | Command executed | Output | Result |
 |----------|-------------------|--------|-----------|
 | `cargo test --workspace` | `cargo test --workspace` | 285 passed; 0 failed | ✅ |
-| Feedback sin findings → vacío | `test::feedback_empty_no_output` | string vacía | ✅ |
-| Feedback con Block → mensaje | `test::feedback_block_has_message` | contiene "bloqueó" | ✅ |
-| Feedback con Redact → mensaje | `test::feedback_redact_has_message` | no vacío | ✅ |
-| Welcome message contiene versión y puerto | `test::welcome_message_contains_version` | Contiene "Cerberus Local" | ✅ |
+| Feedback without findings → empty | `test::feedback_empty_no_output` | empty string | ✅ |
+| Feedback with Block → message | `test::feedback_block_has_message` | contains "blocked" | ✅ |
+| Feedback with Redact → message | `test::feedback_redact_has_message` | not empty | ✅ |
+| Welcome message contains version and port | `test::welcome_message_contains_version` | Contains "Cerberus Local" | ✅ |
 
-## Mecanismos de feedback
-| Mecanismo | Descripción | Plataforma |
+## Feedback mechanisms
+| Mechanism | Description | Platform |
 |-----------|------------|------------|
-| stderr line | Resumen vía `eprintln!` | Todas |
-| Desktop notification | Notificación nativa vía notify-rust | macOS, Linux |
-| CLI summary | `summary_line()` con conteos flags/actions | Todas |
+| stderr line | Summary via `eprintln!` | All |
+| Desktop notification | Native notification via notify-rust | macOS, Linux |
+| CLI summary | `summary_line()` with flag/action counts | All |
 
-## Archivos
-- `crates/cerberus/src/feedback_ux.rs` (nuevo)
+## Files
+- `crates/cerberus/src/feedback_ux.rs` (new)
 
-## Desviaciones del plan
-Ninguna. Feedback al dev vía CLI + notificaciones de escritorio.
+## Deviations from plan
+None. Dev feedback via CLI + desktop notifications.

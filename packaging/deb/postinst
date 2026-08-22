@@ -1,8 +1,8 @@
 #!/bin/sh
-# postinst — sample (Mínimo: un binario estático no requiere postinst).
+# postinst — sample (Minimal: a static binary does not require postinst).
 trap 'exit $?' EXIT HUP INT TERM
 
-# El daemon es tardanza: si existe el binario, se queda en modo manual.
+# The daemon is deferred: if the binary exists, it stays in manual mode.
 if [ -f /usr/bin/cerberus ]; then
     chmod 755 /usr/bin/cerberus
 fi

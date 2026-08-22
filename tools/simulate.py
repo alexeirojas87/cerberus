@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Cerberus — Simulación end-to-end con evidencia (re-verificación F1-F9 post-review).
+Cerberus — End-to-end simulation with evidence (re-verification F1-F9 post-review).
 
-Verifica contra el binario release REAL: block/redact/warn, JSON preservado,
-hot-reload, allowlist, break-glass, shadow, no-raw en CLI, clean no-warn y fuga cero.
+Verifies against the REAL release binary: block/redact/warn, JSON preserved,
+hot-reload, allowlist, break-glass, shadow, no-raw in CLI, clean no-warn and
+zero leakage.
 """
 
 import json
@@ -108,7 +109,7 @@ def chat(content):
 RAW_BLOCK = "sk-abc123def456ghi789jkl012mno345"
 RAW_REDACT = "Bearer abcdefghijklmnopqrstuvwxyzA123456"
 RAW_WARN = "juan.perez@example.com"
-CLEAN = "Hola, explica el universo en una frase."
+CLEAN = "Hello, explain the universe in one sentence."
 
 
 class Driver:
@@ -142,7 +143,7 @@ class Driver:
             [str(BINARY), "start", "--port", str(self.proxy_port)], env=self.env,
             stdout=self.dlog, stderr=self.dlog)
         ok = wait_health(self.base)
-        check(f"daemon arranca en modo {mode} y /health ok", ok)
+        check(f"daemon starts in {mode} mode and /health ok", ok)
         if ok:
             _, h, _ = request("GET", f"{self.base}/health")
             OUT.append(f"      health={h}")
@@ -170,12 +171,12 @@ def scenarios_enforce(d):
     heading("ENFORCE / block critical + feedback header")
     st, body, hdrs = request("POST", f"{d.base}/openai/v1/chat/completions",
                              chat(f"OPENAI_API_KEY={RAW_BLOCK}"))
-    check("secreto critical → 403", st == 403, f"status={st} body={body[:100]}")
-    check("flag secret.openai", "secret.openai" in body, body[:120])
-    check("feedback header presente",
+    check("critical secret -> 403", st == 403, f"status={st} body={body[:100]}")
+    check("secret.openai flag", "secret.openai" in body, body[:120])
+    check("feedback header present",
           any(k.lower() == "x-cerberus-feedback" for k in hdrs), str(list(hdrs))[:140])
 
-    heading("ENFORCE / redact preserva JSON (P0-2)")
+    heading("ENFORCE / redact preserves JSON (P0-2)")
     payload = {"messages": [{"role": "user", "content": f"Authorization: {RAW_REDACT} fin"}],
                "model": "gpt-4", "temperature": 0.0, "n": 1}
     st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions", payload)
@@ -188,114 +189,114 @@ def scenarios_enforce(d):
     except Exception:
         obj = None
         ok_json = False
-    check("upstream recibe JSON válido", ok_json, raw_body[:160])
+    check("upstream receives valid JSON", ok_json, raw_body[:160])
     if ok_json:
         content = obj["messages"][0]["content"]
-        check("secreto → [REDACTED ...]", "[REDACTED" in content, content[:160])
-        check("model/temperature intactos", obj.get("model") == "gpt-4", json.dumps(obj)[:140])
-        check("raw token ausente upstream", RAW_REDACT not in raw_body)
+        check("secret -> [REDACTED ...]", "[REDACTED" in content, content[:160])
+        check("model/temperature intact", obj.get("model") == "gpt-4", json.dumps(obj)[:140])
+        check("raw token absent upstream", RAW_REDACT not in raw_body)
 
-    heading("ENFORCE / redact con keyword en OTRO campo (P0 rev2)")
+    heading("ENFORCE / redact with keyword in ANOTHER field (P0 rev2)")
     gkey = "AIza" + "A" * 35
-    cross_payload = {"context": "google api_key", "message": f"Soy un mensaje con {gkey} embebido"}
+    cross_payload = {"context": "google api_key", "message": f"I am a message with {gkey} embedded"}
     st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions", cross_payload)
     last = d.mock_last()
     echoed = json.dumps(last)
-    check("cross-field: el secreto NO llega crudo al upstream", gkey not in echoed, echoed[:200])
-    check("cross-field: [REDACTED presente", "[REDACTED" in echoed, echoed[:200])
+    check("cross-field: the secret does NOT reach upstream raw", gkey not in echoed, echoed[:200])
+    check("cross-field: [REDACTED present", "[REDACTED" in echoed, echoed[:200])
 
-    heading("ENFORCE / warn PII pasa intacto")
-    st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions", chat(f"Contactame: {RAW_WARN}"))
+    heading("ENFORCE / warn PII passes intact")
+    st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions", chat(f"Contact me: {RAW_WARN}"))
     last = d.mock_last()
     echoed = json.dumps(last)
-    check("warn email → 200 y llega upstream", st == 200 and RAW_WARN in echoed,
+    check("warn email -> 200 and reaches upstream", st == 200 and RAW_WARN in echoed,
           f"status={st} {echoed[:140]}")
 
-    heading("ENFORCE / clean sin evento warn (P1-12)")
+    heading("ENFORCE / clean with no warn event (P1-12)")
     _, evs, _ = request("GET", f"{d.base}/api/events")
     before = len(json.loads(evs))
     st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions", chat(CLEAN))
     _, evs2, _ = request("GET", f"{d.base}/api/events")
     after_events = json.loads(evs2)
-    check("payload limpio forward 200", st == 200, f"status={st}")
-    check("limpio no añade eventos (ni warn)", len(after_events) == before,
+    check("clean payload forward 200", st == 200, f"status={st}")
+    check("clean does not add events (nor warn)", len(after_events) == before,
           f"events before={before} after={len(after_events)}")
 
-    heading("ENFORCE / allowlist en la ruta real (P0-5)")
+    heading("ENFORCE / allowlist on the real path (P0-5)")
     st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions",
                           chat(f"OPENAI_API_KEY={RAW_BLOCK}"))
-    check("antes: bloquea", st == 403)
+    check("before: blocks", st == 403)
     request("POST", f"{d.base}/api/allowlist", {"value": RAW_BLOCK})
     st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions",
                           chat(f"OPENAI_API_KEY={RAW_BLOCK}"))
-    check("después de allowlist: pasa", st == 200, f"status={st}")
+    check("after allowlist: passes", st == 200, f"status={st}")
 
     heading("ENFORCE / hot-reload PUT /api/config (P0-5)")
     _, cfg, _ = request("GET", f"{d.base}/api/config")
     config = json.loads(cfg)
     config["mode"] = "shadow"
     st, body, _ = request("PUT", f"{d.base}/api/config", config)
-    check("PUT config responde ok", st == 200, body[:80])
+    check("PUT config responds ok", st == 200, body[:80])
     st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions",
                           chat(f"OPENAI_API_KEY={RAW_BLOCK}"))
-    check("tras reload (shadow) deja pasar", st == 200, f"status={st}")
+    check("after reload (shadow) lets through", st == 200, f"status={st}")
 
     heading("ENFORCE / break-glass header (P1-7)")
     st, body, _ = request("PUT", f"{d.base}/api/config", json.loads(cfg))
     st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions",
                           chat(f"OPENAI_API_KEY={RAW_BLOCK}"),
-                          headers={"X-Cerberus-Bypass": "test-de-emergencia"})
-    check("con header bypass: NO bloquea", st == 200, f"status={st}")
+                          headers={"X-Cerberus-Bypass": "emergency-test"})
+    check("with bypass header: does NOT block", st == 200, f"status={st}")
 
-    heading("ENFORCE / límite de body en vivo (413) — rev2 P1 #5")
+    heading("ENFORCE / live body limit (413) — rev2 P1 #5")
     _, cfg, _ = request("GET", f"{d.base}/api/config")
     cfg_obj = json.loads(cfg)
     cfg_obj["max_body_bytes"] = 200
     request("PUT", f"{d.base}/api/config", cfg_obj)
     big = {"messages": [{"role": "user", "content": "x" * 10000}]}
     st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions", big)
-    check("body>200 → 413 (limitado durante streaming)", st == 413, f"status={st} {body[:80]}")
-    # restaurar
+    check("body>200 -> 413 (limited during streaming)", st == 413, f"status={st} {body[:80]}")
+    # restore
     cfg_obj["max_body_bytes"] = None
     request("PUT", f"{d.base}/api/config", cfg_obj)
 
-    heading("ENFORCE / fuga cero + HMAC + CLI")
+    heading("ENFORCE / zero leakage + HMAC + CLI")
     leaks = []
     for f in d.home.rglob("*"):
         if f.is_file() and f.suffix in (".db", ".log"):
             if RAW_REDACT.encode() in f.read_bytes() or RAW_BLOCK.encode() in f.read_bytes():
                 leaks.append(str(f))
     dlog_txt = (d.home / "daemon.log").read_text(errors="replace")
-    check("sin raw en disco ni daemon log", not leaks and RAW_REDACT not in dlog_txt and RAW_BLOCK not in dlog_txt,
+    check("no raw on disk or daemon log", not leaks and RAW_REDACT not in dlog_txt and RAW_BLOCK not in dlog_txt,
           f"leaks={leaks}" if leaks else "")
     _, evs, _ = request("GET", f"{d.base}/api/events")
     events = json.loads(evs)
     hashed = [e.get("hashed_values", []) for e in events if e.get("flags")]
-    check("eventos usan HMAC (hmac:)", bool(hashed) and all(
+    check("events use HMAC (hmac:)", bool(hashed) and all(
         (isinstance(h, list) and h and str(h[0]).startswith("hmac:")) or
         (isinstance(h, str) and h.startswith("hmac:")) for h in hashed),
         json.dumps(hashed[:2], default=str)[:200])
     cli = subprocess.run([str(BINARY), "test", f"mi openai api key es {RAW_BLOCK}"],
                          env=dict(os.environ, HOME=str(d.home)), capture_output=True, text=True).stdout
-    check("CLI detecta hallazgo", "Hallazgos" in cli, cli[:160])
-    check("CLI NO imprime el raw secreto", RAW_BLOCK not in cli, cli[:160])
+    check("CLI detects findings", "Hallazgos" in cli, cli[:160])
+    check("CLI does NOT print the raw secret", RAW_BLOCK not in cli, cli[:160])
     doc = subprocess.run([str(BINARY), "doctor"], env=dict(os.environ, HOME=str(d.home)),
                          capture_output=True, text=True).stdout
-    check("doctor reporta reglas", "Reglas cargadas:" in doc, doc[:120])
+    check("doctor reports rules", "Reglas cargadas:" in doc, doc[:120])
 
 
 def scenarios_shadow(d):
-    heading("SHADOW / bloqueo no aplica, sí audita")
+    heading("SHADOW / blocking does not apply, but audits")
     st, body, _ = request("POST", f"{d.base}/openai/v1/chat/completions",
                           chat(f"OPENAI_API_KEY={RAW_BLOCK}"))
-    check("shadow: 200 (no bloquea)", st == 200, f"status={st}")
+    check("shadow: 200 (does not block)", st == 200, f"status={st}")
     last = d.mock_last()
-    check("shadow: secret crudo llega upstream", RAW_BLOCK in last.get("body", ""),
+    check("shadow: raw secret reaches upstream", RAW_BLOCK in last.get("body", ""),
           json.dumps(last)[:160])
     _, evs, _ = request("GET", f"{d.base}/api/events")
     events = json.loads(evs)
     blocks = [e for e in events if e.get("action_taken") == "block"]
-    check("shadow: evento block auditado", len(blocks) >= 1,
+    check("shadow: block event audited", len(blocks) >= 1,
           json.dumps(blocks[-1], default=str)[:200] if blocks else "")
 
 
@@ -314,7 +315,7 @@ def main():
 
     OUT.append("")
     OUT.append("=" * 78)
-    OUT.append(f"  RESULTADO: {PASS} PASS / {FAIL} FAIL")
+    OUT.append(f"  RESULT: {PASS} PASS / {FAIL} FAIL")
     OUT.append("=" * 78)
     if FAILURES:
         OUT.append("FAILED: " + "; ".join(FAILURES))

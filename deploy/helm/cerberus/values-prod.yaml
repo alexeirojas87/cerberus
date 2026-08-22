@@ -1,10 +1,10 @@
-# Perfil de producción para el chart de Cerberus.
-# Uso:
+# Production profile for the Cerberus chart.
+# Usage:
 #   helm upgrade cerberus deploy/helm/cerberus --values deploy/helm/cerberus/values-prod.yaml \
 #     --set config.admin.token="$CERBERUS_ADMIN_TOKEN"
 #   helm test cerberus
 #
-# Ajusta la imagen a tu registro publicado antes de ir a producción.
+# Adjust the image to your published registry before going to production.
 
 replicaCount: 2
 
@@ -18,8 +18,8 @@ service:
   port: 8787
   targetPort: 8080
 
-# Bloqueo de recursos duro; escale con HPA si la carga del flujo de
-# agentes lo pide (recomendado: 0.5-1 vCPU por core de reglas).
+# Hard resource limits; scale with an HPA if the agent traffic flow
+# demands it (recommended: 0.5-1 vCPU per rule core).
 resources:
   requests:
     cpu: 250m
@@ -33,7 +33,7 @@ config:
   failPolicy: closed
   retentionDays: 90
   admin:
-    # Token obligatorio: llega por --set (env de CI) o un secret pre-existente.
+    # Required token: supplied via --set (CI env) or a pre-existing secret.
     enabled: true
     token: ""
   upstreams:
@@ -54,9 +54,9 @@ config:
       path_prefix: null
       auth_header: authorization
   telemetry:
-    # Telemetría OFF en produccción por defecto (privacy-by-default).
-    # Actívala solo tras revisar la política (telemetry.rs privacy_policy) y
-    # decidir tu endpoint interno de colección.
+    # Telemetry OFF in production by default (privacy-by-default).
+    # Enable it only after reviewing the policy (telemetry.rs privacy_policy)
+    # and deciding on your internal collection endpoint.
     enabled: false
     endpoint: https://telemetry.cerberus.dev/v1/ping
     intervalSecs: 86400

@@ -24,7 +24,7 @@ fn make_ctx(rules: Vec<cerberus_engine::rule::Rule>, operation_mode: OperationMo
     make_ctx_opts(rules, operation_mode, "http://127.0.0.1:9999", FailPolicy::Closed, None)
 }
 
-/// Variante con upstream configurable (para integraciones con mock real).
+/// Variant with a configurable upstream (for integrations with a real mock).
 #[allow(clippy::needless_pass_by_value)]
 fn make_ctx_with_url(
     rules: Vec<cerberus_engine::rule::Rule>,
@@ -34,7 +34,7 @@ fn make_ctx_with_url(
     make_ctx_opts(rules, operation_mode, upstream_url, FailPolicy::Closed, None)
 }
 
-/// Variante con control plane protegido (`admin_token`) — fix P1 admin.
+/// Variant with a protected control plane (`admin_token`) — fix P1 admin.
 fn make_ctx_with_token(
     rules: Vec<cerberus_engine::rule::Rule>,
     operation_mode: OperationMode,
@@ -50,9 +50,9 @@ fn make_ctx_with_token(
     )
 }
 
-/// Variante con `admin_token` **y** persistencia YAML (review v6.1): hace
-/// falta para comprobar que un PUT que preserva el token también lo persiste,
-/// y que un fallo de escritura no muta la config viva.
+/// Variant with `admin_token` **and** YAML persistence (review v6.1): needed
+/// to verify that a PUT preserving the token also persists it, and that a
+/// write failure does not mutate the live config.
 fn make_ctx_with_token_and_config_path(
     upstream_url: &str,
     admin_token: Option<&str>,
@@ -86,7 +86,7 @@ fn make_ctx_with_token_and_config_path(
     })
 }
 
-/// Variante con política de fallo del motor configurable — fix P1 `fail_open`.
+/// Variant with a configurable engine failure policy — fix P1 `fail_open`.
 fn make_ctx_with_fail_policy(
     rules: Vec<cerberus_engine::rule::Rule>,
     operation_mode: OperationMode,
@@ -132,8 +132,8 @@ fn make_ctx_opts(
     })
 }
 
-/// Variante con persistencia YAML fijada (review v6 F6): la Config API escribe
-/// a `config_path` en cada mutación (PUT /api/config, CRUD de upstreams).
+/// Variant with fixed YAML persistence (review v6 F6): the Config API writes
+/// to `config_path` on every mutation (PUT /api/config, upstream CRUD).
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn make_ctx_with_config_path(
     rules: Vec<cerberus_engine::rule::Rule>,
@@ -169,9 +169,9 @@ fn make_ctx_with_config_path(
     })
 }
 
-/// Contexto real de política: conserva las reglas base de packs, aplica la
-/// política restaurada del YAML y conecta el mismo `EngineControl` al API y
-/// al dataplane.
+/// Real policy context: keeps the pack base rules, applies the restored
+/// policy from the YAML and connects the same `EngineControl` to the API
+/// and the dataplane.
 fn make_policy_ctx(
     base_rules: Vec<cerberus_engine::rule::Rule>,
     config: ProxyConfig,
@@ -447,7 +447,7 @@ fn block_rule() -> cerberus_engine::rule::Rule {
     }
 }
 
-/// Mock upstream mínimo: acepta una request y responde JSON 200.
+/// Minimal mock upstream: accepts one request and responds with JSON 200.
 async fn spawn_mock_upstream() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -475,8 +475,9 @@ async fn spawn_mock_upstream() -> (std::net::SocketAddr, tokio::task::JoinHandle
     (addr, handle)
 }
 
-/// Mock upstream que devuelve un JSON con el request crudo recibido (headers
-/// incluidos) para poder aseverar qué headers NO llegaron al proveedor.
+/// Mock upstream that returns a JSON with the raw request it received
+/// (including headers) so we can assert which headers did NOT reach the
+/// provider.
 async fn spawn_mock_upstream_echo() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -509,7 +510,7 @@ const BLOCK_BODY: &str = r#"{"content":"sk-abcDEFghijklmnopqrstuvwxyz1234"}"#;
 
 #[tokio::test]
 async fn test_hot_reload_put_config_takes_effect() {
-    // P0-5: PUT /api/config debe cambiar el modo REAL del proxy.
+    // P0-5: PUT /api/config must change the REAL mode of the proxy.
     let (mock_addr, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_url(
         vec![block_rule()],
@@ -565,7 +566,7 @@ async fn test_hot_reload_put_config_takes_effect() {
 
 #[tokio::test]
 async fn test_break_glass_header_bypasses_block() {
-    // P1-7: header X-Cerberus-Bypass debe dejar pasar aunque haya finder de block.
+    // P1-7: header X-Cerberus-Bypass must let through even if there is a block finder.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_url(
         vec![block_rule()],
@@ -574,7 +575,7 @@ async fn test_break_glass_header_bypasses_block() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    // Sin bypass, 403.
+    // Without bypass, 403.
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/test"))
@@ -585,7 +586,7 @@ async fn test_break_glass_header_bypasses_block() {
         .expect("no bypass");
     assert_eq!(resp.status(), 403);
 
-    // Con bypass, pasa al upstream (200).
+    // With bypass, it reaches the upstream (200).
     let by = client
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
@@ -605,7 +606,7 @@ async fn test_break_glass_header_bypasses_block() {
 
 #[tokio::test]
 async fn test_allowlist_applied_in_scan_path() {
-    // P0-5: la allowlist debe filtrar en la ruta de escaneo real.
+    // P0-5: the allowlist must filter in the real scan path.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_url(
         vec![block_rule()],
@@ -651,7 +652,7 @@ async fn test_allowlist_applied_in_scan_path() {
 
 #[tokio::test]
 async fn test_health_requires_admin_token_when_configured() {
-    // Con admin_token configurado /health queda abierto pero /api/* exige auth.
+    // With admin_token configured /health stays open but /api/* requires auth.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_token(
         vec![block_rule()],
@@ -697,7 +698,7 @@ async fn test_put_config_requires_admin_token() {
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    // PUT /api/config sin token → 401
+    // PUT /api/config without token → 401
     let denied = client
         .put(format!("{base}/api/config"))
         .json(&serde_json::json!({"mode": "shadow"}))
@@ -706,7 +707,7 @@ async fn test_put_config_requires_admin_token() {
         .expect("put without token");
     assert_eq!(denied.status(), 401, "PUT config must require admin token");
 
-    // PUT /api/config con token válido → 200
+    // PUT /api/config with valid token → 200
     let allowed = client
         .put(format!("{base}/api/config"))
         .bearer_auth("s3krit")
@@ -720,7 +721,7 @@ async fn test_put_config_requires_admin_token() {
 
 #[tokio::test]
 async fn test_fail_policy_open_forwards_non_json_body() {
-    // El mock responde 200 a cualquier path/body recibido.
+    // The mock responds 200 to any path/body received.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_fail_policy(
         vec![block_rule()],
@@ -780,9 +781,9 @@ async fn test_fail_policy_closed_rejects_dead_body() {
 
 #[tokio::test]
 async fn test_bypass_reason_never_persisted_raw() {
-    // El motivo del bypass con secreto literal `sk-...` debe quedar hasheado,
-    // jamás crudo en /api/events.
-    let secret_reason = "motivo de emergencia sk-KEEPTHISSECRET1234567890abcdefX";
+    // The bypass reason with a literal `sk-...` secret must end up hashed,
+    // never raw in /api/events.
+    let secret_reason = "emergency reason sk-KEEPTHISSECRET1234567890abcdefX";
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_url(
         vec![block_rule()],
@@ -824,8 +825,8 @@ async fn test_bypass_reason_never_persisted_raw() {
 
 #[tokio::test]
 async fn test_upstream_response_too_large_is_502() {
-    // fix P1 #4: una respuesta del upstream que supera `max_body_bytes` debe
-    // devolver 502 JSON y NO derribar la conexión con un Err.
+    // fix P1 #4: an upstream response exceeding `max_body_bytes` must
+    // return a 502 JSON and NOT bring down the connection with an Err.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_url(
         vec![block_rule()],
@@ -836,7 +837,7 @@ async fn test_upstream_response_too_large_is_502() {
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    // Limitar el body a 8 bytes (la respuesta del mock {"ok":true} la supera).
+    // Limit the body to 8 bytes (the mock response {"ok":true} exceeds it).
     let cfg: serde_json::Value = client
         .get(format!("{base}/api/config"))
         .send()
@@ -877,8 +878,8 @@ const ADMIN_TOKEN: &str = "s3cret-admin-token-12345678";
 
 #[tokio::test]
 async fn test_spawn_non_loopback_requires_admin_token() {
-    // Review v4 #1: el arranque en 0.0.0.0 sin admin token debe FALLAR con
-    // error (un compose con `change-me` < 24 chars tampoco arranca).
+    // Review v4 #1: startup on 0.0.0.0 without an admin token must FAIL with
+    // an error (a compose with `change-me` < 24 chars also does not start).
     let ctx = make_ctx(vec![], OperationMode::Enforce);
     let non_loop: SocketAddr = "0.0.0.0:0".parse().expect("addr");
     let err = spawn_proxy(non_loop, ctx).await.unwrap_err().to_string();
@@ -887,7 +888,7 @@ async fn test_spawn_non_loopback_requires_admin_token() {
 
 #[tokio::test]
 async fn test_admin_token_header_not_forwarded_to_upstream() {
-    // Review v4 #2: `X-Cerberus-Admin-Token` nunca debe llegar al upstream.
+    // Review v4 #2: `X-Cerberus-Admin-Token` must never reach the upstream.
     let (echo_addr, echo_handle) = spawn_mock_upstream_echo().await;
     let ctx = make_ctx_with_token(
         vec![block_rule()],
@@ -903,7 +904,7 @@ async fn test_admin_token_header_not_forwarded_to_upstream() {
         .header("content-type", "application/json")
         .header("x-cerberus-admin-token", ADMIN_TOKEN)
         .header("x-custom-keep", "keepme")
-        .body(r#"{"content":"hola"}"#)
+        .body(r#"{"content":"hello"}"#)
         .send()
         .await
         .expect("forward");
@@ -926,9 +927,9 @@ async fn test_admin_token_header_not_forwarded_to_upstream() {
 
 #[tokio::test]
 async fn test_bypass_data_plane_requires_admin_header_not_bearer() {
-    // Review v4 #2: el bypass del data plane se honra SOLO vía
-    // `X-Cerberus-Admin-Token`; `Authorization: Bearer <admin>` se IGNORA
-    // (warning) para no sustituir la API key del proveedor.
+    // Review v4 #2: the data-plane bypass is honored ONLY via
+    // `X-Cerberus-Admin-Token`; `Authorization: Bearer <admin>` is IGNORED
+    // (warning) so as not to substitute the provider API key.
     let (echo_addr, echo_handle) = spawn_mock_upstream_echo().await;
     let ctx = make_ctx_with_token(
         vec![block_rule()],
@@ -939,11 +940,11 @@ async fn test_bypass_data_plane_requires_admin_header_not_bearer() {
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let client = reqwest::Client::new();
 
-    // Bypass vía Authorization → ignorado → 403 (block).
+    // Bypass via Authorization → ignored → 403 (block).
     let blocked = client
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
-        .header("x-cerberus-bypass", "emergencia de prueba")
+        .header("x-cerberus-bypass", "test emergency")
         .bearer_auth(ADMIN_TOKEN)
         .body(BLOCK_BODY)
         .send()
@@ -956,11 +957,11 @@ async fn test_bypass_data_plane_requires_admin_header_not_bearer() {
         blocked.status()
     );
 
-    // Bypass vía X-Cerberus-Admin-Token → honrado → 200.
+    // Bypass via X-Cerberus-Admin-Token → honored → 200.
     let passed = client
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
-        .header("x-cerberus-bypass", "emergencia de prueba")
+        .header("x-cerberus-bypass", "test emergency")
         .header("x-cerberus-admin-token", ADMIN_TOKEN)
         .body(BLOCK_BODY)
         .send()
@@ -977,9 +978,10 @@ async fn test_bypass_data_plane_requires_admin_header_not_bearer() {
 
 #[tokio::test]
 async fn test_dashboard_served_without_auth_when_token_set() {
-    // Review v5 F6: el dashboard es HTML estático PÚBLICO sin datos; con admin
-    // token configurado se sirve SIN auth y NUNCA incrusta el token en el DOM.
-    // Las rutas de datos (/api/*) siguen exigiendo auth (401 sin token).
+    // Review v5 F6: the dashboard is public static HTML without data; with an
+    // admin token configured it is served WITHOUT auth and NEVER embeds the
+    // token in the DOM. The data routes (/api/*) still require auth (401
+    // without token).
     let (mock_addr, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_token(
         vec![block_rule()],
@@ -991,7 +993,7 @@ async fn test_dashboard_served_without_auth_when_token_set() {
     let client = reqwest::Client::new();
     let base = format!("http://{addr}");
 
-    // Dashboard sin auth → 200 HTML y sin token en el DOM.
+    // Dashboard without auth → 200 HTML and no token in the DOM.
     let ok = client
         .get(format!("{base}/api/dashboard"))
         .send()
@@ -1006,7 +1008,7 @@ async fn test_dashboard_served_without_auth_when_token_set() {
     );
     assert!(!html.contains(ADMIN_TOKEN), "admin token must not leak into the DOM");
 
-    // Ruta de datos sin token → 401.
+    // Data route without token → 401.
     let denied = client
         .get(format!("{base}/api/stats"))
         .send()
@@ -1023,7 +1025,7 @@ async fn test_dashboard_served_without_auth_when_token_set() {
 
 #[tokio::test]
 async fn test_stats_filters_by_provider_query() {
-    // Review v5 F6: /api/stats?provider=X resume solo los eventos de X.
+    // Review v5 F6: /api/stats?provider=X summarizes only the events of X.
     let ctx = make_ctx(vec![], OperationMode::Enforce);
     {
         let mut events = ctx.api.events.lock().await;
@@ -1064,8 +1066,8 @@ async fn test_stats_filters_by_provider_query() {
 
 #[tokio::test]
 async fn test_api_body_limited_to_1_mebibyte() {
-    // Review v4 #4: el control plane rechaza cuerpos > 1 MiB con 413, tanto
-    // en PUT /api/config como en POST /api/allowlist.
+    // Review v4 #4: the control plane rejects bodies > 1 MiB with 413, both
+    // on PUT /api/config and on POST /api/allowlist.
     let (mock_addr, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_url(Vec::new(), OperationMode::Enforce, &format!("http://{mock_addr}"));
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
@@ -1090,7 +1092,7 @@ async fn test_api_body_limited_to_1_mebibyte() {
 
     let small = client
         .post(format!("{base}/api/allowlist"))
-        .json(&serde_json::json!({ "value": "algo-sin-secreto" }))
+        .json(&serde_json::json!({ "value": "something-without-a-secret" }))
         .send()
         .await
         .expect("small api body");
@@ -1100,12 +1102,12 @@ async fn test_api_body_limited_to_1_mebibyte() {
 
 #[tokio::test]
 async fn test_hot_reload_swaps_engine_without_restart() {
-    // F7 / review v5: el proxy debe cambiar de reglas SIN reiniciar cuando se
-    // sustituye el engine activo bajo el `RwLock`. Este test:
-    //   1. arranca el proxy con un engine limpio → el marker NO se bloquea;
-    //   2. bajo el lock del ctx se SWAPA el engine a uno con regla de block
-    //      para el marker (lo que hace el worker de packs del daemon);
-    //   3. el MISMO proxy en marcha ahora devuelve 403 para ese marker.
+    // F7 / review v5: the proxy must change rules WITHOUT restarting when the
+    // active engine is replaced under the `RwLock`. This test:
+    //   1. starts the proxy with a clean engine → the marker is NOT blocked;
+    //   2. under the ctx lock the engine is SWAPPED to one with a block rule
+    //      for the marker (what the daemon pack worker does);
+    //   3. the SAME running proxy now returns 403 for that marker.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let _ = mock_adj;
     let ctx = make_ctx_with_url(Vec::new(), OperationMode::Enforce, "https://invalid-upstream");
@@ -1114,7 +1116,7 @@ async fn test_hot_reload_swaps_engine_without_restart() {
     let client = reqwest::Client::new();
     let marker = "HOTRELOAD_SIGNAL_VAL";
 
-    // 1) engine base (sin reglas) → el marker NO bloquea (va al upstream/mock).
+    // 1) base engine (no rules) → the marker is NOT blocked (goes to upstream/mock).
     let passthrough = client
         .post(format!("{base}/test"))
         .header("content-type", "application/json")
@@ -1125,12 +1127,12 @@ async fn test_hot_reload_swaps_engine_without_restart() {
     assert_ne!(
         passthrough.status(),
         403,
-        "sin pack instalado el marker debe pasar (got {})",
+        "without a pack installed the marker must pass (got {})",
         passthrough.status()
     );
 
-    // 2) swap del engine activo bajo el lock (worker pack install). El guard se
-    // libera explícitamente ANTES del siguiente await (Send-safe, clippy).
+    // 2) swap of the active engine under the lock (worker pack install). The
+    // guard is released explicitly BEFORE the next await (Send-safe, clippy).
     let block_rule = cerberus_engine::rule::Rule {
         flag: "hotreload.marker".to_string(),
         category: cerberus_engine::rule::Category::Secrets,
@@ -1152,7 +1154,7 @@ async fn test_hot_reload_swaps_engine_without_restart() {
         *live = std::sync::Arc::new(new_engine);
     }
 
-    // 3) el MISMO proxy, SIN reiniciar, ahora bloquea el marker.
+    // 3) the SAME proxy, WITHOUT restarting, now blocks the marker.
     let blocked = client
         .post(format!("http://{}", proxy.0) + "/test")
         .header("content-type", "application/json")
@@ -1163,7 +1165,7 @@ async fn test_hot_reload_swaps_engine_without_restart() {
     assert_eq!(
         blocked.status(),
         403,
-        "hot-reload: tras swap el proxy debe bloquear el marker (got {})",
+        "hot-reload: after swap the proxy must block the marker (got {})",
         blocked.status()
     );
     mock_handle.abort();
@@ -1171,8 +1173,8 @@ async fn test_hot_reload_swaps_engine_without_restart() {
 
 #[tokio::test]
 async fn config_get_never_leaks_admin_token() {
-    // Review v6 F6: GET /api/config debe redactar el admin_token; se expone
-    // `admin_token_configured: true` pero NUNCA el valor.
+    // Review v6 F6: GET /api/config must redact the admin_token; it exposes
+    // `admin_token_configured: true` but NEVER the value.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_token(
         vec![],
@@ -1184,7 +1186,7 @@ async fn config_get_never_leaks_admin_token() {
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    // Sin token → 401 (el config expone datos del control plane).
+    // Without token → 401 (the config exposes control-plane data).
     let denied = client
         .get(format!("{base}/api/config"))
         .send()
@@ -1192,7 +1194,7 @@ async fn config_get_never_leaks_admin_token() {
         .expect("get config no token");
     assert_eq!(denied.status(), 401, "config must require auth when token set");
 
-    // Con token válido → 200, y el valor del token NO aparece.
+    // With a valid token → 200, and the token value does NOT appear.
     let resp = client
         .get(format!("{base}/api/config"))
         .header("x-cerberus-admin-token", ADMIN_TOKEN)
@@ -1220,9 +1222,9 @@ async fn config_get_never_leaks_admin_token() {
 
 #[tokio::test]
 async fn config_put_persists_yaml() {
-    // Review v6 F6, requisito 1: PUT /api/config persiste la config compartida
-    // a YAML en `ApiContext.config_path` (escritura atómica). El YAML escrito
-    // debe contener los campos de la config (mode).
+    // Review v6 F6, requirement 1: PUT /api/config persists the shared config
+    // to YAML at `ApiContext.config_path` (atomic write). The written YAML
+    // must contain the config fields (mode).
     let config_path = std::env::temp_dir().join("cerberus_f6_config_put.yaml");
     std::fs::remove_file(&config_path).ok();
 
@@ -1271,14 +1273,14 @@ async fn config_put_persists_yaml() {
 
 #[tokio::test]
 async fn upstream_add_list_delete() {
-    // Review v6 F6, requisito 3: CRUD de upstreams vía GET/POST/DELETE.
+    // Review v6 F6, requirement 3: upstream CRUD via GET/POST/DELETE.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_url(Vec::new(), OperationMode::Enforce, &format!("http://{mock_adj}"));
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    // Lista inicial: solo el upstream por defecto.
+    // Initial list: only the default upstream.
     let list0 = client
         .get(format!("{base}/api/upstreams"))
         .send()
@@ -1292,7 +1294,7 @@ async fn upstream_add_list_delete() {
         "initial list should contain 'default': {list0}"
     );
 
-    // Alta.
+    // Add.
     let add = client
         .post(format!("{base}/api/upstreams"))
         .json(&serde_json::json!({
@@ -1305,7 +1307,7 @@ async fn upstream_add_list_delete() {
         .expect("add upstream");
     assert_eq!(add.status(), 200, "add upstream must succeed");
 
-    // Aparece en la lista.
+    // It appears in the list.
     let list1 = client
         .get(format!("{base}/api/upstreams"))
         .send()
@@ -1317,7 +1319,7 @@ async fn upstream_add_list_delete() {
     assert!(list1.contains("openai"), "added upstream should be listed: {list1}");
     assert!(list1.contains("x-api-key"), "auth_header should be listed: {list1}");
 
-    // Baja.
+    // Remove.
     let del = client
         .delete(format!("{base}/api/upstreams/openai"))
         .send()
@@ -1342,8 +1344,8 @@ async fn upstream_add_list_delete() {
 
 #[tokio::test]
 async fn upstream_requires_auth_when_token_set() {
-    // Review v6 F6, requisito 5: el CRUD de upstreams es parte del control
-    // plane y DEBE exigir auth cuando hay admin token configurado.
+    // Review v6 F6, requirement 5: upstream CRUD is part of the control plane
+    // and MUST require auth when an admin token is configured.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_with_token(
         Vec::new(),
@@ -1387,8 +1389,8 @@ async fn upstream_requires_auth_when_token_set() {
         "DELETE /api/upstreams/* must require auth"
     );
 
-    // Con token válido el DELETE responde 404 (no existe 'x' en la config),
-    // probando que la ruta atraviesa el gate y responde como tal.
+    // With a valid token the DELETE responds 404 ('x' does not exist in the
+    // config), proving the route goes through the gate and responds as such.
     let authed = client
         .delete(format!("{base}/api/upstreams/x"))
         .header("x-cerberus-admin-token", ADMIN_TOKEN)
@@ -1399,14 +1401,14 @@ async fn upstream_requires_auth_when_token_set() {
     mock_handle.abort();
 }
 
-// ─── Review v6.1: config como DTO, transaccionalidad y F6 ────────────────
+// ─── Review v6.1: config as DTO, transactionality and F6 ────────────────
 
-/// Token de 28 bytes (≥ `ADMIN_TOKEN_MIN_BYTES`), válido en no-loopback.
+/// A 28-byte token (≥ `ADMIN_TOKEN_MIN_BYTES`), valid on non-loopback.
 const STRONG_ADMIN_TOKEN: &str = "correct-horse-battery-stapl0";
 
-/// Requisito principal de la review v6.1: un ciclo HTTP real GET → PUT no
-/// puede perder el admin token, porque el GET no lo revela y el PUT lo omite.
-/// Tras el PUT, una petición SIN token debe seguir en 401.
+/// Main requirement of review v6.1: a real HTTP GET → PUT cycle cannot lose
+/// the admin token, because GET does not reveal it and PUT omits it. After
+/// the PUT, a request WITHOUT a token must still be 401.
 #[tokio::test]
 async fn config_get_then_put_over_http_preserves_the_admin_token() {
     let config_path = std::env::temp_dir().join("cerberus_v61_get_put_preserves.yaml");
@@ -1417,7 +1419,7 @@ async fn config_get_then_put_over_http_preserves_the_admin_token() {
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    // 1) GET autenticado: el valor del token NO viaja; sí el booleano.
+    // 1) Authenticated GET: the token value does NOT travel; the boolean does.
     let resp = client
         .get(format!("{base}/api/config"))
         .header("x-cerberus-admin-token", STRONG_ADMIN_TOKEN)
@@ -1428,10 +1430,10 @@ async fn config_get_then_put_over_http_preserves_the_admin_token() {
     let text = resp.text().await.expect("body");
     assert!(!text.contains(STRONG_ADMIN_TOKEN), "GET leaked the token: {text}");
     let cfg: serde_json::Value = serde_json::from_str(&text).expect("parse config");
-    assert!(cfg.get("admin_token").is_none(), "no debe existir la clave: {text}");
+    assert!(cfg.get("admin_token").is_none(), "the key must not exist: {text}");
     assert_eq!(cfg["admin_token_configured"].as_bool(), Some(true), "{text}");
 
-    // 2) PUT reenviando el body del GET (que NO trae el token) + un cambio.
+    // 2) PUT resending the GET body (which does NOT carry the token) + a change.
     let mut body = cfg.as_object().cloned().expect("object");
     body.insert("mode".to_string(), serde_json::json!("shadow"));
     let put = client
@@ -1443,7 +1445,7 @@ async fn config_get_then_put_over_http_preserves_the_admin_token() {
         .expect("put config");
     assert_eq!(put.status(), 200, "PUT must accept the GET body verbatim");
 
-    // 3) El cambio se aplicó...
+    // 3) The change was applied...
     let after: serde_json::Value = client
         .get(format!("{base}/api/config"))
         .header("x-cerberus-admin-token", STRONG_ADMIN_TOKEN)
@@ -1453,10 +1455,10 @@ async fn config_get_then_put_over_http_preserves_the_admin_token() {
         .json()
         .await
         .expect("parse after");
-    assert_eq!(after["mode"].as_str(), Some("shadow"), "el patch se aplicó");
+    assert_eq!(after["mode"].as_str(), Some("shadow"), "the patch was applied");
     assert_eq!(after["admin_token_configured"].as_bool(), Some(true));
 
-    // 4) ...y el token SIGUE exigiéndose: sin token, 401 (no dev mode).
+    // 4) ...and the token is STILL required: without token, 401 (not dev mode).
     let denied = client
         .get(format!("{base}/api/config"))
         .send()
@@ -1473,17 +1475,17 @@ async fn config_get_then_put_over_http_preserves_the_admin_token() {
         .send()
         .await
         .expect("put without token");
-    assert_eq!(denied_put.status(), 401, "PUT sin token sigue en 401");
+    assert_eq!(denied_put.status(), 401, "PUT without token stays 401");
 
-    // 5) El YAML persistido tampoco pierde el token (el daemon lo relee).
+    // 5) The persisted YAML does not lose the token either (the daemon re-reads it).
     let yaml = std::fs::read_to_string(&config_path).expect("config persisted");
     assert!(yaml.contains(STRONG_ADMIN_TOKEN), "token must persist to YAML: {yaml}");
     assert!(yaml.contains("shadow"), "{yaml}");
     std::fs::remove_file(&config_path).ok();
 }
 
-/// Adversarial: `admin_token_configured` es de sólo lectura. Mandarlo en
-/// `false` no puede apagar la autenticación.
+/// Adversarial: `admin_token_configured` is read-only. Sending it as
+/// `false` cannot turn off authentication.
 #[tokio::test]
 async fn put_config_cannot_disable_auth_via_the_read_only_flag() {
     let ctx = make_ctx_with_token(
@@ -1503,7 +1505,7 @@ async fn put_config_cannot_disable_auth_via_the_read_only_flag() {
         .send()
         .await
         .expect("put flag");
-    assert_eq!(put.status(), 200, "el campo se acepta y se ignora");
+    assert_eq!(put.status(), 200, "the field is accepted and ignored");
 
     let denied = client
         .get(format!("{base}/api/config"))
@@ -1513,9 +1515,9 @@ async fn put_config_cannot_disable_auth_via_the_read_only_flag() {
     assert_eq!(denied.status(), 401, "auth must still be enforced");
 }
 
-/// La API no puede persistir una config que el daemon rechazaría al arrancar:
-/// `listen` no-loopback exige token ≥ 24 bytes. Y al rechazarla, la config
-/// viva no cambia.
+/// The API cannot persist a config the daemon would reject on startup:
+/// non-loopback `listen` requires a token ≥ 24 bytes. And on rejecting it,
+/// the live config does not change.
 #[tokio::test]
 async fn put_config_rejects_public_listen_without_a_strong_token() {
     let config_path = std::env::temp_dir().join("cerberus_v61_public_listen.yaml");
@@ -1525,7 +1527,7 @@ async fn put_config_rejects_public_listen_without_a_strong_token() {
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    // Sin token y listen público → 400 (el daemon no arrancaría así).
+    // No token and public listen → 400 (the daemon would not start like that).
     let denied = client
         .put(format!("{base}/api/config"))
         .json(&serde_json::json!({"listen": "0.0.0.0:8080"}))
@@ -1536,7 +1538,7 @@ async fn put_config_rejects_public_listen_without_a_strong_token() {
     let text = denied.text().await.unwrap_or_default();
     assert!(text.contains("non-loopback"), "{text}");
 
-    // Token corto: también 400.
+    // Short token: also 400.
     let short = client
         .put(format!("{base}/api/config"))
         .json(&serde_json::json!({"listen": "0.0.0.0:8080", "admin_token": "change-me"}))
@@ -1545,7 +1547,7 @@ async fn put_config_rejects_public_listen_without_a_strong_token() {
         .expect("put short token");
     assert_eq!(short.status(), 400, "short token must be refused");
 
-    // Nada se aplicó en memoria ni se escribió a disco.
+    // Nothing was applied in memory or written to disk.
     let cfg: serde_json::Value = client
         .get(format!("{base}/api/config"))
         .send()
@@ -1562,7 +1564,7 @@ async fn put_config_rejects_public_listen_without_a_strong_token() {
     assert_eq!(cfg["admin_token_configured"].as_bool(), Some(false));
     assert!(!config_path.exists(), "a rejected patch must not write the YAML");
 
-    // Con token fuerte, el mismo cambio de listen SÍ pasa (requires_restart).
+    // With a strong token, the same listen change DOES pass (requires_restart).
     let ok = client
         .put(format!("{base}/api/config"))
         .json(&serde_json::json!({"listen": "0.0.0.0:8080", "admin_token": STRONG_ADMIN_TOKEN}))
@@ -1575,8 +1577,8 @@ async fn put_config_rejects_public_listen_without_a_strong_token() {
     std::fs::remove_file(&config_path).ok();
 }
 
-/// Persistencia transaccional desde la perspectiva en memoria: si el YAML no
-/// se puede escribir, la config viva queda EXACTAMENTE como estaba.
+/// Transactional persistence from the in-memory perspective: if the YAML
+/// cannot be written, the live config stays EXACTLY as it was.
 #[tokio::test]
 async fn put_config_persist_failure_leaves_the_live_config_untouched() {
     let unwritable = std::path::PathBuf::from("/nonexistent-cerberus-dir-v61/config.yaml");
@@ -1610,7 +1612,7 @@ async fn put_config_persist_failure_leaves_the_live_config_untouched() {
     );
 }
 
-/// F6: overlay de política (categorías + reglas propias) por HTTP real.
+/// F6: policy overlay (categories + custom rules) over real HTTP.
 #[tokio::test]
 async fn policy_categories_and_rules_round_trip() {
     let ctx = make_ctx_with_url(vec![], OperationMode::Enforce, "http://127.0.0.1:9999");
@@ -1628,11 +1630,11 @@ async fn policy_categories_and_rules_round_trip() {
         .expect("parse policy");
     assert!(
         pol["categories"].as_object().is_some_and(serde_json::Map::is_empty),
-        "sin configuración explícita se hereda la acción declarada por regla: {pol}"
+        "without an explicit config, the action declared per rule is inherited: {pol}"
     );
     assert_eq!(pol["valid_actions"][0].as_str(), Some("allow"));
 
-    // Fijar acción por categoría y override por regla.
+    // Set action by category and override by rule.
     let put = client
         .put(format!("{base}/api/policy"))
         .json(&serde_json::json!({
@@ -1649,10 +1651,10 @@ async fn policy_categories_and_rules_round_trip() {
     assert_eq!(
         updated["categories"]["pii"].as_str(),
         None,
-        "patch parcial preserva ausencia"
+        "partial patch preserves absence"
     );
 
-    // `null` borra la entrada.
+    // `null` deletes the entry.
     let removed: serde_json::Value = client
         .put(format!("{base}/api/policy"))
         .json(&serde_json::json!({"rules": {"secret.openai_api_key": null}}))
@@ -1667,7 +1669,7 @@ async fn policy_categories_and_rules_round_trip() {
         "{removed}"
     );
 
-    // Acción inválida → 400 y NADA se aplica.
+    // Invalid action → 400 and NOTHING is applied.
     let bad = client
         .put(format!("{base}/api/policy"))
         .json(&serde_json::json!({"categories": {"secrets": "nuke", "pii": "block"}}))
@@ -1686,11 +1688,11 @@ async fn policy_categories_and_rules_round_trip() {
     assert_eq!(
         after["categories"]["pii"].as_str(),
         None,
-        "un patch inválido no aplica ninguna de sus entradas: {after}"
+        "an invalid patch applies none of its entries: {after}"
     );
 }
 
-/// F6: triage de falsos positivos — añadir, listar y quitar de la allowlist.
+/// F6: false-positive triage — add, list and remove from the allowlist.
 #[tokio::test]
 async fn allowlist_add_list_and_remove() {
     let ctx = make_ctx_with_url(vec![], OperationMode::Enforce, "http://127.0.0.1:9999");
@@ -1726,7 +1728,7 @@ async fn allowlist_add_list_and_remove() {
         .expect("parse");
     assert_eq!(listed[0].as_str(), Some("sk-EXAMPLE-do-not-flag"));
 
-    // La allowlist también sale en el documento de política (una sola vista).
+    // The allowlist also appears in the policy document (a single view).
     let pol: serde_json::Value = client
         .get(format!("{base}/api/policy"))
         .send()
@@ -1754,7 +1756,7 @@ async fn allowlist_add_list_and_remove() {
         .expect("parse");
     assert_eq!(after.as_array().map(Vec::len), Some(0));
 
-    // Quitar algo que no está → 404.
+    // Remove something that is not there → 404.
     let missing = client
         .delete(format!("{base}/api/allowlist"))
         .json(&serde_json::json!({"value": "nope"}))
@@ -1764,7 +1766,7 @@ async fn allowlist_add_list_and_remove() {
     assert_eq!(missing.status(), 404);
 }
 
-/// El overlay de política es parte del control plane: exige token.
+/// The policy overlay is part of the control plane: it requires a token.
 #[tokio::test]
 async fn policy_and_allowlist_require_the_admin_token() {
     let ctx = make_ctx_with_token(
@@ -1794,9 +1796,10 @@ async fn policy_and_allowlist_require_the_admin_token() {
     }
 }
 
-/// Fix v6.1: prueba HTTP + dataplane del ciclo completo before/after/reopen.
-/// La regla base representa un pack ya activo; debe sobrevivir al hot-reload
-/// y al reopen, mientras la regla custom y la allowlist se restauran del YAML.
+/// Fix v6.1: HTTP + dataplane test of the full before/after/reopen cycle.
+/// The base rule represents an already-active pack; it must survive the
+/// hot-reload and the reopen, while the custom rule and the allowlist are
+/// restored from the YAML.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn policy_custom_rule_and_allowlist_scan_before_after_and_reopen() {
@@ -1926,9 +1929,9 @@ async fn policy_custom_rule_and_allowlist_scan_before_after_and_reopen() {
     std::fs::remove_file(config_path).ok();
 }
 
-/// Wire v2 se prueba contra el handler HTTP real: los bytes llegan al worker;
-/// la forma v1 por path se rechaza antes del worker aunque el path apunte a un
-/// pack válido en el filesystem visible por el proceso servidor.
+/// Wire v2 is tested against the real HTTP handler: the bytes reach the
+/// worker; the v1 path form is rejected before the worker even if the path
+/// points to a valid pack on the filesystem visible to the server process.
 #[tokio::test]
 async fn pack_install_wire_v2_accepts_bytes_and_never_opens_legacy_path() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<cerberus_proxy::api::PackCommand>(4);
@@ -2011,8 +2014,7 @@ async fn pack_install_wire_v2_accepts_bytes_and_never_opens_legacy_path() {
         1,
         "legacy path must be rejected before the worker: {seen:?}"
     );
-    assert_eq!(seen[0].pack, signed_pack, "worker receives exact signed-pack bytes");
-    assert_eq!(seen[0].origin_name.as_deref(), Some("demo.json"));
+    assert_eq!(seen[0].pack, signed_pack, "worker receives exact signed-pack bytes");    assert_eq!(seen[0].origin_name.as_deref(), Some("demo.json"));
     drop(seen);
 
     proxy_handle.abort();
@@ -2020,8 +2022,8 @@ async fn pack_install_wire_v2_accepts_bytes_and_never_opens_legacy_path() {
     std::fs::remove_file(remote_path).ok();
 }
 
-/// La CSP viaja en la CABECERA (para que `frame-ancestors` aplique) y sin
-/// `unsafe-inline`: el bloque inline servido se autoriza por su sha256.
+/// The CSP travels in the HEADER (so `frame-ancestors` applies) and without
+/// `unsafe-inline`: the served inline block is authorized by its sha256.
 #[tokio::test]
 async fn dashboard_serves_an_effective_csp_header() {
     let ctx = make_ctx_with_token(
@@ -2033,7 +2035,7 @@ async fn dashboard_serves_an_effective_csp_header() {
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
 
-    // El dashboard es HTML público: se sirve sin token (no lleva datos).
+    // The dashboard is public HTML: it is served without a token (carries no data).
     let resp = reqwest::get(format!("{base}/api/dashboard"))
         .await
         .expect("get dashboard");

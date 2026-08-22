@@ -1,25 +1,25 @@
-//! Logging para el proxy — sin secretos en los logs.
+//! Logging for the proxy — no secrets in the logs.
 //!
-//! Nunca se loguean valores crudos de secretos/PII. Solo se registran
-//! flags, categorías, conteos y hashes (que ya están hasheados por el
-//! motor de detección).
+//! Raw values of secrets/PII are never logged. Only flags, categories,
+//! counts and hashes (which are already hashed by the detection engine)
+//! are recorded.
 
 use cerberus_engine::engine::Finding;
 use cerberus_engine::rule::Action;
 use tracing::Level;
 
-/// Nivel de log para eventos de seguridad.
+/// Log level for security events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityEvent {
-    /// Request bloqueado.
+    /// Blocked request.
     Blocked,
-    /// Request redactado.
+    /// Redacted request.
     Redacted,
-    /// Warning (se detectó algo pero se dejó pasar).
+    /// Warning (something was detected but let through).
     Warned,
-    /// Bypass (break-glass usado).
+    /// Bypass (break-glass used).
     Bypassed,
-    /// Request limpio.
+    /// Clean request.
     Clean,
 }
 
@@ -43,10 +43,10 @@ impl SecurityEvent {
     }
 }
 
-/// Loggear un evento de seguridad.
+/// Log a security event.
 ///
-/// Nunca contiene valores crudos de secretos. Solo flags, categorías,
-/// conteos y hashes.
+/// Never contains raw secret values. Only flags, categories, counts and
+/// hashes.
 pub fn log_security_event(event: SecurityEvent, findings: &[Finding], action_taken: Action) {
     let flags: Vec<&str> = findings.iter().map(|f| f.flag.as_str()).collect();
     let categories: Vec<String> = findings.iter().map(|f| f.category.to_string()).collect();
@@ -66,7 +66,7 @@ pub fn log_security_event(event: SecurityEvent, findings: &[Finding], action_tak
     }
 }
 
-/// Inicializar el logger global con formato y filtro.
+/// Initialize the global logger with format and filter.
 pub fn init_logging(log_level: &str) {
     tracing_subscriber::fmt()
         .with_env_filter(log_level)

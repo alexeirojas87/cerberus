@@ -1,37 +1,37 @@
-//! Shadow / enforce mode (§4.7 del build plan).
+//! Shadow / enforce mode (§4.7 of the build plan).
 //!
-//! - `shadow`: escanea y registra qué bloquearía/redactaría, pero
-//!   **deja pasar todo intacto**.
-//! - `enforce`: aplica las acciones de verdad (block/redact).
+//! - `shadow`: scans and records what it would block/redact, but
+//!   **lets everything through intact**.
+//! - `enforce`: applies the real actions (block/redact).
 
 use cerberus_engine::engine::{Finding, ScanOutput};
 use cerberus_engine::rule::Action;
 
 use crate::config::OperationMode;
 
-/// Resultado de aplicar el modo de operación a un scan.
+/// Result of applying the operation mode to a scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModeResult {
-    /// Enforce mode: aplicar acción según findings.
+    /// Enforce mode: apply the action according to the findings.
     Enforce {
-        /// Finding más severo.
+        /// Most severe finding.
         action: Action,
-        /// Todos los findings.
+        /// All the findings.
         findings: Vec<Finding>,
     },
-    /// Shadow mode: solo registrar, pasar intacto.
+    /// Shadow mode: only record, pass through intact.
     Shadow {
-        /// Lo que se *habría* hecho (solo informativo).
+        /// What it *would* have done (informational only).
         would_be_action: Action,
-        /// Findings para registro.
+        /// Findings for the record.
         findings: Vec<Finding>,
-        /// El texto debe pasar intacto.
+        /// The text must pass through intact.
         pass_through: bool,
     },
 }
 
 impl ModeResult {
-    /// ¿El request debe pasar intacto?
+    /// Should the request pass through intact?
     #[must_use]
     pub fn should_forward(&self) -> bool {
         match self {
@@ -40,7 +40,7 @@ impl ModeResult {
         }
     }
 
-    /// Obtener los findings para audit.
+    /// Get the findings for audit.
     #[must_use]
     pub fn findings(&self) -> &[Finding] {
         match self {
@@ -48,7 +48,7 @@ impl ModeResult {
         }
     }
 
-    /// Obtener la acción que aplica.
+    /// Get the action that applies.
     #[must_use]
     pub const fn action(&self) -> Action {
         match self {
@@ -58,7 +58,7 @@ impl ModeResult {
     }
 }
 
-/// Aplicar el modo de operación a un scan output.
+/// Apply the operation mode to a scan output.
 #[must_use]
 pub fn apply_mode(output: &ScanOutput, mode: OperationMode) -> ModeResult {
     match mode {

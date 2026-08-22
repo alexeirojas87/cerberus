@@ -1,7 +1,7 @@
-//! Cerberus rule packs — Fase 7 del build plan.
+//! Cerberus rule packs — Phase 7 of the build plan.
 //!
-//! Paquetes versionados y firmados de reglas de detección,
-//! con verificación de firma Ed25519 y auto-update con rollback.
+//! Versioned and signed detection rule packs,
+//! with Ed25519 signature verification and auto-update with rollback.
 
 pub mod default_pack;
 pub mod license;

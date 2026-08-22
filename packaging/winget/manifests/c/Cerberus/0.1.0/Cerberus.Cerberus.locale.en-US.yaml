@@ -13,8 +13,8 @@ ShortDescription: DLP firewall for LLM agents - blocks secrets and PII from leav
 Description: >-
   Cerberus is a local DLP firewall for LLM agents. It intercepts egress traffic,
   detects secrets and PII with a regex/entropy engine, and applies redaction and
-  block policies. It provides a CLI and a local daemon (Modo B) plus a reverse
-  and forward proxy (Modo A). Installs cerberus.exe and the Cerberus daemon.
+  block policies. It provides a CLI and a local daemon (Mode B) plus a reverse
+  and forward proxy (Mode A). Installs cerberus.exe and the Cerberus daemon.
 Moniker: cerberus
 Tags:
   - security

@@ -1,7 +1,7 @@
 # Evidence Pack — F1 Constraints Review
 
 ## Metadata
-- **Reviewer**: REVISOR 1 (correctness)
+- **Reviewer**: REVIEWER 1 (correctness)
 - **Worktree**: `cerberus-wt-f1-review-constraints`
 - **Baseline commit**: `4379c3b` (detached HEAD, aligned with `main`)
 - **Date**: 2026-08-17
@@ -21,15 +21,15 @@
 
 ## 2. Bugs Found
 
-### BUG-1 (CRITICAL): Constraints no integradas en el engine
+### BUG-1 (CRITICAL): Constraints not integrated into the engine
 
-**Archivo**: `crates/cerberus-engine/src/engine.rs:258`
+**File**: `crates/cerberus-engine/src/engine.rs:258`
 
-**Problema**: El método `make_finding()` solo ejecutaba validadores (`self.validators.all_pass(...)`) pero **nunca llamaba** `constraints::check_constraints()`. Esto significa que `minLength`, `maxLength`, `allowedExamples`, y `contextKeywords` existían como módulo y pasaban sus tests unitarios, pero eran completamente ignorados en el pipeline de detección de engine.
+**Problem**: The `make_finding()` method only ran validators (`self.validators.all_pass(...)`) but **never called** `constraints::check_constraints()`. This means that `minLength`, `maxLength`, `allowedExamples`, and `contextKeywords` existed as a module and passed their unit tests, but were completely ignored in the engine's detection pipeline.
 
-**Impacto**: Cualquier regla con constraints no las aplicaba. Las findings se emitían aunque debieran ser descartadas.
+**Impact**: Any rule with constraints did not apply them. Findings were emitted even though they should have been discarded.
 
-**Fix aplicado**: Se añadió la llamada a `check_constraints(rule, trimmed, text)` en `make_finding()`, antes de la validación. La `text` completa (contexto escaneado) se usa como contexto para `contextKeywords`.
+**Fix applied**: The call to `check_constraints(rule, trimmed, text)` was added in `make_finding()`, before validation. The full `text` (scanned context) is used as context for `contextKeywords`.
 
 ```rust
 // engine.rs:261-263
@@ -38,33 +38,33 @@ if !check_constraints(rule, trimmed, text) {
 }
 ```
 
-### BUG-2 (Medio): Test de integración `allowed_examples_do_not_fire` no probaba constraints
+### BUG-2 (Medium): Integration test `allowed_examples_do_not_fire` did not test constraints
 
-**Archivo**: `crates/cerberus-engine/tests/integration_test.rs`
+**File**: `crates/cerberus-engine/tests/integration_test.rs`
 
-**Problema**: El test usaba `"sk-test-example-not-real"` como "allowed example" pero este valor contiene guiones (`-`) que no están en el set `[A-Za-z0-9]` del patrón `\bsk-[A-Za-z0-9]{20,}\b`. Por tanto, el regex nunca matcheaba y el test pasaba por coincidencia, no porque constraints funcionaran.
+**Problem**: The test used `"sk-test-example-not-real"` as an "allowed example" but this value contains hyphens (`-`) that are not in the `[A-Za-z0-9]` set of the pattern `\bsk-[A-Za-z0-9]{20,}\b`. Therefore, the regex never matched and the test passed by coincidence, not because constraints worked.
 
-**Fix aplicado**:
-1. Se añadió `"sk-AllowedExampleABCDEFGHIJKLMNOPQRSTUVWXYZ"` a `allowedExamples` en `test-rules.json`
-2. Se actualizó el test para usar este valor, que SÍ matchea el regex (32 chars alfanuméricos tras `sk-`)
-3. El texto incluye la keyword de contexto `openai` para no fallar por `contextKeywords`
+**Fix applied**:
+1. Added `"sk-AllowedExampleABCDEFGHIJKLMNOPQRSTUVWXYZ"` to `allowedExamples` in `test-rules.json`
+2. Updated the test to use this value, which DOES match the regex (32 alphanumeric chars after `sk-`)
+3. The text includes the context keyword `openai` so it does not fail due to `contextKeywords`
 
 ---
 
-## 3. Adversarial Tests Añadidos
+## 3. Adversarial Tests Added
 
-Cuatro tests de integración nuevos (en `tests/integration_test.rs`):
+Four new integration tests (in `tests/integration_test.rs`):
 
-| Test | Escenario | Resultado |
+| Test | Scenario | Result |
 |------|-----------|-----------|
-| `no_constraints_always_passes_in_engine` | Regla sin constraints → match pasa | ✅ |
-| `combined_minlength_and_contextkeywords_in_engine` | Ambos constraints deben cumplirse; falla si uno no | ✅ |
-| `empty_context_vs_keyword_context` | Vacío descartado; con keyword pasa | ✅ |
-| `allowed_examples_minlength_min_wins` | Valor corto Y en allowed → minLength gana (descarta primero) | ✅ |
+| `no_constraints_always_passes_in_engine` | Rule without constraints → match passes | ✅ |
+| `combined_minlength_and_contextkeywords_in_engine` | Both constraints must be met; fails if one is not | ✅ |
+| `empty_context_vs_keyword_context` | Empty discarded; with keyword passes | ✅ |
+| `allowed_examples_minlength_min_wins` | Short value AND in allowed → minLength wins (discards first) | ✅ |
 
 ---
 
-## 4. Evidence de Ejecución
+## 4. Execution Evidence
 
 ```
 test result: ok. 130 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
@@ -75,24 +75,24 @@ test result: ok. 130 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 ---
 
-## 5. Archivos Modificados
+## 5. Modified Files
 
-| Archivo | Cambio |
+| File | Change |
 |---------|--------|
-| `crates/cerberus-engine/src/engine.rs:2` | Añadido `use crate::constraints::check_constraints` |
+| `crates/cerberus-engine/src/engine.rs:2` | Added `use crate::constraints::check_constraints` |
 | `crates/cerberus-engine/src/engine.rs:188` | Fix indent: `validators: ValidatorRegistry::new()` |
-| `crates/cerberus-engine/src/engine.rs:261-263` | Añadida llamada a `check_constraints` en `make_finding` |
-| `crates/cerberus-engine/src/engine.rs:662` | Formato: `.build()` en línea separada |
-| `crates/cerberus-engine/test-rules.json:11` | Añadido `"sk-AllowedExampleABCDEFGHIJKLMNOPQRSTUVWXYZ"` a `allowedExamples` |
-| `crates/cerberus-engine/tests/integration_test.rs` | Test corregido + 4 adversarial tests |
+| `crates/cerberus-engine/src/engine.rs:261-263` | Added `check_constraints` call in `make_finding` |
+| `crates/cerberus-engine/src/engine.rs:662` | Format: `.build()` on a separate line |
+| `crates/cerberus-engine/test-rules.json:11` | Added `"sk-AllowedExampleABCDEFGHIJKLMNOPQRSTUVWXYZ"` to `allowedExamples` |
+| `crates/cerberus-engine/tests/integration_test.rs` | Test corrected + 4 adversarial tests |
 
 ---
 
 ## 6. Gate Pass
 
-**Veredicto**: ✅ PASS — Constraints correctamente implementadas, integradas en engine, y verificadas con tests adversariales.
+**Verdict**: ✅ PASS — Constraints correctly implemented, integrated into the engine, and verified with adversarial tests.
 
-**Coverage de constraints en pipeline**:
-- `check_constraints()` en `constraints.rs`: unit-tested (7 tests existentes)
-- Llamada desde `make_finding()` en `engine.rs`: integration-tested (4 adversarial tests nuevos)
-- Test de regresión `allowed_examples_do_not_fire`: corregido para probar integración real
+**Constraints coverage in pipeline**:
+- `check_constraints()` in `constraints.rs`: unit-tested (7 existing tests)
+- Called from `make_finding()` in `engine.rs`: integration-tested (4 new adversarial tests)
+- Regression test `allowed_examples_do_not_fire`: corrected to test real integration

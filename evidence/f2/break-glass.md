@@ -1,37 +1,37 @@
-# Evidence Pack — Fase 2 / break-glass
-- Intento: 1    Revisor: Builder    Veredicto: PASS
+# Evidence Pack — Phase 2 / break-glass
+- Attempt: 1    Reviewer: Builder    Verdict: PASS
 
-## Criterios de aceptación
-| Criterio | Comando ejecutado | Salida | Resultado |
+## Acceptance criteria
+| Criterion | Command executed | Output | Result |
 |----------|-------------------|--------|-----------|
 | `cargo build --workspace` | `cargo build --workspace` | 0 errors | ✅ |
 | `cargo test -p cerberus-engine` | `cargo test -p cerberus-engine` | 180 passed; 0 failed | ✅ |
 | `cargo clippy --all-targets -- -D warnings` | `cargo clippy --all-targets -- -D warnings` | No issues found | ✅ |
 | `cargo fmt --check` | `cargo fmt --check` | No diffs | ✅ |
-| Break-glass deshabilitado devuelve findings originales | `test::disabled_returns_original` | Pass | ✅ |
-| Break-glass habilitado sin Block devuelve original | `test::enabled_without_block_returns_original` | Pass | ✅ |
-| Break-glass remueve Block y devuelve BypassRecord | `test::enabled_with_block_removes_block` | Pass | ✅ |
-| allow_once estático funciona | `test::allow_once_static_works` | Pass | ✅ |
-| Múltiples blocks todos bypasseados | `test::multiple_blocks_all_bypassed` | Pass | ✅ |
+| Break-glass disabled returns original findings | `test::disabled_returns_original` | Pass | ✅ |
+| Break-glass enabled without Block returns original | `test::enabled_without_block_returns_original` | Pass | ✅ |
+| Break-glass removes Block and returns BypassRecord | `test::enabled_with_block_removes_block` | Pass | ✅ |
+| allow_once static works | `test::allow_once_static_works` | Pass | ✅ |
+| Multiple blocks all bypassed | `test::multiple_blocks_all_bypassed` | Pass | ✅ |
 
-## Casos adversariales probados
-- Break-glass deshabilitado → comportamiento normal, bypass no aplica
-- Sin findings Block → bypass no hace nada
-- Block + Redact/Warn → solo Block se remueve, los demás pasan
-- allow_once con razón arbitraria → registrada en BypassRecord
-- Múltiples Block → todos se remueven, conteo correcto
+## Adversarial cases tested
+- Break-glass disabled → normal behavior, bypass does not apply
+- No Block findings → bypass does nothing
+- Block + Redact/Warn → only Block is removed, the rest pass
+- allow_once with arbitrary reason → recorded in BypassRecord
+- Multiple Block → all removed, correct count
 
-## NFR aplicables
-- N/A (no aplica latencia/seguridad para esta unidad)
+## Applicable NFRs
+- N/A (no latency/security applies to this unit)
 
-## Archivos
-- `crates/cerberus-engine/src/break_glass.rs` (nuevo)
-- `crates/cerberus-engine/src/lib.rs` (modificado: +pub mod break_glass)
+## Files
+- `crates/cerberus-engine/src/break_glass.rs` (new)
+- `crates/cerberus-engine/src/lib.rs` (modified: +pub mod break_glass)
 
 ## SHAs
 ```
-TODO: sha256sum de archivos nuevos
+TODO: sha256sum of new files
 ```
 
-## Desviaciones del plan
-Ninguna. Implementa exactamente el diseño de break-glass: header o allow_once que deja pasar findings Block y deja registro auditado.
+## Deviations from plan
+None. It implements exactly the break-glass design: a header or allow_once that lets Block findings through and leaves an audited record.

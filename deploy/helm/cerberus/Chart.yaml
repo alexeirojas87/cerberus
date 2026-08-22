@@ -1,6 +1,6 @@
 apiVersion: v2
 name: cerberus
-description: "Cerberus — DLP firewall for LLM agents. Modo A: self-hosted reverse proxy for LLM backends with secret/PII blocking."
+description: "Cerberus — DLP firewall for LLM agents. Mode A: self-hosted reverse proxy for LLM backends with secret/PII blocking."
 version: 0.1.0
 appVersion: "0.1.0"
 type: application

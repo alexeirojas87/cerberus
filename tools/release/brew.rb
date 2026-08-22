@@ -1,21 +1,21 @@
 # frozen_string_literal: true
 
-# Cerberus — Homebrew formula (template de release).
+# Cerberus — Homebrew formula (release template).
 #
-# Este archivo ES Ruby válido, pero los placeholders {{...}} deben sustituirse
-# por los valores reales del release ANTES de publicar el tap:
+# This file IS valid Ruby, but the {{...}} placeholders must be replaced
+# with the real release values BEFORE publishing the tap:
 #
 #   tools/release/fill_brew_formula.sh --version 0.1.0 --platforms dist/SHA256SUMS --out dist/cerberus.rb
 #
 # Placeholders:
-#   {{VERSION}}                -> versión del release (0.1.0)
-#   {{SHA256_MACOS_X86_64}}    -> sha256 de cerberus-<v>-macos-x86_64.tar.gz
-#   {{SHA256_MACOS_AARCH64}}   -> sha256 de cerberus-<v>-macos-aarch64.tar.gz
-#   {{SHA256_LINUX_X86_64}}    -> sha256 de cerberus-<v>-linux-x86_64.tar.gz
-#   {{SHA256_LINUX_AARCH64}}   -> sha256 de cerberus-<v>-linux-aarch64.tar.gz
+#   {{VERSION}}                -> release version (0.1.0)
+#   {{SHA256_MACOS_X86_64}}    -> sha256 of cerberus-<v>-macos-x86_64.tar.gz
+#   {{SHA256_MACOS_AARCH64}}   -> sha256 of cerberus-<v>-macos-aarch64.tar.gz
+#   {{SHA256_LINUX_X86_64}}    -> sha256 of cerberus-<v>-linux-x86_64.tar.gz
+#   {{SHA256_LINUX_AARCH64}}   -> sha256 of cerberus-<v>-linux-aarch64.tar.gz
 #
-# Al publicarla, el archivo debe llamarse cerberus.rb (Homebrew deriva el nombre
-# de la clase del nombre de fichero de la fórmula).
+# When publishing, the file must be named cerberus.rb (Homebrew derives the class
+# name from the formula file name).
 
 class Cerberus < Formula
   desc "DLP firewall for LLM agents — blocks secrets and PII from leaving your machine"
@@ -54,8 +54,8 @@ class Cerberus < Formula
 
   def caveats
     <<~EOS
-      Cerberus se instala en #{HOMEBREW_PREFIX}/bin/cerberus.
-      Primer uso:
+      Cerberus is installed at #{HOMEBREW_PREFIX}/bin/cerberus.
+      First use:
         cerberus init
         cerberus start
     EOS

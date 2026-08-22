@@ -49,8 +49,8 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            # En Windows los tests se serializan (--test-threads=1) para
-            # evitar carreras con los tests que mutan HOME/PATH/APPDATA.
+            # On Windows, tests are serialized (--test-threads=1) to
+            # avoid races with tests that mutate HOME/PATH/APPDATA.
             cargo test --workspace --all-targets -- --test-threads=1
           else
             cargo test --workspace --all-targets

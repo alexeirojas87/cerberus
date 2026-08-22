@@ -1,35 +1,35 @@
 //! Fail-safe/closed integration tests.
 //!
-//! Verifica que el motor y la política de fail-open/closed manejan
-//! correctamente fallos según la política configurada.
+//! Verifies that the engine and the fail-open/closed policy correctly
+//! handle failures according to the configured policy.
 //!
-//! Cobertura:
-//! - Engine-level: error de compilación/regex → Reject (closed) / Allow (open).
-//! - Redacción con spans inválidos → error, no panic.
+//! Coverage:
+//! - Engine-level: compilation/regex error → Reject (closed) / Allow (open).
+//! - Redaction with invalid spans → error, not panic.
 //! - Pipeline scan + redact + policy.
 //! - Default FailPolicy = Closed (secure-by-default).
-//! - Proxy-level: decode→scan→policy pipeline con error simulado.
+//! - Proxy-level: decode→scan→policy pipeline with a simulated error.
 
 use cerberus_engine::engine::EngineBuilder;
 use cerberus_engine::redact::{apply_redaction, RedactOptions};
 use cerberus_proxy::config::FailPolicy;
 use cerberus_proxy::policy::{evaluate, PolicyDecision};
 
-/// Fail-closed: cualquier error debe resultar en Reject.
+/// Fail-closed: any error must result in Reject.
 #[test]
 fn fail_closed_rejects_on_engine_error() {
     let decision = evaluate(FailPolicy::Closed, "engine compilation error");
     assert_eq!(decision, PolicyDecision::Reject);
 }
 
-/// Fail-open: cualquier error debe resultar en Allow.
+/// Fail-open: any error must result in Allow.
 #[test]
 fn fail_open_allows_on_engine_error() {
     let decision = evaluate(FailPolicy::Open, "engine compilation error");
     assert_eq!(decision, PolicyDecision::Allow);
 }
 
-/// Redacción con spans inválidos en fail-closed debe fallar.
+/// Redaction with invalid spans in fail-closed must fail.
 #[test]
 fn invalid_redaction_fail_closed() {
     let finding = cerberus_engine::engine::Finding {
@@ -45,17 +45,17 @@ fn invalid_redaction_fail_closed() {
     assert!(result.is_err(), "invalid span should error in redaction");
 }
 
-/// Engine vacío no tira errores.
+/// Empty engine throws no errors.
 #[test]
 fn empty_engine_scan_succeeds() {
     let engine = EngineBuilder::new(&[]).build().expect("empty engine build");
     let result = engine.scan("any text");
     assert!(result.findings.is_empty());
-    // Sin findings el request se considera limpio → Allow (fix P1-12).
+    // With no findings the request is considered clean → Allow (fix P1-12).
     assert_eq!(result.action_overall, cerberus_engine::rule::Action::Allow);
 }
 
-/// PolicyDecision se puede comparar.
+/// PolicyDecision can be compared.
 #[test]
 fn policy_decision_is_exhaustive() {
     let closed = evaluate(FailPolicy::Closed, "err");
@@ -63,7 +63,7 @@ fn policy_decision_is_exhaustive() {
     assert_ne!(closed, open);
 }
 
-/// Test de integración: scan + redact + policy.
+/// Integration test: scan + redact + policy.
 #[test]
 fn scan_redact_policy_pipeline() {
     let rule = cerberus_engine::rule::Rule {
@@ -103,9 +103,9 @@ fn scan_redact_policy_pipeline() {
     );
 }
 
-/// Secure-by-default: `FailPolicy::default()` es `Closed` (no `Open`).
-/// Garantiza que un deployment sin config explícita rechaza ante error del
-/// motor, no deja pasar.
+/// Secure-by-default: `FailPolicy::default()` is `Closed` (not `Open`).
+/// Guarantees that a deployment without explicit config rejects on engine
+/// error, it does not let traffic through.
 #[test]
 fn fail_policy_default_is_closed_secure() {
     let default = FailPolicy::default();
@@ -114,19 +114,19 @@ fn fail_policy_default_is_closed_secure() {
         FailPolicy::Closed,
         "default FailPolicy must be Closed (secure-by-default)"
     );
-    // Y proxy default usa el default de FailPolicy.
+    // And the proxy default uses the FailPolicy default.
     assert_eq!(
         cerberus_proxy::config::ProxyConfig::default().fail_policy,
         FailPolicy::Closed
     );
 }
 
-/// Proxy-level: ante un error simulado del motor, la política decide Reject
-/// (closed) o Allow (open). Modela el path real del proxy: decode→scan→policy.
+/// Proxy-level: on a simulated engine error, the policy decides Reject
+/// (closed) or Allow (open). Models the real proxy path: decode→scan→policy.
 #[test]
 fn proxy_pipeline_fail_closed_rejects_on_simulated_engine_error() {
-    // Simula: el motor falló (error de compilación/regex/timeout). El proxy
-    // invoca `evaluate(fail_policy, error_msg)` para decidir.
+    // Simulate: the engine failed (compile/regex/timeout error). The proxy
+    // invokes `evaluate(fail_policy, error_msg)` to decide.
     let simulated_error = "engine: regex compile timeout after 2s";
     let decision_closed = evaluate(FailPolicy::Closed, simulated_error);
     assert_eq!(decision_closed, PolicyDecision::Reject);
@@ -134,9 +134,9 @@ fn proxy_pipeline_fail_closed_rejects_on_simulated_engine_error() {
     assert_eq!(decision_open, PolicyDecision::Allow);
 }
 
-/// Fail-closed rechaza ante errores heterogéneos (no sólo engine):
-/// decode, redact, upstream-connect, timeout. La política es agnóstica al
-/// mensaje; lo que importa es el veredicto.
+/// Fail-closed rejects on heterogeneous errors (not only engine):
+/// decode, redact, upstream-connect, timeout. The policy is agnostic to the
+/// message; what matters is the verdict.
 #[test]
 fn fail_closed_rejects_on_heterogeneous_errors() {
     let errors = [
@@ -155,8 +155,9 @@ fn fail_closed_rejects_on_heterogeneous_errors() {
     }
 }
 
-/// Fail-open es consistente: todo error deja pasar (disponibilidad sobre
-/// seguridad — modo opt-in para entornos donde bloquear es peor que fuga).
+/// Fail-open is consistent: every error lets traffic through (availability
+/// over security — opt-in mode for environments where blocking is worse than
+/// a leak).
 #[test]
 fn fail_open_allows_on_heterogeneous_errors() {
     let errors = [

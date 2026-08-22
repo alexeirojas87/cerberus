@@ -51,8 +51,8 @@ else
 fi
 
 # Verify SHA-256 checksum when CERBERUS_SHA256 is set (supply-chain hygiene).
-# La verificación es OBLIGATORIA en despliegues reales: sin ella no hay
-# integridad del artefacto (P1-14).
+# Verification is MANDATORY in real deployments: without it there is no
+# artifact integrity (P1-14).
 if [ -n "${CERBERUS_SHA256:-}" ]; then
   ACTUAL="$( (shasum -a 256 || sha256sum) < "$TMP_DIR/cerberus.tar.gz" | awk '{print $1}' )"
   if [ "$ACTUAL" != "$CERBERUS_SHA256" ]; then
@@ -61,8 +61,8 @@ if [ -n "${CERBERUS_SHA256:-}" ]; then
   fi
   echo "✓ SHA-256 checksum verified"
 else
-  echo "⚠️  CERBERUS_SHA256 no definido: no se puede verificar la integridad del binario." >&2
-  echo "   Exporta CERBERUS_SHA256=$(curl -fsSL "$URL" | shasum -a 256 | awk '{print $1}') para supplies anti-tamper." >&2
+  echo "⚠️  CERBERUS_SHA256 not set: cannot verify binary integrity." >&2
+  echo "   Export CERBERUS_SHA256=$(curl -fsSL "$URL" | shasum -a 256 | awk '{print $1}') for anti-tamper supply chain." >&2
 fi
 
 # Extract

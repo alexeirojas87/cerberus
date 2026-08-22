@@ -6,10 +6,10 @@ InstallerType: zip
 Scope: machine
 InstallerSuccessCodes:
   - 0
-# El pipeline `tools/release/build_release.sh` empaqueta el binario en un
-# `.zip` para Windows (`cerberus-<version>-windows-<arch>.zip`). Un futuro
-# MSI/WiX es opcional y requeriría un ProductCode real (el validador de
-# winget-pkgs rechaza GUIDs fake), por eso hoy se publica el artifact zip.
+# The `tools/release/build_release.sh` pipeline packages the binary in a
+# `.zip` for Windows (`cerberus-<version>-windows-<arch>.zip`). A future
+# MSI/WiX is optional and would require a real ProductCode (the winget-pkgs
+# validator rejects fake GUIDs), which is why the zip artifact is published today.
 UpgradeBehavior: install
 Installers:
   - Architecture: x64

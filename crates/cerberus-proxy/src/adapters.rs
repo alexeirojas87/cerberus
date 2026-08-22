@@ -1,31 +1,30 @@
-//! Schema adapters opcionales (§4.2 del build plan).
+//! Optional schema adapters (§4.2 of the build plan).
 //!
-//! Para proveedores conocidos (`OpenAI`, `Anthropic`), estos adaptadores
-//! acotan el escaneo a los campos de mensajes relevantes, reduciendo
-//! falsos positivos.
+//! For known providers (`OpenAI`, `Anthropic`), these adapters narrow the
+//! scan to the relevant message fields, reducing false positives.
 
 use serde_json::Value;
 
-/// Resultado de aplicar un adaptador.
+/// Result of applying an adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdaptedBody {
-    /// Texto extraído de los campos relevantes.
+    /// Text extracted from the relevant fields.
     pub text: String,
-    /// Nombre del adaptador usado.
+    /// Name of the adapter used.
     pub adapter_name: String,
 }
 
-/// Adaptador de esquema: extrae solo los campos relevantes para escaneo.
+/// Schema adapter: extracts only the fields relevant for scanning.
 pub trait SchemaAdapter: std::fmt::Debug {
-    /// Nombre del adaptador.
+    /// Name of the adapter.
     fn name(&self) -> &'static str;
-    /// Extraer texto relevante del JSON, o `None` si no aplica.
+    /// Extract relevant text from the JSON, or `None` if it does not apply.
     fn extract(&self, json: &Value) -> Option<AdaptedBody>;
 }
 
-/// Adaptador para APIs estilo `OpenAI` (chat completions, messages array).
+/// Adapter for `OpenAI`-style APIs (chat completions, messages array).
 ///
-/// Extrae `messages[].content` y `prompt` para escaneo acotado.
+/// Extracts `messages[].content` and `prompt` for narrowed scanning.
 #[derive(Debug)]
 pub struct OpenAIAdapter;
 
@@ -62,9 +61,9 @@ impl SchemaAdapter for OpenAIAdapter {
     }
 }
 
-/// Adaptador para Anthropic (Claude) API.
+/// Adapter for the Anthropic (Claude) API.
 ///
-/// Extrae `messages[].content` (estilo Anthropic).
+/// Extracts `messages[].content` (Anthropic style).
 #[derive(Debug)]
 pub struct AnthropicAdapter;
 
@@ -95,9 +94,9 @@ impl SchemaAdapter for AnthropicAdapter {
     }
 }
 
-/// Aplicar adaptadores conocidos al JSON.
+/// Apply known adapters to the JSON.
 ///
-/// Devuelve el primer adaptador que matchea, o `None` si ninguno aplica.
+/// Returns the first adapter that matches, or `None` if none applies.
 #[must_use]
 pub fn try_adapt(json: &Value) -> Option<AdaptedBody> {
     let adapters: [&dyn SchemaAdapter; 2] = [&OpenAIAdapter, &AnthropicAdapter];

@@ -1,16 +1,16 @@
-# Evidence Pack — Fase 4 / default-packs
-- Intento: 1    Revisor: Builder    Veredicto: PASS
+# Evidence Pack — Phase 4 / default-packs
+- Attempt: 1    Reviewer: Builder    Verdict: PASS
 
-## Criterios de aceptación
-| Criterio | Comando ejecutado | Salida | Resultado |
+## Acceptance criteria
+| Criterion | Command executed | Output | Result |
 |----------|-------------------|--------|-----------|
 | `cargo test --workspace` | `cargo test --workspace` | 285 passed; 0 failed | ✅ |
-| Default rules parsean correctamente | `test::default_rules_parse_successfully` | >= 8 rules | ✅ |
-| Default rules tienen campos requeridos | `test::default_rules_have_required_fields` | Pass | ✅ |
-| Default rules compilan en engine | `test::default_rules_compile_successfully` | Pass | ✅ |
+| Default rules parse correctly | `test::default_rules_parse_successfully` | >= 8 rules | ✅ |
+| Default rules have required fields | `test::default_rules_have_required_fields` | Pass | ✅ |
+| Default rules compile in the engine | `test::default_rules_compile_successfully` | Pass | ✅ |
 
-## Reglas incluidas
-| Flag | Acción | Categoría |
+## Included rules
+| Flag | Action | Category |
 |------|--------|-----------|
 | secret.openai_api_key | block | secrets |
 | secret.anthropic_api_key | block | secrets |
@@ -23,8 +23,8 @@
 | pii.email_address | warn | pii |
 | pii.phone_number | warn | pii |
 
-## Archivos
-- `crates/cerberus/src/packs.rs` (nuevo)
+## Files
+- `crates/cerberus/src/packs.rs` (new)
 
-## Desviaciones del plan
-Ninguna. Rule packs embebidos en el binario, activos out-of-the-box.
+## Deviations from plan
+None. Rule packs embedded in the binary, active out-of-the-box.

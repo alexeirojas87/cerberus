@@ -1,4 +1,4 @@
-//! Config file types for the Cerberus proxy (§4.6 del build plan).
+//! Config file types for the Cerberus proxy (§4.6 of the build plan).
 //!
 //! Supports YAML/JSON config with upstreams, mode, fail policy, and
 //! rule pack overrides.
@@ -40,27 +40,27 @@ pub struct ProxyConfig {
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: Option<usize>,
 
-    /// Admin token del control plane (P0). Si es `Some` no vacío, TODAS las
-    /// rutas `/api/*` exigen `Authorization: Bearer <token>` o
-    /// `X-Cerberus-Admin-Token: <token>`. Cuando es `None` (dev mode/tests)
-    /// el control plane queda abierto.
+    /// Admin token for the control plane (P0). If it is a non-empty `Some`,
+    /// ALL `/api/*` routes require `Authorization: Bearer <token>` or
+    /// `X-Cerberus-Admin-Token: <token>`. When it is `None` (dev mode/tests)
+    /// the control plane is left open.
     ///
-    /// **Seguridad (review v4 #1):** si el proxy escucha en una interfaz
-    /// NO-loopback (p.ej. `0.0.0.0` en docker), el arranque FALLA si el token
-    /// es `None` o menor a [`crate::api::ADMIN_TOKEN_MIN_BYTES`] (24) bytes.
-    /// En loopback (`127.0.0.1` / `::1`) se permite dev-mode abierto.
+    /// **Security (review v4 #1):** if the proxy listens on a NON-loopback
+    /// interface (e.g. `0.0.0.0` in docker), startup FAILS if the token is
+    /// `None` or shorter than [`crate::api::ADMIN_TOKEN_MIN_BYTES`] (24) bytes.
+    /// On loopback (`127.0.0.1` / `::1`) open dev-mode is allowed.
     #[serde(default)]
     pub admin_token: Option<String>,
 
-    /// Política de detección del operador (fix review v6.1): acción por
-    /// categoría, override por regla, reglas custom con la forma `Rule` del
-    /// MVP y allowlist de falsos positivos.
+    /// Operator detection policy (fix review v6.1): action per category,
+    /// override per rule, custom rules with the MVP `Rule` shape and a
+    /// false-positive allowlist.
     ///
-    /// Vive **aquí** (y por tanto en el YAML) a propósito: antes era un
-    /// overlay en memoria que se perdía al reiniciar y nunca llegaba al motor.
-    /// Ahora el control plane la persiste, el arranque la restaura y
-    /// [`crate::detection_policy::EngineControl`] la publica en el engine vivo
-    /// sin reiniciar. Ver [`crate::detection_policy`].
+    /// It lives **here** (and therefore in the YAML) on purpose: before it
+    /// was an in-memory overlay that was lost on restart and never reached
+    /// the engine. Now the control plane persists it, startup restores it,
+    /// and [`crate::detection_policy::EngineControl`] publishes it into the
+    /// live engine without restarting. See [`crate::detection_policy`].
     #[serde(default)]
     pub policy: crate::detection_policy::DetectionPolicy,
 }
@@ -242,7 +242,7 @@ upstreams:
         assert_eq!(
             cfg.policy,
             crate::detection_policy::DetectionPolicy::seeded(),
-            "un config.yaml legado (sin `policy`) no inventa overrides"
+            "a legacy config.yaml (without `policy`) does not invent overrides"
         );
         assert!(cfg.policy.categories.is_empty());
         assert!(cfg.policy.rule_actions.is_empty());
@@ -250,8 +250,8 @@ upstreams:
 
     #[test]
     fn policy_round_trips_through_the_config_yaml() {
-        // Reglas custom REALES (patrón/flag/category/severity/action/constraints)
-        // + categorías + overrides + allowlist, persistidas en el YAML.
+        // Real custom rules (pattern/flag/category/severity/action/constraints)
+        // + categories + overrides + allowlist, persisted in the YAML.
         let yaml = r#"
 listen: 127.0.0.1:8787
 upstreams:
@@ -298,9 +298,9 @@ policy:
         assert_eq!(rule.allowed_examples, vec!["BADGE-0000".to_string()]);
         assert_eq!(rule.validators, vec!["shannon-entropy>1.0".to_string()]);
         assert_eq!(cfg.policy.allowlist, vec!["sk-EXAMPLE-do-not-flag".to_string()]);
-        cfg.policy.validate().expect("la política del YAML es válida");
+        cfg.policy.validate().expect("the policy from the YAML is valid");
 
-        // …y sobrevive un round-trip de serialización (lo que persiste la API).
+        // …and it survives a serialization round trip (what the API persists).
         let dumped = serde_yaml::to_string(&cfg).expect("serialize config");
         let reloaded = ProxyConfig::parse(&dumped).expect("reparse");
         assert_eq!(reloaded.policy, cfg.policy);

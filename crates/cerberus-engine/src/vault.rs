@@ -1,21 +1,21 @@
-//! Bóveda local reversible (§4.4 del build plan).
+//! Reversible local vault (§4.4 of the build plan).
 //!
-//! Mapea tokens de redacción → valores originales para "des-redactar"
-//! respuestas. Es **opt-in** y **solo local** — por defecto la redacción
-//! es irreversible (más seguro).
+//! Maps redaction tokens → original values to "un-redact" responses. It is
+//! **opt-in** and **local only** — by default redaction is irreversible
+//! (more secure).
 //!
-//! Cuando la redacción reversible está activa, el token de reemplazo
-//! es un identificador único (ej. `[VAULT:a1b2c3d4]`) en lugar del
-//! `[REDACTED:flag]` estándar. La bóveda almacena el mapeo para que
-//! la capa de red pueda restaurar el valor original en la respuesta.
+//! When reversible redaction is active, the replacement token is a unique
+//! identifier (e.g. `[VAULT:a1b2c3d4]`) instead of the standard
+//! `[REDACTED:flag]`. The vault stores the mapping so the network layer
+//! can restore the original value in the response.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Token con el que se reemplazó un valor sensible.
+/// Token that replaced a sensitive value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VaultToken {
-    /// Identificador único del token.
+    /// Unique token identifier.
     pub id: String,
 }
 
@@ -25,21 +25,21 @@ impl std::fmt::Display for VaultToken {
     }
 }
 
-/// Entrada de la bóveda.
+/// A vault entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultEntry {
-    /// Flag de la regla que disparó.
+    /// Flag of the rule that triggered.
     pub flag: String,
-    /// Valor original (el secreto).
+    /// Original value (the secret).
     pub original_value: String,
-    /// Token de reemplazo.
+    /// Replacement token.
     pub token: VaultToken,
 }
 
-/// Bóveda local para redacción reversible.
+/// Local vault for reversible redaction.
 ///
-/// Thread-safe via `Mutex` interno. En un solo hilo (caso típico del
-/// proxy) el overhead del mutex es despreciable.
+/// Thread-safe via an internal `Mutex`. On a single thread (the typical
+/// proxy case) the mutex overhead is negligible.
 #[derive(Debug)]
 pub struct Vault {
     inner: Mutex<VaultInner>,
@@ -58,7 +58,7 @@ impl Default for Vault {
 }
 
 impl Vault {
-    /// Crear una bóveda vacía.
+    /// Create an empty vault.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -69,10 +69,10 @@ impl Vault {
         }
     }
 
-    /// Almacenar un valor y devolver su token.
+    /// Store a value and return its token.
     ///
-    /// El token generado tiene el formato `v<N>` donde `N` es un
-    /// contador monótono.
+    /// The generated token has the form `v<N>` where `N` is a
+    /// monotonically increasing counter.
     #[must_use]
     pub fn store(&self, flag: &str, original_value: &str) -> VaultToken {
         let mut inner = self.inner.lock().expect("vault lock poisoned");
@@ -90,50 +90,50 @@ impl Vault {
         token
     }
 
-    /// Recuperar el valor original a partir de un token.
+    /// Recover the original value from a token.
     #[must_use]
     pub fn resolve(&self, token: &VaultToken) -> Option<VaultEntry> {
         let inner = self.inner.lock().expect("vault lock poisoned");
         inner.entries.get(&token.id).cloned()
     }
 
-    /// Recuperar el valor original a partir de una string de token
-    /// (ej. extraída del texto redactado).
+    /// Recover the original value from a token string
+    /// (e.g. extracted from the redacted text).
     #[must_use]
     pub fn resolve_str(&self, token_str: &str) -> Option<VaultEntry> {
         let stripped = token_str
             .strip_prefix("[VAULT:")
             .and_then(|s| s.strip_suffix(']'))
             .unwrap_or(token_str);
-        // También soporta el id directo (sin wrapper)
+        // Also supports the direct id (without wrapper)
         let inner = self.inner.lock().expect("vault lock poisoned");
         inner.entries.get(stripped).cloned()
     }
 
-    /// Cantidad de entradas en la bóveda.
+    /// Number of entries in the vault.
     #[must_use]
     pub fn len(&self) -> usize {
         let inner = self.inner.lock().expect("vault lock poisoned");
         inner.entries.len()
     }
 
-    /// ¿Está vacía?
+    /// Is it empty?
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Limpiar todas las entradas.
+    /// Clear all entries.
     pub fn clear(&self) {
         let mut inner = self.inner.lock().expect("vault lock poisoned");
         inner.entries.clear();
     }
 }
 
-/// Opciones para habilitar redacción reversible.
+/// Options to enable reversible redaction.
 #[derive(Debug, Clone, Default)]
 pub struct ReversibleOptions {
-    /// Si es `true`, se usa la bóveda en lugar de la redacción estándar.
+    /// If `true`, the vault is used instead of standard redaction.
     pub enabled: bool,
 }
 

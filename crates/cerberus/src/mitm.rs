@@ -1,8 +1,8 @@
-//! Gestión explícita del forward proxy + CA local opt-in (F4/mitm-opt-in).
+//! Explicit management of the opt-in forward proxy + local CA (F4/mitm-opt-in).
 //!
-//! Generar la CA, habilitar el listener y confiar el certificado son acciones
-//! separadas. Cerberus sólo implementa las dos primeras; jamás modifica el
-//! trust store del sistema.
+//! Generating the CA, enabling the listener, and trusting the certificate are
+//! separate actions. Cerberus only implements the first two; it never
+//! modifies the system trust store.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_MITM_LISTEN: &str = "127.0.0.1:8788";
 
-/// Configuración persistida del modo avanzado. Ausencia del archivo equivale
-/// inequívocamente a `enabled = false`.
+/// Persisted config of the advanced mode. Absence of the file unambiguously
+/// means `enabled = false`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct MitmConfig {
@@ -36,17 +36,17 @@ impl Default for MitmConfig {
     }
 }
 
-/// Ruta al directorio de certificados CA.
+/// Path to the CA certificates directory.
 pub(crate) fn ca_dir() -> PathBuf {
     crate::daemon::config_dir().join("ca")
 }
 
-/// Ruta al certificado CA público.
+/// Path to the public CA certificate.
 pub(crate) fn ca_cert_path() -> PathBuf {
     ca_dir().join("cerberus-ca.cert")
 }
 
-/// Ruta a la clave privada CA.
+/// Path to the CA private key.
 pub(crate) fn ca_key_path() -> PathBuf {
     ca_dir().join("cerberus-ca.key")
 }
@@ -62,8 +62,8 @@ fn config_path() -> PathBuf {
     crate::daemon::config_dir().join("mitm.json")
 }
 
-/// Carga y valida el opt-in efectivo que consume el daemon. Una CA existente
-/// por sí sola nunca habilita el listener.
+/// Loads and validates the effective opt-in consumed by the daemon. An
+/// existing CA alone never enables the listener.
 pub(crate) fn runtime_config() -> Result<Option<ForwardProxyConfig>, String> {
     runtime_config_from(&config_path(), ca_paths())
 }
@@ -81,21 +81,21 @@ fn runtime_config_from(path: &Path, ca: CaPaths) -> Result<Option<ForwardProxyCo
     ForwardProxyConfig::new(listen, &config.hosts, ca).map(Some)
 }
 
-/// Genera la CA tras una acción CLI explícita. No la confía ni ejecuta
-/// herramientas privilegiadas.
+/// Generates the CA after an explicit CLI action. It does not trust it nor
+/// run privileged tools.
 pub(crate) fn init_ca() -> Result<String, String> {
     let paths = ca_paths();
     generate_local_ca(&paths)?;
     Ok(format!(
-        "CA local generada (NO confiada)\n  Certificado: {}\n  Clave privada: {}\n\n{}",
+        "Local CA generated (NOT trusted)\n  Certificate: {}\n  Private key: {}\n\n{}",
         paths.cert.display(),
         paths.key.display(),
         trust_instructions()
     ))
 }
 
-/// Activa el listener para hosts exactos, después de comprobar que la CA fue
-/// generada explícitamente. No arranca el daemon ni toca el trust store.
+/// Enables the listener for exact hosts, after checking that the CA was
+/// explicitly generated. Does not start the daemon nor touch the trust store.
 pub(crate) fn enable(hosts: &[String], listen: &str) -> Result<String, String> {
     validate_ca_files(&ca_paths())
         .map_err(|error| format!("CA not ready ({error}); run `cerberus mitm init-ca` explicitly first"))?;
@@ -109,7 +109,7 @@ pub(crate) fn enable(hosts: &[String], listen: &str) -> Result<String, String> {
     };
     save_config_to(&config_path(), &config)?;
     Ok(format!(
-        "MITM opt-in habilitado en {} para [{}].\nConfig persistida en {} — efectiva en el próximo arranque de Cerberus.\nConfigura HTTPS_PROXY=http://{} sólo en la tool elegida.",
+        "MITM opt-in enabled on {} for [{}].\nConfig persisted at {} — effective on the next Cerberus boot.\nSet HTTPS_PROXY=http://{} only on the chosen tool.",
         config.listen,
         hosts.join(", "),
         config_path().display(),
@@ -117,22 +117,22 @@ pub(crate) fn enable(hosts: &[String], listen: &str) -> Result<String, String> {
     ))
 }
 
-/// Desactiva el listener sin borrar la CA (una acción destructiva distinta).
+/// Disables the listener without deleting the CA (a distinct destructive action).
 pub(crate) fn disable() -> Result<String, String> {
     let mut config = load_config_from(&config_path())?;
     config.enabled = false;
     save_config_to(&config_path(), &config)?;
     Ok(format!(
-        "MITM deshabilitado; el reverse proxy sigue siendo el modo default.\nConfig persistida en {} — efectiva en el próximo arranque.",
+        "MITM disabled; the reverse proxy remains the default mode.\nConfig persisted at {} — effective on the next boot.",
         config_path().display()
     ))
 }
 
-/// F4 (MITM conectado al daemon): aplicar `enable` teniendo en cuenta si el
-/// daemon está en marcha. La config se persiste SIEMPRE (efectiva al arrancar),
-/// y si el daemon vive se adjunta la nota de reinicio: no existe un `/api/mitm`
-/// en caliente (el control plane es de otro agente), así que el cambio aplica
-/// solo tras `cerberus stop && cerberus start`.
+/// F4 (MITM connected to the daemon): apply `enable` taking into account
+/// whether the daemon is running. The config is ALWAYS persisted (effective
+/// at boot), and if the daemon is live the restart note is attached: there is
+/// no `/api/mitm` at runtime (the control plane is another agent's), so the
+/// change applies only after `cerberus stop && cerberus start`.
 pub(crate) fn enable_with_daemon_state(hosts: &[String], listen: &str, daemon_running: bool) -> Result<String, String> {
     let mut msg = enable(hosts, listen)?;
     if daemon_running {
@@ -141,7 +141,7 @@ pub(crate) fn enable_with_daemon_state(hosts: &[String], listen: &str, daemon_ru
     Ok(msg)
 }
 
-/// Igual que [`Self::enable_with_daemon_state`] para `disable`.
+/// Same as [`Self::enable_with_daemon_state`] for `disable`.
 pub(crate) fn disable_with_daemon_state(daemon_running: bool) -> Result<String, String> {
     let mut msg = disable()?;
     if daemon_running {
@@ -150,23 +150,23 @@ pub(crate) fn disable_with_daemon_state(daemon_running: bool) -> Result<String, 
     Ok(msg)
 }
 
-/// Nota para cuando el daemon YA está en marcha: el listener MITM se lee solo
-/// en el arranque y no hay endpoint de control para cambiarlo en caliente.
+/// Note for when the daemon IS already running: the MITM listener is read
+/// only at boot and there is no control endpoint to change it at runtime.
 #[must_use]
 fn daemon_restart_note() -> String {
     format!(
-        "\nAVISO: el daemon actual está en marcha y NO aplica cambios de MITM en caliente.\n  Edita {} y reinicia: cerberus stop && cerberus start",
+        "\nNOTICE: the current daemon is running and does NOT apply MITM changes at runtime.\n  Edit {} and restart: cerberus stop && cerberus start",
         config_path().display()
     )
 }
 
-/// Resumen seguro: nunca imprime contenido de claves ni configura confianza.
+/// Safe summary: never prints key contents nor sets up trust.
 #[must_use]
 pub(crate) fn status() -> String {
     let path = config_path();
     let config = match load_config_from(&path) {
         Ok(config) => config,
-        Err(error) => return format!("MITM: configuración inválida ({error})"),
+        Err(error) => return format!("MITM: invalid config ({error})"),
     };
     let ca = match validate_ca_files(&ca_paths()) {
         Ok(()) => "ready (not automatically trusted)".to_string(),
@@ -194,8 +194,8 @@ fn load_config_from(path: &Path) -> Result<MitmConfig, String> {
     }
     let raw = fs::read_to_string(path).map_err(|e| format!("cannot read MITM config: {e}"))?;
     let mut config: MitmConfig = serde_json::from_str(&raw).map_err(|e| format!("invalid MITM config: {e}"))?;
-    // Un archivo explícitamente deshabilitado no puede impedir el arranque
-    // del reverse proxy. Sus campos inertes se saneean sólo para status/edición.
+    // An explicitly disabled file cannot prevent the reverse proxy from
+    // booting. Its inert fields are sanitized only for status/editing.
     if !config.enabled {
         config.hosts = normalize_allowed_hosts(&config.hosts).unwrap_or_default();
         config.listen = config
@@ -254,29 +254,29 @@ fn create_private_file(path: &Path) -> Result<File, String> {
         .map_err(|e| format!("cannot create MITM config temp file: {e}"))
 }
 
-/// Sólo devuelve instrucciones: no ejecuta `sudo`, `security`, `certutil` ni
-/// modifica almacenes de confianza.
+/// Only returns instructions: it does not run `sudo`, `security`, `certutil`
+/// nor modifies trust stores.
 #[must_use]
 pub(crate) fn trust_instructions() -> String {
     let cert = ca_cert_path();
     #[cfg(target_os = "macos")]
     return format!(
-        "Acción manual opcional para confiar en macOS:\n  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+        "Optional manual action to trust on macOS:\n  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
         cert.display()
     );
     #[cfg(target_os = "linux")]
     return format!(
-        "Acción manual opcional para confiar en Linux:\n  sudo cp {} /usr/local/share/ca-certificates/cerberus-ca.crt\n  sudo update-ca-certificates",
+        "Optional manual action to trust on Linux:\n  sudo cp {} /usr/local/share/ca-certificates/cerberus-ca.crt\n  sudo update-ca-certificates",
         cert.display()
     );
     #[cfg(target_os = "windows")]
     return format!(
-        "Acción manual opcional para confiar en Windows (PowerShell elevado):\n  certutil -addstore Root \"{}\"",
+        "Optional manual action to trust on Windows (elevated PowerShell):\n  certutil -addstore Root \"{}\"",
         cert.display()
     );
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     format!(
-        "Confía manualmente en {} sólo si aceptas el riesgo MITM.",
+        "Manually trust {} only if you accept the MITM risk.",
         cert.display()
     )
 }
@@ -351,12 +351,12 @@ mod tests {
         assert!(instructions.contains(&ca_cert_path().display().to_string()));
     }
 
-    // ─── F4: MITM conectado al daemon ──────────────────────────────────────
+    // ─── F4: MITM connected to the daemon ──────────────────────────────────────
 
-    /// Serializa los tests que mutan `HOME` (proceso global).
+    /// Serializes tests that mutate `HOME` (process-global).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// HOME aislado para probar el flujo contra un config real de usuario.
+    /// Isolated HOME to test the flow against a real user config.
     fn temp_home(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "cerberus-mitm-daemon-{tag}-{}",
@@ -375,15 +375,15 @@ mod tests {
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &home);
         let dir_error = enable_with_daemon_state(&["api.openai.com".to_string()], "127.0.0.1:8788", false)
-            .expect_err("CA ausente debe fallar ANTES de tocar config");
+            .expect_err("missing CA must fail BEFORE touching config");
         assert!(dir_error.contains("CA not ready"), "{dir_error}");
 
-        init_ca().expect("init CA en HOME aislado");
+        init_ca().expect("init CA in isolated HOME");
         let msg = enable_with_daemon_state(&["api.openai.com".to_string()], "127.0.0.1:8788", false)
-            .expect("enable sin daemon");
-        assert!(msg.contains("Config persistida"), "{msg}");
-        assert!(!msg.contains("AVISO"), "sin daemon no debe advertir reinicio: {msg}");
-        let saved = load_config_from(&config_path()).expect("config escrita");
+            .expect("enable without daemon");
+        assert!(msg.contains("Config persisted"), "{msg}");
+        assert!(!msg.contains("NOTICE"), "without daemon must not warn about restart: {msg}");
+        let saved = load_config_from(&config_path()).expect("config written");
         assert!(saved.enabled);
         assert_eq!(saved.hosts, vec!["api.openai.com".to_string()]);
         assert!(saved.listen.contains("8788"));
@@ -442,7 +442,7 @@ mod tests {
         std::env::set_var("HOME", &home);
         init_ca().expect("init CA");
 
-        // "Daemon en marcha": pid file con el proceso actual vivo.
+        // "Daemon running": pid file with the current live process.
         crate::daemon::config_dir();
         std::fs::write(
             crate::daemon::config_dir().join("cerberus.pid"),
@@ -452,17 +452,17 @@ mod tests {
 
         if crate::daemon::is_running() {
             let msg = enable_with_daemon_state(&["api.openai.com".to_string()], "127.0.0.1:8788", true)
-                .expect("enable con daemon");
-            assert!(msg.contains("AVISO"), "debe avisar del reinicio: {msg}");
+                .expect("enable with daemon");
+            assert!(msg.contains("NOTICE"), "must warn about restart: {msg}");
             assert!(msg.contains("cerberus stop && cerberus start"), "{msg}");
             let saved = load_config_from(&config_path()).expect("config");
-            assert!(saved.enabled, "la config se persiste para el próximo arranque");
+            assert!(saved.enabled, "the config is persisted for the next boot");
         }
 
-        // `disable` con daemon también lleva la nota de reinicio.
+        // `disable` with daemon also carries the restart note.
         if crate::daemon::is_running() {
-            let msg = disable_with_daemon_state(true).expect("disable con daemon");
-            assert!(msg.contains("AVISO"), "{msg}");
+            let msg = disable_with_daemon_state(true).expect("disable with daemon");
+            assert!(msg.contains("NOTICE"), "{msg}");
             let saved = load_config_from(&config_path()).expect("config");
             assert!(!saved.enabled);
         }
