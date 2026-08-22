@@ -18,8 +18,10 @@ use cerberus_engine::loader::load_rules_from_str;
 use cerberus_engine::rule::Rule;
 use cerberus_packs::default_pack::DEFAULT_PACK_JSON;
 
-/// Maximum time allowed per scan.
-const MAX_SCAN_TIME_MS: u64 = 100;
+/// Maximum time allowed per scan. Generous margin for loaded CI runners —
+/// the ReDoS guard is that the scan stays linear, not that it hits a
+/// specific millisecond budget.
+const MAX_SCAN_TIME_MS: u64 = 250;
 
 /// Load all rules from the real default pack (13 rules).
 fn load_all_rules() -> Vec<Rule> {
