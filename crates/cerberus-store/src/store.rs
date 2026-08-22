@@ -373,7 +373,8 @@ impl AuditStore {
     /// [`Self::dropped_events`] — a slow disk cannot grow memory unbounded
     /// (fix review v5 #4). To guarantee durability (e.g. before shutdown),
     /// call [`Self::flush`] afterwards.
-    #[allow(clippy::unused_async)]
+    #[allow(unknown_lints)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn write_event_async(&self, event: AuditEvent) -> WriteOutcome {
         // Register an in-flight write BEFORE looking at the state, with
         // `SeqCst` ordering on both sides: either this writer sees that the
