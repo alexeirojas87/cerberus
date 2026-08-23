@@ -1,10 +1,16 @@
 name: release
 
 # Release pipeline — F8 (cross-platform installers).
-# Triggers on every push to main (prerelease with tag v<version>-ci.<sha>)
-# and via workflow_dispatch (draft).
 #
-#   build (matrix 5 targets): compiles cerberus --release and prepares artifacts
+# Every push to main:
+#   1. Bumps the patch version in Cargo.toml (0.1.0 → 0.1.1 → 0.1.2 → ...)
+#   2. Commits the bump back to main
+#   3. Builds 4 targets (linux x86_64, linux aarch64, macOS aarch64, Windows x86_64)
+#   4. Creates a GitHub release (NOT a prerelease) with tag v<version>
+#
+# Manual workflow_dispatch: same flow, can be used to force a release.
+#
+#   build (matrix 4 targets): compiles cerberus --release and prepares artifacts
 #                             with the SAME naming scheme used by install.sh,
 #                             the Homebrew formula and the winget manifest:
 #                               cerberus-<version>-<os>-<arch>.tar.gz|.zip
@@ -39,9 +45,46 @@ defaults:
     shell: bash
 
 jobs:
+  bump:
+    name: bump version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          # Read current version from Cargo.toml
+          OLD_VER="$(sed -nE 's/^version = "([^"]+)"/\1/p' crates/cerberus/Cargo.toml | head -1)"
+          # Bump patch (0.1.0 → 0.1.1, 1.2.3 → 1.2.4)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VER"
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VER="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          # Update Cargo.toml
+          sed -i -E "s/^version = \"[^\"]+\"/version = \"${NEW_VER}\"/" crates/cerberus/Cargo.toml
+          # Update Cargo.lock
+          cargo update -p cerberus --precise "${NEW_VER}" 2>/dev/null || true
+          echo "version=${NEW_VER}" >> "$GITHUB_OUTPUT"
+          echo "Bumped $OLD_VER → $NEW_VER"
+
+      - name: Commit and push bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/cerberus/Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.version }} [skip ci]"
+          git push
+
   build:
     name: build (${{ matrix.os_name }} / ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
+    needs: [bump]
     strategy:
       fail-fast: false
       matrix:
@@ -68,6 +111,8 @@ jobs:
             ext: zip
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -168,28 +213,27 @@ jobs:
   # ── GitHub Release publishing ─────────────────────────────────────────
   release:
     name: release
-    needs: [build]
+    needs: [bump, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Read version
+        id: ver
+        run: |
+          VER="$(sed -nE 's/^version = "([^"]+)"/\1/p' crates/cerberus/Cargo.toml | head -1)"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Collect all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
           merge-multiple: true
-
-      - name: Version and tag
-        id: ver
-        run: |
-          VER="$(sed -nE 's/^version = "([^"]+)"/\1/p' crates/cerberus/Cargo.toml | head -1)"
-          SHA="$(git rev-parse --short HEAD)"
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-          # Each push to main = prerelease with a unique tag based on SHA.
-          # Manual v* tags still create stable releases.
-          echo "tag=v${VER}-ci.${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Global SHA256SUMS
         run: |
@@ -200,7 +244,7 @@ jobs:
 
       - name: Create GitHub release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           artefacts=()
           for f in artifacts/*.tar.gz artifacts/*.zip artifacts/*.msi; do
@@ -209,13 +253,27 @@ jobs:
           gh release create "${{ steps.ver.outputs.tag }}" \
             "${artefacts[@]}" \
             artifacts/SHA256SUMS \
-            --title "Cerberus ${{ steps.ver.outputs.version }} (CI build ${{ github.sha }})" \
-            --notes "Automated release from push to main.
+            --title "Cerberus ${{ steps.ver.outputs.version }}" \
+            --notes "## Cerberus ${{ steps.ver.outputs.version }}
 
-          Artifacts:
-          - macOS/Linux: cerberus-<v>-macos|linux-{x86_64,aarch64}.tar.gz
-          - Windows: cerberus-<v>-windows-x86_64.zip
-          - SHA256SUMS attached for download integrity.
+          ### Artifacts
 
-          Without signing credentials in CI, binaries are published unsigned." \
-            --prerelease
+          | Platform | File |
+          |----------|------|
+          | Linux x86_64 | \`cerberus-${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz\` |
+          | Linux aarch64 | \`cerberus-${{ steps.ver.outputs.version }}-linux-aarch64.tar.gz\` |
+          | macOS aarch64 | \`cerberus-${{ steps.ver.outputs.version }}-macos-aarch64.tar.gz\` |
+          | Windows x86_64 | \`cerberus-${{ steps.ver.outputs.version }}-windows-x86_64.zip\` |
+
+          SHA256SUMS attached for download integrity verification.
+
+          ### Install
+
+          \`\`\`bash
+          # macOS / Linux
+          curl -fsSL https://raw.githubusercontent.com/alexeirojas87/cerberus/main/install.sh | sh
+
+          # Or download the artifact for your platform and extract cerberus
+          \`\`\`
+
+          Without signing credentials in CI, binaries are published unsigned."
