@@ -19,7 +19,12 @@ use std::time::{Duration, Instant};
 pub(crate) fn config_dir() -> PathBuf {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        dirs::home_dir().map_or_else(|| PathBuf::from("/tmp/cerberus"), |p| p.join(".cerberus"))
+        // Use $HOME directly (not dirs::home_dir) so that tests that set HOME
+        // to an isolated temp dir are not affected by getpwuid_r lookups that
+        // may resolve to the real user's home on CI runners.
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_or_else(|_| PathBuf::from("/tmp/cerberus"), |p| p.join(".cerberus"))
     }
     #[cfg(target_os = "windows")]
     {

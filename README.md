@@ -126,7 +126,7 @@ The `--chain` flag rewrites all upstreams to forward to the specified URL. Witho
 ### macOS (Homebrew)
 
 ```bash
-brew install cerberus
+brew install alexeirojas87/cerberus/cerberus
 ```
 
 ### Linux / macOS (install script)
@@ -135,13 +135,9 @@ brew install cerberus
 curl -fsSL https://raw.githubusercontent.com/alexeirojas87/cerberus/main/install.sh | sh
 ```
 
-### Windows (winget)
+### Windows
 
-```powershell
-winget install cerberus
-```
-
-Alternatively, download the `.zip` from the [releases page](https://github.com/alexeirojas87/cerberus/releases), verify the SHA256 against `SHA256SUMS`, and extract `cerberus.exe` to a directory on your `PATH`.
+Download the `.zip` from the [releases page](https://github.com/alexeirojas87/cerberus/releases), verify the SHA256 against `SHA256SUMS`, and extract `cerberus.exe` to a directory on your `PATH`.
 
 ### Docker
 
