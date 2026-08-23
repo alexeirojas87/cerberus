@@ -56,11 +56,6 @@ jobs:
             os_name: linux
             arch: aarch64
             ext: tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            os_name: macos
-            arch: x86_64
-            ext: tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
             os_name: macos
