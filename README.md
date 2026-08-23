@@ -22,7 +22,7 @@ Cerberus includes a built-in web dashboard for managing the proxy without CLI co
 
 ### Settings
 
-![Dashboard — Settings](docs/screenshots/dashboard-settings.png)
+![Dashboard — Settings](docs/screenshots/dashboard-config.png)
 
 ### Upstreams
 

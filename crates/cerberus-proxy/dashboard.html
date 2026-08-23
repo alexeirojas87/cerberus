@@ -417,6 +417,8 @@ input[type="password"] { width: 100%; max-width: 320px; }
   z-index: 100;
 }
 
+.auth-overlay[hidden] { display: none; }
+
 .auth-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -938,13 +940,18 @@ function saveToken() {
 }
 
 // ── Fetch helpers ────────────────────────────────────────────────
+// When no admin_token is configured on the server (the default for a
+// local-only bind on 127.0.0.1), the API works without auth. We try
+// without a token first; if the server responds 401, we show the auth
+// overlay so the user can paste their token.
 async function fetchJson(url) {
   const tok = getToken();
-  if (!tok) { showAuth(); throw new Error('no token'); }
-  const resp = await fetch(url, { headers: { 'X-Cerberus-Admin-Token': tok } });
+  const headers = {};
+  if (tok) headers['X-Cerberus-Admin-Token'] = tok;
+  const resp = await fetch(url, { headers });
   if (resp.status === 401) {
     if (window.localStorage) localStorage.removeItem(TOKEN_KEY);
-    showAuth('Token invalid or expired. Please enter it again.');
+    showAuth('This server requires an admin token. Enter it below.');
     throw new Error('unauthorized');
   }
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -952,14 +959,13 @@ async function fetchJson(url) {
 }
 
 async function sendJson(method, url, payload) {
-  const resp = await fetch(url, {
-    method,
-    headers: { 'content-type': 'application/json', 'X-Cerberus-Admin-Token': getToken() },
-    body: JSON.stringify(payload)
-  });
+  const tok = getToken();
+  const headers = { 'content-type': 'application/json' };
+  if (tok) headers['X-Cerberus-Admin-Token'] = tok;
+  const resp = await fetch(url, { method, headers, body: JSON.stringify(payload) });
   if (resp.status === 401) {
     if (window.localStorage) localStorage.removeItem(TOKEN_KEY);
-    showAuth('Token invalid or expired.');
+    showAuth('This server requires an admin token.');
     return null;
   }
   return resp;
@@ -1007,6 +1013,9 @@ let activeTab = 'overview';
 
 function switchTab(tab) {
   activeTab = tab;
+  if (location.hash !== '#' + tab) {
+    history.replaceState(null, '', '#' + tab);
+  }
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   const content = document.getElementById('tab-' + tab);
@@ -1046,7 +1055,6 @@ function clearProviderFilter() {
 
 // ── Data loading ──────────────────────────────────────────────────
 async function loadData() {
-  if (!getToken()) { showAuth(); return; }
   hideAuth();
   try {
     const q = providerQuery();
@@ -1060,7 +1068,7 @@ async function loadData() {
     renderStats(stats);
     renderProviderFilter(stats);
   } catch (err) {
-    if (!getToken()) { showAuth(); return; }
+    if (err.message === 'unauthorized') return;
     const ov = document.getElementById('overview-stats');
     if (ov) { ov.replaceChildren(); const e = el('div', 'error'); e.textContent = 'Error: ' + (err.message || err); ov.appendChild(e); }
   }
@@ -1616,7 +1624,12 @@ if (tokenInput) {
   tokenInput.addEventListener('keydown', ev => { if (ev.key === 'Enter') saveToken(); });
 }
 
-// Init
+// Init: read the initial tab from the URL hash (enables direct linking).
+const validTabs = ['overview', 'events', 'stats', 'config', 'upstreams', 'policy', 'packs', 'docs'];
+const initialTab = location.hash ? location.hash.slice(1) : 'overview';
+if (validTabs.includes(initialTab)) {
+  switchTab(initialTab);
+}
 fillActionSelect('cat-action');
 fillActionSelect('rule-action');
 loadData();
