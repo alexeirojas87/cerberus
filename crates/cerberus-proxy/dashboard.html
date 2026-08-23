@@ -406,6 +406,22 @@ input[type="password"] { width: 100%; max-width: 320px; }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 
+.tab-desc {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin-bottom: 14px;
+}
+.tab-desc code {
+  font-family: var(--font-mono);
+  background: var(--surface);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  color: var(--accent);
+}
+.tab-desc strong { color: var(--text); font-weight: 600; }
+
 /* ── Auth card ────────────────────────────────────────────────── */
 .auth-overlay {
   position: fixed;
@@ -611,14 +627,21 @@ input[type="password"] { width: 100%; max-width: 320px; }
 
     <!-- ── Overview tab ─────────────────────────────────────── -->
     <div class="tab-content active" id="tab-overview">
-      <div class="stat-grid" id="overview-stats"></div>
+      <div class="card">
+        <div class="card-title">Summary</div>
+        <p class="tab-desc">Real-time overview of the proxy. Stats cards show aggregate counts across all providers. Quick controls let you switch between enforce and shadow mode, and between fail-closed and fail-open, without restarting the daemon.</p>
+        <div class="stat-grid" id="overview-stats"></div>
+      </div>
 
       <div class="card">
         <div class="card-title">Quick Controls</div>
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Operation Mode</div>
-            <div class="toggle-desc">Enforce blocks/redacts; Shadow logs only</div>
+            <div class="toggle-desc">
+              <strong>Enforce:</strong> blocks and redacts requests containing secrets/PII.
+              <strong>Shadow:</strong> logs findings without blocking (for testing).
+            </div>
           </div>
           <div class="toggle-group" id="mode-toggle">
             <button class="toggle-opt active" data-mode="enforce" type="button">Enforce</button>
@@ -628,7 +651,10 @@ input[type="password"] { width: 100%; max-width: 320px; }
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Fail Policy</div>
-            <div class="toggle-desc">Closed rejects on engine error; Open lets traffic pass</div>
+            <div class="toggle-desc">
+              <strong>Closed:</strong> if the detection engine fails, the request is rejected (no leak).
+              <strong>Open:</strong> if the engine fails, the request passes through (availability over safety).
+            </div>
           </div>
           <div class="toggle-group" id="failpolicy-toggle">
             <button class="toggle-opt active" data-failpolicy="closed" type="button">Closed</button>
@@ -638,7 +664,8 @@ input[type="password"] { width: 100%; max-width: 320px; }
       </div>
 
       <div class="card">
-        <div class="card-title">Recent Events</div>
+        <div class="card-title">Recent Events (last 10)</div>
+        <p class="tab-desc">Audit events recorded by the proxy. Each event shows the timestamp, provider, action taken, and detection flags. Raw secret values are never stored or displayed — only SHA-256 hashes.</p>
         <div id="overview-events"><div class="loading">Loading...</div></div>
       </div>
     </div>
@@ -647,6 +674,7 @@ input[type="password"] { width: 100%; max-width: 320px; }
     <div class="tab-content" id="tab-events">
       <div class="card">
         <div class="card-title">Event Filter</div>
+        <p class="tab-desc">Filter audit events by provider. The provider field is derived from the upstream path (e.g. <code>/openai/</code> maps to <code>openai</code>).</p>
         <div class="form-row">
           <label>Provider</label>
           <select id="provider-filter"></select>
@@ -656,19 +684,26 @@ input[type="password"] { width: 100%; max-width: 320px; }
       </div>
       <div class="card">
         <div class="card-title">Audit Events</div>
+        <p class="tab-desc">Each row is one scanned request. Columns: <strong>Timestamp</strong> (when the event was recorded), <strong>Tool</strong> (the agent or client that sent the request), <strong>Provider</strong> (the upstream LLM API), <strong>Action</strong> (what the proxy did), <strong>Flags</strong> (which detection rules fired). Raw values are never shown — only flags and hashes.</p>
         <div id="events-table"><div class="loading">Loading...</div></div>
       </div>
     </div>
 
     <!-- ── Statistics tab ───────────────────────────────────── -->
     <div class="tab-content" id="tab-stats">
-      <div class="stat-grid" id="stats-cards"></div>
+      <div class="card">
+        <div class="card-title">Aggregate Statistics</div>
+        <p class="tab-desc">Counts across all audit events. <strong>Total Events</strong> is the number of scanned requests. <strong>Providers</strong> is the number of distinct upstreams. <strong>Tools</strong> is the number of distinct client agents. <strong>Flags</strong> is the number of distinct detection rules that fired.</p>
+        <div class="stat-grid" id="stats-cards"></div>
+      </div>
       <div class="card">
         <div class="card-title">By Provider</div>
+        <p class="tab-desc">Event count broken down by upstream provider, with the action distribution (block / redact / warn / allow) for each.</p>
         <div id="stats-provider"><div class="loading">Loading...</div></div>
       </div>
       <div class="card">
         <div class="card-title">Top Flags</div>
+        <p class="tab-desc">The most frequently triggered detection rules across all events. Each flag corresponds to a rule in the active pack (e.g. <code>secret.openai_api_key</code>, <code>pii.email_address</code>).</p>
         <div id="stats-flags"><div class="loading">Loading...</div></div>
       </div>
     </div>
@@ -677,10 +712,12 @@ input[type="password"] { width: 100%; max-width: 320px; }
     <div class="tab-content" id="tab-config">
       <div class="card">
         <div class="card-title">Current Configuration</div>
+        <p class="tab-desc">The live configuration loaded by the daemon. Changes via the form below are applied immediately (hot-swap) unless <code>listen</code> changes, which requires a restart.</p>
         <div id="config-view"><div class="loading">Loading...</div></div>
       </div>
       <div class="card">
         <div class="card-title">Edit Configuration</div>
+        <p class="tab-desc">Each field accepts specific values. Fields with a dropdown (<code>select</code>) only accept the listed values — free text is not allowed to prevent typos.</p>
         <div id="config-edit"></div>
         <div class="msg" id="config-msg"></div>
       </div>
@@ -690,14 +727,25 @@ input[type="password"] { width: 100%; max-width: 320px; }
     <div class="tab-content" id="tab-upstreams">
       <div class="card">
         <div class="card-title">Configured Upstreams</div>
+        <p class="tab-desc">Each upstream is a provider backend. The proxy matches the request path prefix (e.g. <code>/openai/</code>) to the upstream name and forwards to its URL.</p>
         <div id="upstreams-view"><div class="loading">Loading...</div></div>
       </div>
       <div class="card">
         <div class="card-title">Add / Update Upstream</div>
+        <p class="tab-desc">
+          <strong>Name:</strong> identifier used in the request path (e.g. <code>openai</code> → <code>/openai/*</code>).
+          <strong>URL:</strong> the provider's base URL (must start with <code>https://</code>).
+          <strong>Auth header:</strong> which HTTP header carries the API key — most providers use <code>authorization</code> (Bearer), but some like Anthropic use <code>x-api-key</code>.
+        </p>
         <div class="form-row">
           <label>Name</label><input type="text" id="up-name" placeholder="openai">
           <label>URL</label><input type="text" id="up-url" placeholder="https://api.openai.com">
-          <label>Auth header</label><input type="text" id="up-auth" placeholder="authorization">
+          <label>Auth header</label>
+          <select id="up-auth">
+            <option value="authorization">authorization (Bearer)</option>
+            <option value="x-api-key">x-api-key (Anthropic)</option>
+            <option value="api-key">api-key</option>
+          </select>
           <button class="primary sm" id="btn-add-upstream" type="button">Save</button>
         </div>
         <div class="msg" id="upstream-msg"></div>
@@ -708,18 +756,25 @@ input[type="password"] { width: 100%; max-width: 320px; }
     <div class="tab-content" id="tab-policy">
       <div class="card">
         <div class="card-title">Category Actions</div>
+        <p class="tab-desc">Override the default action for an entire category. Categories are: <code>secrets</code> (API keys, tokens, PEM keys), <code>pii</code> (emails, phone numbers), <code>internal_code</code> (internal references). The action can be <code>block</code> (reject the request), <code>redact</code> (replace the value), <code>warn</code> (log but pass through), or <code>allow</code> (skip detection).</p>
         <div id="categories-view"><div class="loading">Loading...</div></div>
       </div>
       <div class="card">
         <div class="card-title">Set Category Action</div>
         <div class="form-row">
-          <label>Category</label><input type="text" id="cat-name" placeholder="secrets">
+          <label>Category</label>
+          <select id="cat-name">
+            <option value="secrets">secrets</option>
+            <option value="pii">pii</option>
+            <option value="internal_code">internal_code</option>
+          </select>
           <label>Action</label><select id="cat-action"></select>
           <button class="primary sm" id="btn-set-category" type="button">Apply</button>
         </div>
       </div>
       <div class="card">
         <div class="card-title">Rule Overrides</div>
+        <p class="tab-desc">Override the action for a specific rule flag (e.g. <code>secret.openai_api_key</code>). A rule override takes precedence over the category action. Setting action to <code>null</code> (Remove) reverts to the category or rule default.</p>
         <div id="rules-view"><div class="loading">Loading...</div></div>
       </div>
       <div class="card">
@@ -732,6 +787,7 @@ input[type="password"] { width: 100%; max-width: 320px; }
       </div>
       <div class="card">
         <div class="card-title">Allowlist (false positive triage)</div>
+        <p class="tab-desc">Values in the allowlist are never flagged, even if they match a detection rule. Use this to suppress known-safe values (e.g. a test API key that appears in your codebase). Values are hashed before storage.</p>
         <div id="allowlist-view"><div class="loading">Loading...</div></div>
       </div>
       <div class="card">
@@ -748,10 +804,12 @@ input[type="password"] { width: 100%; max-width: 320px; }
     <div class="tab-content" id="tab-packs">
       <div class="card">
         <div class="card-title">Installed Rule Packs</div>
+        <p class="tab-desc">Signed rule packs extend or replace the default detection rules. Packs are Ed25519-signed and verified against a trust root at boot. A tampered pack is deactivated and persisted (fail-closed). Without a trust root, the engine boots with 0 packs.</p>
         <div id="packs-view"><div class="loading">Loading...</div></div>
       </div>
       <div class="card">
         <div class="card-title">Install Signed Pack</div>
+        <p class="tab-desc">Upload a signed pack file (JSON, max 512 KB). The browser reads the file and sends its contents — never a local path. Rollback reverts to the previous pack version.</p>
         <div class="form-row">
           <label for="pack-file">Pack file (.json)</label>
           <input type="file" id="pack-file" accept=".json,application/json">
@@ -1272,25 +1330,84 @@ function renderConfigTable(cfg) {
   tbody.appendChild(trA);
   table.appendChild(tbody); box.appendChild(table);
 
-  // Edit form
-  const edit = document.getElementById('config-edit');
+  // Edit form — use selects for fields with a fixed set of values,
+  // text inputs only for free-form fields (listen, health_path).
   if (edit) {
     edit.replaceChildren();
-    const formRows = [
-      { id: 'cfg-listen', label: 'listen', value: cfg.listen || '' },
-      { id: 'cfg-mode', label: 'mode', value: cfg.mode || '' },
-      { id: 'cfg-fail_policy', label: 'fail_policy', value: cfg.fail_policy || '' },
-      { id: 'cfg-max_body_bytes', label: 'max_body_bytes', value: cfg.max_body_bytes || '' },
-      { id: 'cfg-health_path', label: 'health_path', value: cfg.health_path || '' },
-      { id: 'cfg-log_level', label: 'log_level', value: cfg.log_level || '' }
-    ];
-    for (const f of formRows) {
-      const row = el('div', 'form-row');
-      const lab = el('label'); lab.textContent = f.label;
-      const inp = el('input'); inp.type = 'text'; inp.id = f.id; inp.value = String(f.value);
-      row.appendChild(lab); row.appendChild(inp); edit.appendChild(row);
+
+    // listen: free text (bind address)
+    const listenRow = el('div', 'form-row');
+    const listenLab = el('label'); listenLab.textContent = 'listen';
+    const listenInp = el('input'); listenInp.type = 'text'; listenInp.id = 'cfg-listen';
+    listenInp.value = cfg.listen || '';
+    listenRow.appendChild(listenLab); listenRow.appendChild(listenInp);
+    const listenHint = el('div', 'muted'); listenHint.textContent = 'Bind address (e.g. 127.0.0.1:8787). Changing this requires a restart.';
+    listenRow.appendChild(listenHint);
+    edit.appendChild(listenRow);
+
+    // mode: select
+    const modeRow = el('div', 'form-row');
+    const modeLab = el('label'); modeLab.textContent = 'mode';
+    const modeSel = el('select'); modeSel.id = 'cfg-mode';
+    for (const v of ['enforce', 'shadow']) {
+      const opt = el('option'); opt.value = v; opt.textContent = v;
+      if (v === cfg.mode) opt.selected = true;
+      modeSel.appendChild(opt);
     }
-    const btn = el('button', 'primary sm'); btn.textContent = 'Save changes';
+    modeRow.appendChild(modeLab); modeRow.appendChild(modeSel);
+    const modeHint = el('div', 'muted'); modeHint.textContent = 'enforce: block/redact. shadow: log only.';
+    modeRow.appendChild(modeHint);
+    edit.appendChild(modeRow);
+
+    // fail_policy: select
+    const fpRow = el('div', 'form-row');
+    const fpLab = el('label'); fpLab.textContent = 'fail_policy';
+    const fpSel = el('select'); fpSel.id = 'cfg-fail_policy';
+    for (const v of ['closed', 'open']) {
+      const opt = el('option'); opt.value = v; opt.textContent = v;
+      if (v === cfg.fail_policy) opt.selected = true;
+      fpSel.appendChild(opt);
+    }
+    fpRow.appendChild(fpLab); fpRow.appendChild(fpSel);
+    const fpHint = el('div', 'muted'); fpHint.textContent = 'closed: reject on engine failure. open: pass through.';
+    fpRow.appendChild(fpHint);
+    edit.appendChild(fpRow);
+
+    // max_body_bytes: number input
+    const mbRow = el('div', 'form-row');
+    const mbLab = el('label'); mbLab.textContent = 'max_body_bytes';
+    const mbInp = el('input'); mbInp.type = 'number'; mbInp.id = 'cfg-max_body_bytes';
+    mbInp.value = cfg.max_body_bytes != null ? String(cfg.max_body_bytes) : '';
+    mbRow.appendChild(mbLab); mbRow.appendChild(mbInp);
+    const mbHint = el('div', 'muted'); mbHint.textContent = 'Maximum request body size in bytes (default: 67108864 = 64 MiB).';
+    mbRow.appendChild(mbHint);
+    edit.appendChild(mbRow);
+
+    // health_path: free text
+    const hpRow = el('div', 'form-row');
+    const hpLab = el('label'); hpLab.textContent = 'health_path';
+    const hpInp = el('input'); hpInp.type = 'text'; hpInp.id = 'cfg-health_path';
+    hpInp.value = cfg.health_path || '';
+    hpRow.appendChild(hpLab); hpRow.appendChild(hpInp);
+    const hpHint = el('div', 'muted'); hpHint.textContent = 'Path for the health check endpoint (default: /health).';
+    hpRow.appendChild(hpHint);
+    edit.appendChild(hpRow);
+
+    // log_level: select
+    const llRow = el('div', 'form-row');
+    const llLab = el('label'); llLab.textContent = 'log_level';
+    const llSel = el('select'); llSel.id = 'cfg-log_level';
+    for (const v of ['trace', 'debug', 'info', 'warn', 'error', 'off']) {
+      const opt = el('option'); opt.value = v; opt.textContent = v;
+      if (v === cfg.log_level) opt.selected = true;
+      llSel.appendChild(opt);
+    }
+    llRow.appendChild(llLab); llRow.appendChild(llSel);
+    const llHint = el('div', 'muted'); llHint.textContent = 'Log verbosity (default: info).';
+    llRow.appendChild(llHint);
+    edit.appendChild(llRow);
+
+    const btn = el('button', 'primary'); btn.textContent = 'Save changes';
     btn.addEventListener('click', saveConfig);
     edit.appendChild(btn);
   }
