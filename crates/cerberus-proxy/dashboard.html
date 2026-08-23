@@ -527,6 +527,59 @@ input[type="password"] { width: 100%; max-width: 320px; }
   margin: 0;
 }
 
+.docs-flow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 16px 0 4px;
+}
+
+.docs-flow-step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  width: 100%;
+  max-width: 520px;
+}
+
+.docs-flow-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.docs-flow-text {
+  font-size: 0.825rem;
+  color: var(--text);
+}
+
+.docs-flow-arrow {
+  color: var(--text-dim);
+  font-size: 1.1rem;
+  margin: 4px 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+.docs-grid-mt { margin-top: 12px; }
+.tab-desc-mt { margin-top: 12px; }
+
 .docs-table {
   width: 100%;
   font-size: 0.8rem;
@@ -823,83 +876,144 @@ input[type="password"] { width: 100%; max-width: 320px; }
     <!-- ── Documentation tab ────────────────────────────────── -->
     <div class="tab-content" id="tab-docs">
       <div class="card">
-        <h3>What is Cerberus?</h3>
-        <p>Cerberus is a DLP (Data Loss Prevention) firewall for LLM agents. It sits between your AI coding agent and the LLM provider, scanning every request for secrets and PII before forwarding it.</p>
-        <pre><code>Agent (Claude Code, Codex, opencode)
-  │
-  ▼
-Cerberus Proxy (127.0.0.1:8787)
-  │── Detect → scan with regex rules (RE2, linear time)
-  │── Act   → block (403) / redact / warn / allow
-  │── Audit → SQLite (hashes only, never raw values)
-  │── Forward → redacted request to provider
-  ▼
-LLM Provider (OpenAI, Anthropic, ...)</code></pre>
-      </div>
-
-      <div class="card">
-        <h3>Quick Start</h3>
-        <p>From the terminal, not this dashboard:</p>
-        <pre><code># 1. Initialize (auto-detects installed agents)
-cerberus init
-
-# 2. Start the daemon
-cerberus start
-
-# 3. Point your agent at Cerberus
-export CLAUDE_CODE_BASE_URL=http://127.0.0.1:8787
-
-# 4. Test detection
-cerberus test "my api key is sk-abcDEFghijklmnop"
-
-# 5. Check status
-cerberus status</code></pre>
-      </div>
-
-      <div class="card">
-        <h3>Dashboard Controls</h3>
+        <div class="card-title">What is Cerberus?</div>
         <div class="docs-grid">
           <div class="docs-card">
-            <h4>Operation Mode</h4>
-            <p>Toggle between Enforce (blocks/redacts) and Shadow (logs only, never blocks). Changes apply immediately via the config API.</p>
+            <h4>DLP Firewall</h4>
+            <p>A Data Loss Prevention firewall for LLM agents. Sits between your agent and the provider, scanning every request for secrets and PII.</p>
           </div>
           <div class="docs-card">
-            <h4>Fail Policy</h4>
-            <p>Closed rejects requests if the engine fails. Open lets traffic pass on engine failure.</p>
+            <h4>Zero Leak</h4>
+            <p>Raw secrets never stored. Only SHA-256 hashes, flags, and counts are persisted to the audit store.</p>
           </div>
           <div class="docs-card">
-            <h4>Events</h4>
-            <p>Audit events with flag, action, and SHA-256 hash. Raw secret values are never stored or displayed.</p>
+            <h4>&lt; 1 ms p99</h4>
+            <p>Linear-time regex (RE2-like). No backtracking, no catastrophic regex. Async audit writes (non-blocking).</p>
           </div>
-          <div class="docs-card">
-            <h4>Allowlist</h4>
-            <p>Add known-safe values to suppress false positives. The value is hashed before storage.</p>
+        </div>
+        <div class="docs-flow">
+          <div class="docs-flow-step">
+            <div class="docs-flow-num">1</div>
+            <div class="docs-flow-text"><strong>Agent</strong> sends request to <code>127.0.0.1:8787</code></div>
           </div>
-          <div class="docs-card">
-            <h4>Rule Packs</h4>
-            <p>Install Ed25519-signed rule packs (Pro tier). The pack content is read by the browser and sent as bytes.</p>
+          <div class="docs-flow-arrow">&#8595;</div>
+          <div class="docs-flow-step">
+            <div class="docs-flow-num">2</div>
+            <div class="docs-flow-text"><strong>Cerberus</strong> decodes body, scans with 13 regex rules</div>
           </div>
-          <div class="docs-card">
-            <h4>Upstreams</h4>
-            <p>Configure provider backends (URL, auth header). The proxy forwards to the matching upstream.</p>
+          <div class="docs-flow-arrow">&#8595;</div>
+          <div class="docs-flow-step">
+            <div class="docs-flow-num">3</div>
+            <div class="docs-flow-text"><strong>Action</strong>: block (403), redact (replace), warn (log), or allow</div>
+          </div>
+          <div class="docs-flow-arrow">&#8595;</div>
+          <div class="docs-flow-step">
+            <div class="docs-flow-num">4</div>
+            <div class="docs-flow-text"><strong>Audit</strong>: event persisted to SQLite (hashes only, never raw values)</div>
+          </div>
+          <div class="docs-flow-arrow">&#8595;</div>
+          <div class="docs-flow-step">
+            <div class="docs-flow-num">5</div>
+            <div class="docs-flow-text"><strong>Forward</strong>: sanitized request sent to the LLM provider</div>
           </div>
         </div>
       </div>
 
       <div class="card">
-        <h3>CLI Commands</h3>
+        <div class="card-title">Quick Start (CLI)</div>
+        <div class="docs-grid">
+          <div class="docs-card">
+            <h4>1. Initialize</h4>
+            <p>Auto-detects installed agents and creates the config.</p>
+            <pre><code>cerberus init</code></pre>
+          </div>
+          <div class="docs-card">
+            <h4>2. Start</h4>
+            <p>Start the local proxy daemon on port 8787.</p>
+            <pre><code>cerberus start</code></pre>
+          </div>
+          <div class="docs-card">
+            <h4>3. Route</h4>
+            <p>Point your agent at Cerberus.</p>
+            <pre><code>export CLAUDE_CODE_BASE_URL=http://127.0.0.1:8787</code></pre>
+          </div>
+          <div class="docs-card">
+            <h4>4. Test</h4>
+            <p>Verify detection works.</p>
+            <pre><code>cerberus test "my key is sk-abc..."</code></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Chaining with other proxies</div>
+        <p class="tab-desc">Chain Cerberus to another local proxy (e.g. <a href="https://github.com/headroomlabs-ai/headroom" rel="noopener noreferrer">headroom</a> for token compression). Cerberus scans first, then the chained proxy compresses, then the request reaches the provider.</p>
+        <pre><code>headroom proxy --port 8788
+cerberus start --port 8787 --chain http://127.0.0.1:8788
+export CLAUDE_CODE_BASE_URL=http://127.0.0.1:8787</code></pre>
+        <div class="docs-grid docs-grid-mt">
+          <div class="docs-card">
+            <h4>&#8594; Cerberus (DLP)</h4>
+            <p>Scans for secrets and PII. Blocks or redacts before forwarding.</p>
+          </div>
+          <div class="docs-card">
+            <h4>&#8594; headroom (compression)</h4>
+            <p>Compresses the sanitized request to reduce token usage.</p>
+          </div>
+          <div class="docs-card">
+            <h4>&#8594; LLM provider</h4>
+            <p>Receives a clean, compressed request. No secrets, fewer tokens.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Dashboard Controls</div>
+        <div class="docs-grid">
+          <div class="docs-card">
+            <h4>Overview tab</h4>
+            <p>Stat cards (total events, providers, tools, flags) + quick toggles for operation mode and fail policy + last 10 events.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Events tab</h4>
+            <p>Audit log with provider filter. Each event shows timestamp, tool, provider, action, and flags.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Statistics tab</h4>
+            <p>Aggregate counts, breakdown by provider, and top detection flags.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Settings tab</h4>
+            <p>View and edit the live config. Mode, fail policy, and log level use dropdowns to prevent typos.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Upstreams tab</h4>
+            <p>Add, update, or remove provider backends. The proxy forwards to the matching upstream by path prefix.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Policy tab</h4>
+            <p>Override actions per category or per rule. Manage the allowlist for false positive triage.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Rule Packs tab</h4>
+            <p>Install or rollback Ed25519-signed rule packs (Pro tier). The browser reads the file and sends bytes, never a path.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">CLI Commands</div>
         <table class="docs-table">
           <thead><tr><th>Command</th><th>Description</th></tr></thead>
           <tbody>
             <tr><td><code>cerberus init</code></td><td>Auto-detect agents and create config</td></tr>
-            <tr><td><code>cerberus start</code></td><td>Start the local proxy daemon</td></tr>
-            <tr><td><code>cerberus stop</code></td><td>Stop the local proxy daemon</td></tr>
+            <tr><td><code>cerberus start [--port N] [--chain URL]</code></td><td>Start the proxy daemon</td></tr>
+            <tr><td><code>cerberus stop</code></td><td>Stop the proxy daemon</td></tr>
             <tr><td><code>cerberus status</code></td><td>Show daemon status</td></tr>
             <tr><td><code>cerberus scan &lt;file&gt;</code></td><td>Scan a file for secrets</td></tr>
             <tr><td><code>cerberus test &lt;text&gt;</code></td><td>Test detection with inline text</td></tr>
             <tr><td><code>cerberus doctor</code></td><td>System diagnostics</td></tr>
-            <tr><td><code>cerberus mode &lt;shadow|enforce&gt;</code></td><td>Change operation mode</td></tr>
-            <tr><td><code>cerberus mitm &lt;init|enable|status&gt;</code></td><td>Manage MITM forward proxy (opt-in)</td></tr>
+            <tr><td><code>cerberus mitm &lt;init|enable|status&gt;</code></td><td>Manage MITM forward proxy (opt-in, for agents with hardcoded URLs)</td></tr>
             <tr><td><code>cerberus pack &lt;install|rollback|list&gt;</code></td><td>Manage signed rule packs (Pro)</td></tr>
             <tr><td><code>cerberus license</code></td><td>Show active license tier</td></tr>
           </tbody>
@@ -907,18 +1021,17 @@ cerberus status</code></pre>
       </div>
 
       <div class="card">
-        <h3>API Endpoints</h3>
+        <div class="card-title">API Endpoints</div>
         <table class="docs-table">
           <thead><tr><th>Endpoint</th><th>Method</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td><code>/health</code></td><td>GET</td><td>Health check</td></tr>
-            <tr><td><code>/api/config</code></td><td>GET</td><td>Current configuration (admin token never returned)</td></tr>
-            <tr><td><code>/api/config</code></td><td>PUT</td><td>Update configuration (hot-swap)</td></tr>
-            <tr><td><code>/api/events</code></td><td>GET</td><td>Audit events (flags + hashes)</td></tr>
-            <tr><td><code>/api/stats</code></td><td>GET</td><td>Aggregated statistics</td></tr>
-            <tr><td><code>/api/upstreams</code></td><td>GET/POST/DELETE</td><td>CRUD upstreams</td></tr>
-            <tr><td><code>/api/policy</code></td><td>GET/PUT</td><td>Detection policy (categories, rules)</td></tr>
-            <tr><td><code>/api/allowlist</code></td><td>POST/DELETE</td><td>Allowlist management</td></tr>
+            <tr><td><code>/health</code></td><td>GET</td><td>Health check (status, version, mode, upstream count)</td></tr>
+            <tr><td><code>/api/config</code></td><td>GET</td><td>Current config (admin token never returned)</td></tr>
+            <tr><td><code>/api/config</code></td><td>PUT</td><td>Update config (hot-swap, no restart)</td></tr>
+            <tr><td><code>/api/events</code></td><td>GET</td><td>Audit events (flags + hashes, never raw)</td></tr>
+            <tr><td><code>/api/stats</code></td><td>GET</td><td>Aggregated statistics by provider and flag</td></tr>
+            <tr><td><code>/api/upstreams</code></td><td>GET/POST/DELETE</td><td>CRUD upstreams (admin-auth)</td></tr>
+            <tr><td><code>/api/policy</code></td><td>GET/PUT</td><td>Detection policy (categories, rules, allowlist)</td></tr>
             <tr><td><code>/api/packs</code></td><td>GET/POST/DELETE</td><td>Signed rule packs (Pro)</td></tr>
             <tr><td><code>/api/dashboard</code></td><td>GET</td><td>This dashboard (CSP-protected)</td></tr>
           </tbody>
@@ -926,7 +1039,7 @@ cerberus status</code></pre>
       </div>
 
       <div class="card">
-        <h3>Security</h3>
+        <div class="card-title">Security</div>
         <div class="docs-grid">
           <div class="docs-card">
             <h4>Zero Leak</h4>
@@ -934,30 +1047,44 @@ cerberus status</code></pre>
           </div>
           <div class="docs-card">
             <h4>Fail-Closed</h4>
-            <p>If the engine fails, requests are rejected (not leaked). Configurable per deployment.</p>
+            <p>If the engine fails, requests are rejected (not leaked). Configurable: closed (default) or open.</p>
           </div>
           <div class="docs-card">
             <h4>No ReDoS</h4>
             <p>Linear-time regex engine (RE2-like). All patterns verified with adversarial fuzzing.</p>
           </div>
           <div class="docs-card">
+            <h4>&lt; 1 ms p99</h4>
+            <p>Sub-millisecond scan latency on a modern laptop. Async audit writes (non-blocking).</p>
+          </div>
+          <div class="docs-card">
             <h4>Break-Glass</h4>
-            <p>The X-Cerberus-Bypass header allows one-time bypass with an audited reason.</p>
+            <p>The <code>X-Cerberus-Bypass</code> header allows one-time bypass with an audited reason.</p>
+          </div>
+          <div class="docs-card">
+            <h4>MITM Opt-In</h4>
+            <p>TLS interception is off by default. Requires explicit CA generation + host allowlist (exact match).</p>
           </div>
         </div>
       </div>
 
       <div class="card">
-        <h3>Stopping the Daemon</h3>
-        <p>This dashboard is served by the Cerberus daemon. Stopping the daemon will make this page unavailable.</p>
-        <pre><code># Stop the daemon (from the terminal)
-cerberus stop
-
-# Start it again
-cerberus start
-
-# Check status
-cerberus status</code></pre>
+        <div class="card-title">Stopping the Daemon</div>
+        <div class="docs-grid">
+          <div class="docs-card">
+            <h4>Stop</h4>
+            <pre><code>cerberus stop</code></pre>
+          </div>
+          <div class="docs-card">
+            <h4>Start again</h4>
+            <pre><code>cerberus start</code></pre>
+          </div>
+          <div class="docs-card">
+            <h4>Check status</h4>
+            <pre><code>cerberus status</code></pre>
+          </div>
+        </div>
+        <p class="tab-desc tab-desc-mt">This dashboard is served by the daemon. Stopping the daemon will make this page unavailable.</p>
       </div>
     </div>
   </div>

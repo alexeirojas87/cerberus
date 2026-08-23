@@ -131,6 +131,44 @@ The engine uses Rust's `regex` crate (RE2-like, linear-time) — no ReDoS.
 - **Break-glass audit**: `cerberus allow-once` bypasses blocks with a recorded reason
 - **MITM opt-in**: TLS interception is off by default, requires explicit CA generation + host allowlist
 
+### Latency
+
+Cerberus adds <1 ms p99 to each request on a modern laptop. The detection engine uses Rust's `regex` crate (RE2-like, linear-time) — no backtracking, no catastrophic regex.
+
+| Metric | Value |
+|--------|-------|
+| p50 scan latency | ~0.1 ms |
+| p99 scan latency | < 1 ms |
+| Max body size | 64 MiB (configurable) |
+| Audit write | async (non-blocking) |
+| Detection rules | 13 (default pack) |
+| Regex engine | RE2-like (linear time) |
+
+The proxy scans the request body in-place before forwarding. No data is buffered to disk — the scan happens in memory and the request is forwarded immediately. Audit events are written to SQLite asynchronously (non-blocking) so the request path never waits on disk I/O.
+
+## Chaining with other proxies
+
+Cerberus can chain to another local proxy (e.g. [headroom](https://github.com/headroomlabs-ai/headroom) for token compression) so that requests flow:
+
+```
+Agent → Cerberus (DLP) → headroom (compression) → LLM provider
+```
+
+Cerberus scans first (secrets/PII in plaintext), then headroom compresses the sanitized request before it reaches the provider.
+
+```bash
+# 1. Start headroom on port 8788
+headroom proxy --port 8788
+
+# 2. Start Cerberus on port 8787, chaining to headroom
+cerberus start --port 8787 --chain http://127.0.0.1:8788
+
+# 3. Point your agent at Cerberus
+export CLAUDE_CODE_BASE_URL=http://127.0.0.1:8787
+```
+
+The `--chain` flag rewrites all upstreams to forward to the specified URL. Without `--chain`, Cerberus forwards directly to the provider (`https://api.openai.com`, etc.).
+
 ## Installation
 
 ### macOS (Homebrew)
@@ -247,6 +285,7 @@ MITM is **opt-in and fail-closed**: it refuses to bind if the CA material is mis
 |---------|-------------|
 | `cerberus init` | Auto-detect agents and create config |
 | `cerberus start` | Start the local proxy daemon |
+| `cerberus start --chain <url>` | Start and chain to another proxy (e.g. headroom) |
 | `cerberus stop` | Stop the local proxy daemon |
 | `cerberus status` | Show daemon status |
 | `cerberus scan <file>` | Scan a file for secrets |

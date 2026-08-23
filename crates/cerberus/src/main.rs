@@ -44,6 +44,11 @@ enum Command {
         /// Listen port (default: 8787)
         #[arg(short, long, default_value_t = 8787)]
         port: u16,
+        /// Chain to another local proxy (e.g. headroom): all upstreams are
+        /// rewritten to forward to this URL instead of the provider directly.
+        /// Example: `--chain http://127.0.0.1:8788`
+        #[arg(long)]
+        chain: Option<String>,
     },
     /// Stops the local daemon
     Stop,
@@ -135,7 +140,7 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        Command::Start { port } => match daemon::start(port).await {
+        Command::Start { port, chain } => match daemon::start(port, chain).await {
             Ok(msg) => {
                 println!("{msg}");
                 ExitCode::SUCCESS

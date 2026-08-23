@@ -278,7 +278,7 @@ fn resolve_config(port: u16, file_cfg: Option<ProxyConfig>) -> Result<ProxyConfi
     clippy::map_unwrap_or,
     clippy::if_not_else
 )]
-pub(crate) async fn start(port: u16) -> Result<String, String> {
+pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, String> {
     // Check if already running
     if is_running() {
         return Err("Cerberus is already running. Use 'cerberus stop' first.".to_string());
@@ -290,7 +290,18 @@ pub(crate) async fn start(port: u16) -> Result<String, String> {
 
     // A) Real config: base = config.yaml (without losing fields) + overrides.
     let file_cfg = load_proxy_config();
-    let config = resolve_config(port, file_cfg)?;
+    let mut config = resolve_config(port, file_cfg)?;
+
+    // --chain: rewrite all upstreams to forward to another local proxy
+    // (e.g. headroom) instead of the provider directly. This lets you
+    // stack Cerberus (DLP) → headroom (compression) → provider.
+    if let Some(ref chain_url) = chain {
+        let chain_url = chain_url.trim_end_matches('/');
+        for up in config.upstreams.values_mut() {
+            up.url = chain_url.to_string();
+        }
+        println!("chain: all upstreams → {chain_url}");
+    }
     // A missing/disabled `mitm.json` produces `None`: the reverse proxy
     // remains always the default. If the user explicitly opted into MITM, we
     // validate CA/hosts/listener before initializing the daemon.
