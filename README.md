@@ -4,6 +4,54 @@ DLP firewall for LLM agents — blocks secrets and PII from leaving your machine
 
 Cerberus is a local reverse proxy that sits between your AI coding agent (Claude Code, Codex, opencode) and the LLM provider. It scans every request in real time, detects secrets and PII, and blocks or redacts them before they reach the API.
 
+## Dashboard
+
+Cerberus includes a built-in web dashboard for managing the proxy without CLI commands. Access it at `http://127.0.0.1:8787/api/dashboard` when the daemon is running.
+
+### Overview
+
+![Dashboard — Overview](docs/screenshots/dashboard-overview.png)
+
+### Events
+
+![Dashboard — Events](docs/screenshots/dashboard-events.png)
+
+### Statistics
+
+![Dashboard — Statistics](docs/screenshots/dashboard-stats.png)
+
+### Settings
+
+![Dashboard — Settings](docs/screenshots/dashboard-settings.png)
+
+### Upstreams
+
+![Dashboard — Upstreams](docs/screenshots/dashboard-upstreams.png)
+
+### Policy
+
+![Dashboard — Policy](docs/screenshots/dashboard-policy.png)
+
+### Rule Packs
+
+![Dashboard — Rule Packs](docs/screenshots/dashboard-packs.png)
+
+### Documentation
+
+![Dashboard — Documentation](docs/screenshots/dashboard-docs.png)
+
+The dashboard lets you:
+- **Toggle operation mode** (enforce / shadow) and fail policy (closed / open) with one click
+- **View audit events** with timestamps, flags, and actions (never raw secret values)
+- **See statistics** by provider, tool, and top flags
+- **Edit configuration** (listen address, mode, fail policy, max body size)
+- **Manage upstreams** (add, update, remove provider backends)
+- **Configure policy** (category actions, rule overrides, allowlist for false positive triage)
+- **Install signed rule packs** (Pro tier, Ed25519-signed)
+- **Browse documentation** (quick start, CLI commands, API endpoints, security guarantees)
+
+All data flows through the same CSP-protected dashboard — no inline scripts, no external dependencies, no raw secret values ever displayed.
+
 ```
 ┌──────────┐      ┌──────────┐      ┌──────────┐
 │  Agent   │─────►│ Cerberus │─────►│ Provider │
