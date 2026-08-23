@@ -1626,10 +1626,12 @@ if (tokenInput) {
 
 // Init: read the initial tab from the URL hash (enables direct linking).
 const validTabs = ['overview', 'events', 'stats', 'config', 'upstreams', 'policy', 'packs', 'docs'];
-const initialTab = location.hash ? location.hash.slice(1) : 'overview';
-if (validTabs.includes(initialTab)) {
-  switchTab(initialTab);
+function applyHash() {
+  const tab = location.hash ? location.hash.slice(1) : 'overview';
+  if (validTabs.includes(tab)) switchTab(tab);
 }
+applyHash();
+window.addEventListener('hashchange', applyHash);
 fillActionSelect('cat-action');
 fillActionSelect('rule-action');
 loadData();
