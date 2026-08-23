@@ -733,9 +733,9 @@ input[type="password"] { width: 100%; max-width: 320px; }
       <div class="card">
         <div class="card-title">Add / Update Upstream</div>
         <p class="tab-desc">
-          <strong>Name:</strong> identifier used in the request path (e.g. <code>openai</code> → <code>/openai/*</code>).
-          <strong>URL:</strong> the provider's base URL (must start with <code>https://</code>).
-          <strong>Auth header:</strong> which HTTP header carries the API key — most providers use <code>authorization</code> (Bearer), but some like Anthropic use <code>x-api-key</code>.
+          <strong>Name:</strong> identifier used in the request path (e.g. <code>openai</code> routes <code>/openai/*</code> to this upstream).<br>
+          <strong>URL:</strong> the provider's base URL (must start with <code>https://</code>).<br>
+          <strong>Auth header:</strong> which HTTP header carries the API key. The proxy does NOT store or manage your API key — your agent sends it in every request and Cerberus just passes it through. This field tells the proxy which header to preserve (not redact) when forwarding.
         </p>
         <div class="form-row">
           <label>Name</label><input type="text" id="up-name" placeholder="openai">
@@ -1332,6 +1332,7 @@ function renderConfigTable(cfg) {
 
   // Edit form — use selects for fields with a fixed set of values,
   // text inputs only for free-form fields (listen, health_path).
+  const edit = document.getElementById('config-edit');
   if (edit) {
     edit.replaceChildren();
 
