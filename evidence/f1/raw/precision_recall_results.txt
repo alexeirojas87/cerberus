@@ -65,7 +65,7 @@ Precision: 88.6% (31/35)
      occurrence of that literal for the k-th instance sharing the
      same (flag, value) (span_in_all), never just text.find (first match).
   2. A finding counts as TP only if it overlaps the span of a DIFFERENT
-     expected instance of the same flag (greedy, one finding/con instance).
+     expected instance of the same flag (greedy, one finding per instance).
   3. Two same-flag instances can NEVER substitute for each other (item 8).
   4. Entropy findings overlapping an already-consumed named secret are
      excluded (duplicate detector); all other non-consuming findings are FP.

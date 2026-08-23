@@ -1,472 +1,1293 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Cerberus Dashboard</title>
-<!-- Review v6.1: la CSP la emite el servidor en la CABECERA
-     `Content-Security-Policy` (api.rs::build_dashboard_csp). No se duplica
-     aquí en un <meta> por dos razones: `frame-ancestors` sólo tiene efecto en
-     la cabecera, y una copia en el HTML se desincroniza del hash sha256 que
-     autoriza los bloques inline. NO uses handlers inline (`onclick=`) ni
-     atributos `style=`: la CSP ya no lleva 'unsafe-inline' y los bloquearía.
-     -->
+<!-- The CSP is emitted by the server in the Content-Security-Policy header
+     (api.rs::build_dashboard_csp). Do NOT duplicate it here in a <meta>:
+     frame-ancestors only works in the header, and a copy desynchronizes
+     from the sha256 hash that authorizes the inline blocks. Do NOT use
+     inline event handlers (onclick=) or style= attributes: the CSP does
+     not carry 'unsafe-inline' and would block them. -->
 <style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-hover: #1c2330;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --text-dim: #6e7681;
+  --accent: #2f81f7;
+  --accent-hover: #4493f8;
+  --accent-dim: #1f6feb33;
+  --green: #3fb950;
+  --green-dim: #23863633;
+  --red: #f85149;
+  --red-dim: #da363333;
+  --yellow: #d29922;
+  --yellow-dim: #9e6a0333;
+  --purple: #a371f7;
+  --purple-dim: #8957e533;
+  --radius: 8px;
+  --radius-sm: 6px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --font-mono: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; padding: 20px; }
-.container { max-width: 1200px; margin: 0 auto; }
-h1 { color: #38bdf8; font-size: 1.8rem; margin-bottom: 20px; }
-h2 { color: #94a3b8; font-size: 1.2rem; margin: 20px 0 10px; border-bottom: 1px solid #1e293b; padding-bottom: 5px; }
-.card { background: #1e293b; border-radius: 8px; padding: 16px; margin: 10px 0; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
-.stat { text-align: center; padding: 12px; }
-.stat-value { font-size: 2rem; font-weight: bold; color: #38bdf8; }
-.stat-label { font-size: 0.85rem; color: #64748b; }
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #334155; }
-th { color: #64748b; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
-td { font-size: 0.9rem; }
-.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
-.badge-block { background: #dc2626; color: #fff; }
-.badge-redact { background: #f59e0b; color: #000; }
-.badge-warn { background: #6366f1; color: #fff; }
-.badge-allow { background: #22c55e; color: #000; }
-.badge-inherit { background: #334155; color: #cbd5e1; }
-.refresh { text-align: right; margin-bottom: 10px; }
-button { background: #38bdf8; color: #000; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.85rem; margin: 2px; }
-button:hover { background: #7dd3fc; }
-input, select { background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; padding: 8px; font-size: 0.9rem; }
-input[type="password"] { width: 60%; max-width: 420px; }
-.error { color: #f87171; padding: 10px; }
-.loading { color: #64748b; padding: 10px; }
-.login-card { border: 1px solid #334155; }
-#provider-links a { display: inline-block; margin: 4px 6px 4px 0; padding: 4px 12px; border-radius: 999px; background: #0f172a; color: #38bdf8; text-decoration: none; border: 1px solid #334155; font-size: 0.85rem; }
-#provider-links a:hover { background: #1e293b; }
-.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
-.row label { color: #64748b; font-size: 0.85rem; }
-.muted { color: #64748b; font-size: 0.85rem; }
-.danger { background: #dc2626; color: #fff; }
-.danger:hover { background: #ef4444; }
-.note { color: #fbbf24; font-size: 0.8rem; padding: 6px 0; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  font-size: 15px;
+}
+
+/* ── Layout ──────────────────────────────────────────────────── */
+.app { display: flex; min-height: 100vh; }
+
+.sidebar {
+  width: 240px;
+  min-height: 100vh;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 24px 16px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.sidebar-logo {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-subtitle {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-bottom: 28px;
+  padding-left: 28px;
+}
+
+.nav-section {
+  margin-bottom: 8px;
+}
+
+.nav-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 8px 12px 4px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+}
+
+.nav-item:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.nav-item.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.nav-icon {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.main {
+  flex: 1;
+  padding: 32px 40px;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* ── Header ───────────────────────────────────────────────────── */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 28px;
+}
+
+.header h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.status-dot::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.status-dot.off::before { background: var(--red); }
+
+/* ── Buttons ──────────────────────────────────────────────────── */
+button {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 7px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.825rem;
+  font-weight: 500;
+  font-family: var(--font);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+button:hover {
+  background: var(--surface-hover);
+  border-color: var(--text-dim);
+}
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+button.primary:hover {
+  background: var(--accent-hover);
+}
+
+button.danger {
+  background: var(--red-dim);
+  color: var(--red);
+  border-color: var(--red);
+}
+
+button.danger:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+button.sm {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+}
+
+/* ── Cards ───────────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.card-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 14px;
+}
+
+.card h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+/* ── Stat grid ────────────────────────────────────────────────── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+
+.stat-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.2;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+/* ── Toggle switch ────────────────────────────────────────────── */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.toggle-row:last-child { border-bottom: none; }
+
+.toggle-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.toggle-desc {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.toggle-group {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.toggle-opt {
+  padding: 6px 16px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  background: var(--surface);
+  color: var(--text-muted);
+  border: none;
+  border-right: 1px solid var(--border);
+  font-family: var(--font);
+}
+
+.toggle-opt:last-child { border-right: none; }
+
+.toggle-opt.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.toggle-opt:hover:not(.active) {
+  background: var(--surface-hover);
+}
+
+/* ── Table ────────────────────────────────────────────────────── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.825rem;
+}
+
+th {
+  text-align: left;
+  padding: 8px 12px;
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+
+td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+tr:last-child td { border-bottom: none; }
+
+tr:hover td { background: var(--surface-hover); }
+
+/* ── Badge ────────────────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.badge-block { background: var(--red-dim); color: var(--red); }
+.badge-redact { background: var(--yellow-dim); color: var(--yellow); }
+.badge-warn { background: var(--purple-dim); color: var(--purple); }
+.badge-allow { background: var(--green-dim); color: var(--green); }
+.badge-inherit { background: var(--surface); color: var(--text-dim); border: 1px solid var(--border); }
+
+/* ── Forms ────────────────────────────────────────────────────── */
+input, select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  font-size: 0.825rem;
+  font-family: var(--font);
+}
+
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+input[type="password"] { width: 100%; max-width: 320px; }
+
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.form-row label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  min-width: 80px;
+}
+
+.form-row input, .form-row select {
+  min-width: 120px;
+}
+
+/* ── Misc ─────────────────────────────────────────────────────── */
+.muted { color: var(--text-dim); font-size: 0.825rem; }
+.error { color: var(--red); font-size: 0.825rem; padding: 8px 0; }
+.loading { color: var(--text-dim); font-size: 0.825rem; padding: 8px 0; }
+.msg { font-size: 0.825rem; color: var(--text-muted); padding: 4px 0; }
+.msg-ok { color: var(--green); }
+.msg-err { color: var(--red); }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ── Auth card ────────────────────────────────────────────────── */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.auth-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px;
+  max-width: 400px;
+  width: 90%;
+}
+
+.auth-card h2 {
+  font-size: 1.1rem;
+  margin-bottom: 8px;
+}
+
+.auth-card p {
+  color: var(--text-muted);
+  font-size: 0.825rem;
+  margin-bottom: 16px;
+}
+
+.auth-actions { margin-top: 12px; }
+
+/* ── Docs section ──────────────────────────────────────────────── */
+.docs-section {
+  margin-bottom: 24px;
+}
+
+.docs-section h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.docs-section p {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  margin-bottom: 12px;
+}
+
+.docs-section code {
+  font-family: var(--font-mono);
+  background: var(--surface);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: var(--accent);
+}
+
+.docs-section pre {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  overflow-x: auto;
+  margin-bottom: 12px;
+}
+
+.docs-section pre code {
+  background: none;
+  padding: 0;
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.docs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.docs-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.docs-card h4 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--accent);
+}
+
+.docs-card p {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.docs-table {
+  width: 100%;
+  font-size: 0.8rem;
+}
+
+.docs-table td {
+  padding: 6px 10px;
+}
+
+/* ── Provider chips ────────────────────────────────────────────── */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.chip:hover { background: var(--surface-hover); }
+.chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* ── Responsive ────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .app { flex-direction: column; }
+  .sidebar {
+    width: 100%;
+    min-height: auto;
+    height: auto;
+    position: relative;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 16px;
+  }
+  .main { padding: 20px 16px; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+}
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>🔒 Cerberus Dashboard</h1>
-  <div class="refresh"><button id="btn-refresh" type="button">⟳ Refrescar</button></div>
+<div class="app">
+  <!-- ── Sidebar ─────────────────────────────────────────────── -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">&#128274; Cerberus</div>
+    <div class="sidebar-subtitle">DLP Firewall</div>
 
-  <!-- Card de login (review v5 F6): el token NUNCA se incrusta en el DOM.
-       El usuario lo pega aquí; se guarda SOLO en localStorage y se envía vía
-       header X-Cerberus-Admin-Token en cada fetch. -->
-  <div class="card login-card" id="auth-card" hidden>
-    <h2>Autenticación requerida</h2>
-    <p class="loading" id="login-msg">Este dashboard es público (HTML sin datos). Para ver datos, ingresa el token de administrador.</p>
-    <input type="password" id="cerberus-token" placeholder="Admin token" autocomplete="off">
-    <button id="btn-save-token" type="button">Guardar</button>
-    <p class="loading">Se guarda únicamente en este navegador y se envía en el header <code>X-Cerberus-Admin-Token</code>.</p>
-  </div>
-
-  <h2>Resumen</h2>
-  <div class="grid" id="summary-cards"></div>
-
-  <h2>Filtro por Proveedor</h2>
-  <div class="card">
-    <label for="provider-filter">Proveedor:</label>
-    <select id="provider-filter"></select>
-    <button id="btn-apply-provider" type="button">Aplicar</button>
-  </div>
-
-  <h2>Por Proveedor</h2>
-  <div class="card" id="provider-links"><div class="loading">Cargando...</div></div>
-  <div class="card" id="provider-stats"><div class="loading">Cargando...</div></div>
-
-  <h2>Eventos Recientes</h2>
-  <div class="card" id="recent-events"><div class="loading">Cargando...</div></div>
-
-  <h2>Configuración</h2>
-  <div class="card" id="config-view"><div class="loading">Cargando...</div></div>
-
-  <!-- Providers (CRUD) contra /api/upstreams: alta, baja y listado. -->
-  <h2>Providers (CRUD)</h2>
-  <div class="card" id="upstreams-view"><div class="loading">Cargando...</div></div>
-  <div class="card">
-    <div class="row">
-      <label for="up-name">name</label><input type="text" id="up-name" placeholder="openai">
-      <label for="up-url">url</label><input type="text" id="up-url" placeholder="https://api.openai.com">
-      <label for="up-auth">auth_header</label><input type="text" id="up-auth" placeholder="authorization">
-      <button id="btn-add-upstream" type="button">Añadir / actualizar</button>
+    <div class="nav-section">
+      <div class="nav-label">Overview</div>
+      <div class="nav-item active" data-tab="overview"><span class="nav-icon">&#9632;</span> Dashboard</div>
+      <div class="nav-item" data-tab="events"><span class="nav-icon">&#9776;</span> Events</div>
+      <div class="nav-item" data-tab="stats"><span class="nav-icon">&#9707;</span> Statistics</div>
     </div>
-    <div class="muted" id="upstream-msg"></div>
-  </div>
 
-  <!-- F6: rule packs contra /api/packs (list / install / rollback). El
-       navegador transporta el contenido firmado; nunca una ruta local. -->
-  <h2>Rule packs</h2>
-  <div class="card" id="packs-view"><div class="loading">Cargando...</div></div>
-  <div class="card">
-    <div class="row">
-      <label for="pack-file">pack firmado (.json)</label>
-      <input type="file" id="pack-file" accept=".json,application/json">
-      <button id="btn-install-pack" type="button">Instalar</button>
-      <button id="btn-rollback-pack" class="danger" type="button">Rollback</button>
+    <div class="nav-section">
+      <div class="nav-label">Configuration</div>
+      <div class="nav-item" data-tab="config"><span class="nav-icon">&#9881;</span> Settings</div>
+      <div class="nav-item" data-tab="upstreams"><span class="nav-icon">&#8599;</span> Upstreams</div>
+      <div class="nav-item" data-tab="policy"><span class="nav-icon">&#9874;</span> Policy</div>
+      <div class="nav-item" data-tab="packs"><span class="nav-icon">&#128230;</span> Rule Packs</div>
     </div>
-    <div class="muted" id="packs-msg"></div>
-  </div>
 
-  <!-- F6: categorías + reglas propias + allowlist contra /api/policy. -->
-  <h2>Categorías y acciones</h2>
-  <div class="card" id="categories-view"><div class="loading">Cargando...</div></div>
-  <div class="card">
-    <div class="row">
-      <label for="cat-name">categoría</label><input type="text" id="cat-name" placeholder="secrets">
-      <label for="cat-action">acción</label><select id="cat-action"></select>
-      <button id="btn-set-category" type="button">Fijar</button>
+    <div class="nav-section">
+      <div class="nav-label">Help</div>
+      <div class="nav-item" data-tab="docs"><span class="nav-icon">&#128214;</span> Documentation</div>
     </div>
-  </div>
+  </nav>
 
-  <h2>Reglas propias (override de acción)</h2>
-  <div class="card" id="rules-view"><div class="loading">Cargando...</div></div>
-  <div class="card">
-    <div class="row">
-      <label for="rule-id">regla</label><input type="text" id="rule-id" placeholder="secret.openai_api_key">
-      <label for="rule-action">acción</label><select id="rule-action"></select>
-      <button id="btn-set-rule" type="button">Fijar</button>
+  <!-- ── Main content ────────────────────────────────────────── -->
+  <div class="main">
+    <div class="header">
+      <h1 id="page-title">Dashboard</h1>
+      <div class="header-actions">
+        <span class="status-dot" id="status-indicator">Connected</span>
+        <button class="sm" id="btn-refresh" type="button">Refresh</button>
+      </div>
     </div>
-    <div class="muted" id="policy-msg"></div>
-  </div>
 
-  <h2>Allowlist (triage de falsos positivos)</h2>
-  <div class="card" id="allowlist-view"><div class="loading">Cargando...</div></div>
-  <div class="card">
-    <div class="row">
-      <label for="allow-value">valor</label>
-      <input type="text" id="allow-value" placeholder="sk-EXAMPLE-do-not-flag">
-      <button id="btn-add-allow" type="button">Añadir</button>
+    <!-- ── Auth overlay ────────────────────────────────────── -->
+    <div class="auth-overlay" id="auth-overlay" hidden>
+      <div class="auth-card">
+        <h2>Authentication required</h2>
+        <p>This dashboard is served without data. To view live data, enter the admin token. It is stored only in this browser and sent via the X-Cerberus-Admin-Token header.</p>
+        <input type="password" id="cerberus-token" placeholder="Admin token" autocomplete="off">
+        <div class="auth-actions">
+          <button class="primary" id="btn-save-token" type="button">Connect</button>
+        </div>
+      </div>
     </div>
-    <div class="muted" id="allowlist-msg"></div>
+
+    <!-- ── Overview tab ─────────────────────────────────────── -->
+    <div class="tab-content active" id="tab-overview">
+      <div class="stat-grid" id="overview-stats"></div>
+
+      <div class="card">
+        <div class="card-title">Quick Controls</div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Operation Mode</div>
+            <div class="toggle-desc">Enforce blocks/redacts; Shadow logs only</div>
+          </div>
+          <div class="toggle-group" id="mode-toggle">
+            <button class="toggle-opt active" data-mode="enforce" type="button">Enforce</button>
+            <button class="toggle-opt" data-mode="shadow" type="button">Shadow</button>
+          </div>
+        </div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Fail Policy</div>
+            <div class="toggle-desc">Closed rejects on engine error; Open lets traffic pass</div>
+          </div>
+          <div class="toggle-group" id="failpolicy-toggle">
+            <button class="toggle-opt active" data-failpolicy="closed" type="button">Closed</button>
+            <button class="toggle-opt" data-failpolicy="open" type="button">Open</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Recent Events</div>
+        <div id="overview-events"><div class="loading">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- ── Events tab ───────────────────────────────────────── -->
+    <div class="tab-content" id="tab-events">
+      <div class="card">
+        <div class="card-title">Event Filter</div>
+        <div class="form-row">
+          <label>Provider</label>
+          <select id="provider-filter"></select>
+          <button class="sm" id="btn-apply-provider" type="button">Apply</button>
+          <button class="sm" id="btn-clear-provider" type="button">Clear</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Audit Events</div>
+        <div id="events-table"><div class="loading">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- ── Statistics tab ───────────────────────────────────── -->
+    <div class="tab-content" id="tab-stats">
+      <div class="stat-grid" id="stats-cards"></div>
+      <div class="card">
+        <div class="card-title">By Provider</div>
+        <div id="stats-provider"><div class="loading">Loading...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Top Flags</div>
+        <div id="stats-flags"><div class="loading">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- ── Config tab ───────────────────────────────────────── -->
+    <div class="tab-content" id="tab-config">
+      <div class="card">
+        <div class="card-title">Current Configuration</div>
+        <div id="config-view"><div class="loading">Loading...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Edit Configuration</div>
+        <div id="config-edit"></div>
+        <div class="msg" id="config-msg"></div>
+      </div>
+    </div>
+
+    <!-- ── Upstreams tab ────────────────────────────────────── -->
+    <div class="tab-content" id="tab-upstreams">
+      <div class="card">
+        <div class="card-title">Configured Upstreams</div>
+        <div id="upstreams-view"><div class="loading">Loading...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Add / Update Upstream</div>
+        <div class="form-row">
+          <label>Name</label><input type="text" id="up-name" placeholder="openai">
+          <label>URL</label><input type="text" id="up-url" placeholder="https://api.openai.com">
+          <label>Auth header</label><input type="text" id="up-auth" placeholder="authorization">
+          <button class="primary sm" id="btn-add-upstream" type="button">Save</button>
+        </div>
+        <div class="msg" id="upstream-msg"></div>
+      </div>
+    </div>
+
+    <!-- ── Policy tab ───────────────────────────────────────── -->
+    <div class="tab-content" id="tab-policy">
+      <div class="card">
+        <div class="card-title">Category Actions</div>
+        <div id="categories-view"><div class="loading">Loading...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Set Category Action</div>
+        <div class="form-row">
+          <label>Category</label><input type="text" id="cat-name" placeholder="secrets">
+          <label>Action</label><select id="cat-action"></select>
+          <button class="primary sm" id="btn-set-category" type="button">Apply</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Rule Overrides</div>
+        <div id="rules-view"><div class="loading">Loading...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Set Rule Action</div>
+        <div class="form-row">
+          <label>Rule</label><input type="text" id="rule-id" placeholder="secret.openai_api_key">
+          <label>Action</label><select id="rule-action"></select>
+          <button class="primary sm" id="btn-set-rule" type="button">Apply</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Allowlist (false positive triage)</div>
+        <div id="allowlist-view"><div class="loading">Loading...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Add to Allowlist</div>
+        <div class="form-row">
+          <label>Value</label><input type="text" id="allow-value" placeholder="sk-EXAMPLE-do-not-flag">
+          <button class="primary sm" id="btn-add-allow" type="button">Add</button>
+        </div>
+        <div class="msg" id="allowlist-msg"></div>
+      </div>
+    </div>
+
+    <!-- ── Packs tab ────────────────────────────────────────── -->
+    <div class="tab-content" id="tab-packs">
+      <div class="card">
+        <div class="card-title">Installed Rule Packs</div>
+        <div id="packs-view"><div class="loading">Loading...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Install Signed Pack</div>
+        <div class="form-row">
+          <label for="pack-file">Pack file (.json)</label>
+          <input type="file" id="pack-file" accept=".json,application/json">
+          <button class="primary sm" id="btn-install-pack" type="button">Install</button>
+          <button class="danger sm" id="btn-rollback-pack" type="button">Rollback</button>
+        </div>
+        <div class="msg" id="packs-msg"></div>
+      </div>
+    </div>
+
+    <!-- ── Documentation tab ────────────────────────────────── -->
+    <div class="tab-content" id="tab-docs">
+      <div class="card">
+        <h3>What is Cerberus?</h3>
+        <p>Cerberus is a DLP (Data Loss Prevention) firewall for LLM agents. It sits between your AI coding agent and the LLM provider, scanning every request for secrets and PII before forwarding it.</p>
+        <pre><code>Agent (Claude Code, Codex, opencode)
+  │
+  ▼
+Cerberus Proxy (127.0.0.1:8787)
+  │── Detect → scan with regex rules (RE2, linear time)
+  │── Act   → block (403) / redact / warn / allow
+  │── Audit → SQLite (hashes only, never raw values)
+  │── Forward → redacted request to provider
+  ▼
+LLM Provider (OpenAI, Anthropic, ...)</code></pre>
+      </div>
+
+      <div class="card">
+        <h3>Quick Start</h3>
+        <p>From the terminal, not this dashboard:</p>
+        <pre><code># 1. Initialize (auto-detects installed agents)
+cerberus init
+
+# 2. Start the daemon
+cerberus start
+
+# 3. Point your agent at Cerberus
+export CLAUDE_CODE_BASE_URL=http://127.0.0.1:8787
+
+# 4. Test detection
+cerberus test "my api key is sk-abcDEFghijklmnop"
+
+# 5. Check status
+cerberus status</code></pre>
+      </div>
+
+      <div class="card">
+        <h3>Dashboard Controls</h3>
+        <div class="docs-grid">
+          <div class="docs-card">
+            <h4>Operation Mode</h4>
+            <p>Toggle between Enforce (blocks/redacts) and Shadow (logs only, never blocks). Changes apply immediately via the config API.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Fail Policy</h4>
+            <p>Closed rejects requests if the engine fails. Open lets traffic pass on engine failure.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Events</h4>
+            <p>Audit events with flag, action, and SHA-256 hash. Raw secret values are never stored or displayed.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Allowlist</h4>
+            <p>Add known-safe values to suppress false positives. The value is hashed before storage.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Rule Packs</h4>
+            <p>Install Ed25519-signed rule packs (Pro tier). The pack content is read by the browser and sent as bytes.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Upstreams</h4>
+            <p>Configure provider backends (URL, auth header). The proxy forwards to the matching upstream.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>CLI Commands</h3>
+        <table class="docs-table">
+          <thead><tr><th>Command</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>cerberus init</code></td><td>Auto-detect agents and create config</td></tr>
+            <tr><td><code>cerberus start</code></td><td>Start the local proxy daemon</td></tr>
+            <tr><td><code>cerberus stop</code></td><td>Stop the local proxy daemon</td></tr>
+            <tr><td><code>cerberus status</code></td><td>Show daemon status</td></tr>
+            <tr><td><code>cerberus scan &lt;file&gt;</code></td><td>Scan a file for secrets</td></tr>
+            <tr><td><code>cerberus test &lt;text&gt;</code></td><td>Test detection with inline text</td></tr>
+            <tr><td><code>cerberus doctor</code></td><td>System diagnostics</td></tr>
+            <tr><td><code>cerberus mode &lt;shadow|enforce&gt;</code></td><td>Change operation mode</td></tr>
+            <tr><td><code>cerberus mitm &lt;init|enable|status&gt;</code></td><td>Manage MITM forward proxy (opt-in)</td></tr>
+            <tr><td><code>cerberus pack &lt;install|rollback|list&gt;</code></td><td>Manage signed rule packs (Pro)</td></tr>
+            <tr><td><code>cerberus license</code></td><td>Show active license tier</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h3>API Endpoints</h3>
+        <table class="docs-table">
+          <thead><tr><th>Endpoint</th><th>Method</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>/health</code></td><td>GET</td><td>Health check</td></tr>
+            <tr><td><code>/api/config</code></td><td>GET</td><td>Current configuration (admin token never returned)</td></tr>
+            <tr><td><code>/api/config</code></td><td>PUT</td><td>Update configuration (hot-swap)</td></tr>
+            <tr><td><code>/api/events</code></td><td>GET</td><td>Audit events (flags + hashes)</td></tr>
+            <tr><td><code>/api/stats</code></td><td>GET</td><td>Aggregated statistics</td></tr>
+            <tr><td><code>/api/upstreams</code></td><td>GET/POST/DELETE</td><td>CRUD upstreams</td></tr>
+            <tr><td><code>/api/policy</code></td><td>GET/PUT</td><td>Detection policy (categories, rules)</td></tr>
+            <tr><td><code>/api/allowlist</code></td><td>POST/DELETE</td><td>Allowlist management</td></tr>
+            <tr><td><code>/api/packs</code></td><td>GET/POST/DELETE</td><td>Signed rule packs (Pro)</td></tr>
+            <tr><td><code>/api/dashboard</code></td><td>GET</td><td>This dashboard (CSP-protected)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h3>Security</h3>
+        <div class="docs-grid">
+          <div class="docs-card">
+            <h4>Zero Leak</h4>
+            <p>Raw secrets never written to disk, logs, telemetry, or notifications. Only SHA-256 hashes.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Fail-Closed</h4>
+            <p>If the engine fails, requests are rejected (not leaked). Configurable per deployment.</p>
+          </div>
+          <div class="docs-card">
+            <h4>No ReDoS</h4>
+            <p>Linear-time regex engine (RE2-like). All patterns verified with adversarial fuzzing.</p>
+          </div>
+          <div class="docs-card">
+            <h4>Break-Glass</h4>
+            <p>The X-Cerberus-Bypass header allows one-time bypass with an audited reason.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Stopping the Daemon</h3>
+        <p>This dashboard is served by the Cerberus daemon. Stopping the daemon will make this page unavailable.</p>
+        <pre><code># Stop the daemon (from the terminal)
+cerberus stop
+
+# Start it again
+cerberus start
+
+# Check status
+cerberus status</code></pre>
+      </div>
+    </div>
   </div>
 </div>
+
 <script>
-// Token de admin del control plane (review v5 F6). NUNCA se incrusta en el DOM
-// ni se manda por URL: se guarda en localStorage 'cerberus.adminJWT' y se envía
-// solo via header `X-Cerberus-Admin-Token`.
+// ── Token management ─────────────────────────────────────────────
 const TOKEN_KEY = 'cerberus.adminJWT';
 
 function getToken() {
   return window.localStorage ? localStorage.getItem(TOKEN_KEY) : null;
 }
 
-function showLogin(msg) {
-  document.getElementById('auth-card').hidden = false;
-  if (msg) document.getElementById('login-msg').textContent = msg;
+function showAuth(msg) {
+  const ov = document.getElementById('auth-overlay');
+  if (ov) {
+    ov.hidden = false;
+    if (msg) {
+      const p = ov.querySelector('p');
+      if (p) p.textContent = msg;
+    }
+  }
 }
 
-function hideLogin() {
-  document.getElementById('auth-card').hidden = true;
+function hideAuth() {
+  const ov = document.getElementById('auth-overlay');
+  if (ov) ov.hidden = true;
 }
 
 function saveToken() {
   const input = document.getElementById('cerberus-token');
   const t = (input.value || '').trim();
-  if (!t) {
-    document.getElementById('login-msg').textContent = 'Ingresa un token válido.';
-    return;
-  }
+  if (!t) { return; }
   if (window.localStorage) localStorage.setItem(TOKEN_KEY, t);
   input.value = '';
+  hideAuth();
   loadData();
 }
 
+// ── Fetch helpers ────────────────────────────────────────────────
 async function fetchJson(url) {
   const tok = getToken();
-  if (!tok) {
-    showLogin();
-    throw new Error('no token');
-  }
+  if (!tok) { showAuth(); throw new Error('no token'); }
   const resp = await fetch(url, { headers: { 'X-Cerberus-Admin-Token': tok } });
   if (resp.status === 401) {
     if (window.localStorage) localStorage.removeItem(TOKEN_KEY);
-    showLogin('Token inválido o expirado: pégalo de nuevo.');
+    showAuth('Token invalid or expired. Please enter it again.');
     throw new Error('unauthorized');
   }
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
   return resp.json();
 }
 
-// P1-13: NINGÚN dato proveniente de la API se interpola en HTML ni en atributos.
-// Toda salida dinámica se construye con nodos DOM y textContent (que escapa
-// automáticamente). Los handlers se asignan vía addEventListener/closure; nunca
-// se escriben atributos on*="" con contenido interpolado.
+async function sendJson(method, url, payload) {
+  const resp = await fetch(url, {
+    method,
+    headers: { 'content-type': 'application/json', 'X-Cerberus-Admin-Token': getToken() },
+    body: JSON.stringify(payload)
+  });
+  if (resp.status === 401) {
+    if (window.localStorage) localStorage.removeItem(TOKEN_KEY);
+    showAuth('Token invalid or expired.');
+    return null;
+  }
+  return resp;
+}
 
+async function reportError(what, resp) {
+  const body = await resp.json().catch(() => null);
+  const detail = body && body.error ? body.error : 'HTTP ' + resp.status;
+  window.alert(what + ' failed: ' + detail);
+}
+
+// ── DOM helpers ──────────────────────────────────────────────────
 function el(tag, className) {
   const n = document.createElement(tag);
   if (className) n.className = className;
   return n;
 }
 
-function tdCell(text) {
+function td(text) {
   const n = el('td');
   n.textContent = text === undefined || text === null ? '' : String(text);
   return n;
 }
 
-function thCell(text) {
-  const n = el('th');
-  n.textContent = text;
-  return n;
+function th(text) {
+  const n = el('th'); n.textContent = text; return n;
 }
 
-// Badge de acción (DOM, textContent): el `action` viene de la API y puede ser
-// cualquier string; juega seguro sin reflejarlo en HTML.
 function badge(action) {
   const map = { block: 'badge-block', redact: 'badge-redact', warn: 'badge-warn', allow: 'badge-allow', inherit: 'badge-inherit' };
-  const n = el('span', `badge ${map[action] || ''}`.trim());
+  const n = el('span', 'badge ' + (map[action] || ''));
   n.textContent = action;
   return n;
 }
 
-// ─── Filtro por proveedor (review v5 F6) ────────────────────────────────
+function setMsg(id, text, kind) {
+  const n = document.getElementById(id);
+  if (!n) return;
+  n.textContent = text || '';
+  n.className = 'msg' + (kind ? ' msg-' + kind : '');
+}
+
+// ── Tab navigation ───────────────────────────────────────────────
+let activeTab = 'overview';
+
+function switchTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const content = document.getElementById('tab-' + tab);
+  if (content) content.classList.add('active');
+  const nav = document.querySelector('.nav-item[data-tab="' + tab + '"]');
+  if (nav) nav.classList.add('active');
+  const titles = {
+    overview: 'Dashboard', events: 'Events', stats: 'Statistics',
+    config: 'Settings', upstreams: 'Upstreams', policy: 'Policy',
+    packs: 'Rule Packs', docs: 'Documentation'
+  };
+  const titleEl = document.getElementById('page-title');
+  if (titleEl) titleEl.textContent = titles[tab] || 'Dashboard';
+}
+
+// ── Provider filter ──────────────────────────────────────────────
 let currentProvider = '';
 
 function providerQuery() {
-  return currentProvider ? `?provider=${encodeURIComponent(currentProvider)}` : '';
-}
-
-function setProvider(p) {
-  currentProvider = p || '';
-  const sel = document.getElementById('provider-filter');
-  if (sel) sel.value = currentProvider;
-  loadData();
+  return currentProvider ? '?provider=' + encodeURIComponent(currentProvider) : '';
 }
 
 function applyProviderFilter() {
-  setProvider(document.getElementById('provider-filter').value);
+  const sel = document.getElementById('provider-filter');
+  if (sel) currentProvider = sel.value;
+  loadEvents();
+  loadStats();
 }
 
+function clearProviderFilter() {
+  currentProvider = '';
+  const sel = document.getElementById('provider-filter');
+  if (sel) sel.value = '';
+  loadEvents();
+  loadStats();
+}
+
+// ── Data loading ──────────────────────────────────────────────────
 async function loadData() {
-  if (!getToken()) { showLogin(); return; }
-  hideLogin();
+  if (!getToken()) { showAuth(); return; }
+  hideAuth();
   try {
     const q = providerQuery();
     const [stats, events] = await Promise.all([
       fetchJson('/api/stats' + q),
       fetchJson('/api/events' + q)
     ]);
+    loadConfigIntoControls();
+    renderOverview(stats, events);
+    renderEvents(events);
+    renderStats(stats);
+    renderProviderFilter(stats);
+  } catch (err) {
+    if (!getToken()) { showAuth(); return; }
+    const ov = document.getElementById('overview-stats');
+    if (ov) { ov.replaceChildren(); const e = el('div', 'error'); e.textContent = 'Error: ' + (err.message || err); ov.appendChild(e); }
+  }
+}
 
-    // Summary cards (DOM + textContent, sin innerHTML).
-    const sc = document.getElementById('summary-cards');
+function renderOverview(stats, events) {
+  const ov = document.getElementById('overview-stats');
+  if (!ov) return;
+  ov.replaceChildren();
+  const cards = [
+    { v: stats.total || 0, l: 'Total Events' },
+    { v: stats.by_provider?.length || 0, l: 'Providers' },
+    { v: stats.by_tool?.length || 0, l: 'Tools' },
+    { v: stats.top_flags?.length || 0, l: 'Distinct Flags' }
+  ];
+  for (const c of cards) {
+    const card = el('div', 'stat-card');
+    const v = el('div', 'stat-value'); v.textContent = c.v;
+    const l = el('div', 'stat-label'); l.textContent = c.l;
+    card.appendChild(v); card.appendChild(l); ov.appendChild(card);
+  }
+
+  // Recent events in overview (last 10)
+  const re = document.getElementById('overview-events');
+  if (re) {
+    re.replaceChildren();
+    if (events && events.length) {
+      const table = el('table');
+      const thead = el('thead'); const trH = el('tr');
+      for (const h of ['Time', 'Provider', 'Action', 'Flags']) trH.appendChild(th(h));
+      thead.appendChild(trH); table.appendChild(thead);
+      const tbody = el('tbody');
+      for (const e of events.slice(0, 10)) {
+        const tr = el('tr');
+        tr.appendChild(td(new Date(e.ts).toLocaleTimeString()));
+        tr.appendChild(td(e.provider));
+        const tda = el('td'); tda.appendChild(badge(e.action_taken)); tr.appendChild(tda);
+        tr.appendChild(td((e.flags || []).join(', ')));
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody); re.appendChild(table);
+    } else {
+      const d = el('div', 'loading'); d.textContent = 'No recent events'; re.appendChild(d);
+    }
+  }
+}
+
+function renderEvents(events) {
+  const box = document.getElementById('events-table');
+  if (!box) return;
+  box.replaceChildren();
+  if (!events || !events.length) {
+    const d = el('div', 'loading'); d.textContent = 'No events'; box.appendChild(d);
+    return;
+  }
+  const table = el('table');
+  const thead = el('thead'); const trH = el('tr');
+  for (const h of ['Timestamp', 'Tool', 'Provider', 'Action', 'Flags']) trH.appendChild(th(h));
+  thead.appendChild(trH); table.appendChild(thead);
+  const tbody = el('tbody');
+  for (const e of events.slice(0, 50)) {
+    const tr = el('tr');
+    tr.appendChild(td(new Date(e.ts).toLocaleString()));
+    tr.appendChild(td(e.tool));
+    tr.appendChild(td(e.provider));
+    const tda = el('td'); tda.appendChild(badge(e.action_taken)); tr.appendChild(tda);
+    tr.appendChild(td((e.flags || []).join(', ')));
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody); box.appendChild(table);
+}
+
+function renderStats(stats) {
+  // Stats cards
+  const sc = document.getElementById('stats-cards');
+  if (sc) {
     sc.replaceChildren();
     const cards = [
-      { v: stats.total, l: 'Total Eventos' },
-      { v: stats.by_provider?.length || 0, l: 'Proveedores' },
-      { v: stats.by_tool?.length || 0, l: 'Herramientas' },
-      { v: stats.top_flags?.length || 0, l: 'Flags Distintos' },
+      { v: stats.total || 0, l: 'Total Events' },
+      { v: stats.by_provider?.length || 0, l: 'Providers' },
+      { v: stats.by_tool?.length || 0, l: 'Tools' },
+      { v: stats.top_flags?.length || 0, l: 'Flags' }
     ];
     for (const c of cards) {
-      const card = el('div', 'card stat');
+      const card = el('div', 'stat-card');
       const v = el('div', 'stat-value'); v.textContent = c.v;
       const l = el('div', 'stat-label'); l.textContent = c.l;
       card.appendChild(v); card.appendChild(l); sc.appendChild(card);
     }
+  }
 
-    // Select de filtro + enlaces rápidos por proveedor.
-    renderProviderSelect(stats);
-    renderProviderLinks(stats);
-
-    // Provider stats
-    const ps = document.getElementById('provider-stats');
+  // By provider
+  const ps = document.getElementById('stats-provider');
+  if (ps) {
     ps.replaceChildren();
     if (stats.by_provider?.length) {
       const table = el('table');
-      const thead = el('thead');
-      const trH = el('tr');
-      for (const h of ['Proveedor', 'Eventos', 'Acciones']) trH.appendChild(thCell(h));
-      thead.appendChild(trH);
-      table.appendChild(thead);
+      const thead = el('thead'); const trH = el('tr');
+      for (const h of ['Provider', 'Events', 'Actions']) trH.appendChild(th(h));
+      thead.appendChild(trH); table.appendChild(thead);
       const tbody = el('tbody');
       for (const p of stats.by_provider) {
         const tr = el('tr');
-        tr.appendChild(tdCell(p.provider));
-        tr.appendChild(tdCell(p.total));
+        tr.appendChild(td(p.provider));
+        tr.appendChild(td(p.total));
         const tda = el('td');
         const entries = p.by_action ? Object.entries(p.by_action) : [];
         for (const [a, c] of entries) {
           tda.appendChild(badge(a));
-          const sp = el('span'); sp.textContent = ' ' + c; tda.appendChild(sp);
+          const sp = el('span'); sp.textContent = ' ' + c + '  '; tda.appendChild(sp);
         }
-        tr.appendChild(tda);
-        tbody.appendChild(tr);
+        tr.appendChild(tda); tbody.appendChild(tr);
       }
-      table.appendChild(tbody);
-      ps.appendChild(table);
+      table.appendChild(tbody); ps.appendChild(table);
     } else {
-      const d = el('div', 'loading'); d.textContent = 'Sin datos de proveedores'; ps.appendChild(d);
+      const d = el('div', 'loading'); d.textContent = 'No provider data'; ps.appendChild(d);
     }
+  }
 
-    // Recent events
-    const re = document.getElementById('recent-events');
-    re.replaceChildren();
-    if (events.length) {
+  // Top flags
+  const tf = document.getElementById('stats-flags');
+  if (tf) {
+    tf.replaceChildren();
+    if (stats.top_flags?.length) {
       const table = el('table');
-      const thead = el('thead');
-      const trH = el('tr');
-      for (const h of ['Timestamp', 'Tool', 'Provider', 'Acción', 'Flags']) trH.appendChild(thCell(h));
-      thead.appendChild(trH);
-      table.appendChild(thead);
+      const thead = el('thead'); const trH = el('tr');
+      for (const h of ['Flag', 'Count']) trH.appendChild(th(h));
+      thead.appendChild(trH); table.appendChild(thead);
       const tbody = el('tbody');
-      for (const e of events.slice(0, 20)) {
+      for (const f of stats.top_flags) {
         const tr = el('tr');
-        tr.appendChild(tdCell(new Date(e.ts).toLocaleString()));
-        tr.appendChild(tdCell(e.tool));
-        tr.appendChild(tdCell(e.provider));
-        const tda = el('td'); tda.appendChild(badge(e.action_taken)); tr.appendChild(tda);
-        tr.appendChild(tdCell((e.flags || []).join(', ')));
+        tr.appendChild(td(f.flag || f[0]));
+        tr.appendChild(td(f.count || f[1]));
         tbody.appendChild(tr);
       }
-      table.appendChild(tbody);
-      re.appendChild(table);
+      table.appendChild(tbody); tf.appendChild(table);
     } else {
-      const d = el('div', 'loading'); d.textContent = 'No hay eventos recientes'; re.appendChild(d);
+      const d = el('div', 'loading'); d.textContent = 'No flag data'; tf.appendChild(d);
     }
-
-    renderConfig();
-    renderUpstreams();
-    renderPacks();
-    renderPolicy();
-  } catch (err) {
-    if (!getToken()) { showLogin(); return; }
-    const sc = document.getElementById('summary-cards');
-    sc.replaceChildren();
-    const e = el('div', 'error');
-    e.textContent = 'Error: ' + (err && err.message ? err.message : err);
-    sc.appendChild(e);
   }
 }
 
-function renderProviderSelect(stats) {
+function renderProviderFilter(stats) {
   const sel = document.getElementById('provider-filter');
+  if (!sel) return;
   const providers = (stats.by_provider || []).map(p => p.provider);
   sel.replaceChildren();
-  const all = el('option');
-  all.value = '';
-  all.textContent = 'Todos los proveedores';
-  if (currentProvider === '') all.selected = true;
-  sel.appendChild(all);
+  const all = el('option'); all.value = ''; all.textContent = 'All providers'; sel.appendChild(all);
   for (const p of providers) {
-    const opt = el('option');
-    opt.value = p;
-    opt.textContent = p;
-    if (p === currentProvider) opt.selected = true;
-    sel.appendChild(opt);
+    const opt = el('option'); opt.value = p; opt.textContent = p; sel.appendChild(opt);
   }
+  if (currentProvider) sel.value = currentProvider;
 }
 
-function renderProviderLinks(stats) {
-  const box = document.getElementById('provider-links');
-  box.replaceChildren();
-  const providers = (stats.by_provider || []).map(p => p.provider);
-  if (!providers.length) {
-    const d = el('div', 'loading'); d.textContent = 'Sin datos de proveedores'; box.appendChild(d);
-    return;
-  }
-  // Los links son solo chips: no llevan el provider en un href y capturan el
-  // valor por closure, así un provider malicioso no puede inyectar JS.
-  for (const p of providers) {
-    const a = el('a');
-    a.href = '#';
-    a.textContent = p;
-    a.addEventListener('click', (ev) => { ev.preventDefault(); setProvider(p); });
-    box.appendChild(a);
-  }
-}
-
-// ─── Configuración (paridad CLI/UI, review v5 F6) ───────────────────────
+// ── Config ───────────────────────────────────────────────────────
 let pendingConfig = null;
 
-function configValue(v) {
-  return (v === undefined || v === null) ? '' : String(v);
-}
-
-function renderConfig() {
-  const conEl = document.getElementById('config-view');
+function loadConfigIntoControls() {
   fetchJson('/api/config').then(cfg => {
     pendingConfig = cfg;
-    conEl.replaceChildren();
-    const table = el('table');
-    const thead = el('thead');
-    const trH = el('tr');
-    for (const h of ['Campo', 'Valor']) trH.appendChild(thCell(h));
-    thead.appendChild(trH);
-    table.appendChild(thead);
-    const tbody = el('tbody');
-    tbody.id = 'config-fields';
-    const fields = ['listen', 'mode', 'fail_policy', 'max_body_bytes', 'health_path', 'log_level'];
-    for (const key of fields) {
-      const tr = el('tr');
-      tr.appendChild(tdCell(key));
-      tr.appendChild(tdCell(configValue(cfg[key])));
-      tbody.appendChild(tr);
+    // Mode toggle
+    const modeToggle = document.getElementById('mode-toggle');
+    if (modeToggle) {
+      modeToggle.querySelectorAll('.toggle-opt').forEach(b => {
+        b.classList.toggle('active', b.dataset.mode === cfg.mode);
+      });
     }
-    const trU = el('tr');
-    trU.appendChild(tdCell('upstreams'));
-    trU.appendChild(tdCell(cfg.upstreams ? Object.keys(cfg.upstreams).join(', ') : '—'));
-    tbody.appendChild(trU);
-    const trT = el('tr');
-    trT.appendChild(tdCell('admin_token')); // el token jamás se imprime en el DOM
-    // La API expone SOLO el booleano derivado; `cfg.admin_token` no existe.
-    trT.appendChild(tdCell(cfg.admin_token_configured ? 'configurado' : 'no configurado'));
-    tbody.appendChild(trT);
-    table.appendChild(tbody);
-    conEl.appendChild(table);
-    const actions = el('div');
-    actions.id = 'config-actions';
-    const btn = el('button');
-    btn.textContent = 'Editar';
-    btn.addEventListener('click', startEditConfig);
-    actions.appendChild(btn);
-    conEl.appendChild(actions);
-  }).catch(err => {
-    if (getToken()) {
-      conEl.replaceChildren();
-      const d = el('div', 'error');
-      d.textContent = 'Config: ' + (err && err.message ? err.message : err);
-      conEl.appendChild(d);
+    // Fail policy toggle
+    const fpToggle = document.getElementById('failpolicy-toggle');
+    if (fpToggle) {
+      fpToggle.querySelectorAll('.toggle-opt').forEach(b => {
+        b.classList.toggle('active', b.dataset.failpolicy === cfg.fail_policy);
+      });
     }
-  });
+    renderConfigTable(cfg);
+  }).catch(() => {});
 }
 
-function startEditConfig() {
-  const cfg = pendingConfig || {};
-  const tbody = document.getElementById('config-fields');
-  tbody.replaceChildren();
+function renderConfigTable(cfg) {
+  const box = document.getElementById('config-view');
+  if (!box) return;
+  box.replaceChildren();
+  const table = el('table');
+  const tbody = el('tbody');
   const fields = ['listen', 'mode', 'fail_policy', 'max_body_bytes', 'health_path', 'log_level'];
   for (const key of fields) {
     const tr = el('tr');
-    tr.appendChild(tdCell(key));
-    const tdv = el('td');
-    const inp = el('input');
-    inp.id = 'cfg-' + key;
-    inp.type = 'text';
-    inp.value = configValue(cfg[key]);
-    tdv.appendChild(inp);
-    tr.appendChild(tdv);
+    tr.appendChild(td(key));
+    tr.appendChild(td(cfg[key] !== undefined && cfg[key] !== null ? String(cfg[key]) : '—'));
     tbody.appendChild(tr);
   }
-  const actions = document.getElementById('config-actions');
-  actions.replaceChildren();
-  const saveBtn = el('button');
-  saveBtn.textContent = 'Guardar cambios';
-  saveBtn.addEventListener('click', saveConfig);
-  actions.appendChild(saveBtn);
-  const cancelBtn = el('button');
-  cancelBtn.textContent = 'Cancelar';
-  cancelBtn.addEventListener('click', renderConfig);
-  actions.appendChild(cancelBtn);
+  // Upstreams summary
+  const trU = el('tr');
+  trU.appendChild(td('upstreams'));
+  trU.appendChild(td(cfg.upstreams ? Object.keys(cfg.upstreams).join(', ') : '—'));
+  tbody.appendChild(trU);
+  // Admin token (boolean only)
+  const trA = el('tr');
+  trA.appendChild(td('admin_token'));
+  trA.appendChild(td(cfg.admin_token_configured ? 'configured' : 'not configured'));
+  tbody.appendChild(trA);
+  table.appendChild(tbody); box.appendChild(table);
+
+  // Edit form
+  const edit = document.getElementById('config-edit');
+  if (edit) {
+    edit.replaceChildren();
+    const formRows = [
+      { id: 'cfg-listen', label: 'listen', value: cfg.listen || '' },
+      { id: 'cfg-mode', label: 'mode', value: cfg.mode || '' },
+      { id: 'cfg-fail_policy', label: 'fail_policy', value: cfg.fail_policy || '' },
+      { id: 'cfg-max_body_bytes', label: 'max_body_bytes', value: cfg.max_body_bytes || '' },
+      { id: 'cfg-health_path', label: 'health_path', value: cfg.health_path || '' },
+      { id: 'cfg-log_level', label: 'log_level', value: cfg.log_level || '' }
+    ];
+    for (const f of formRows) {
+      const row = el('div', 'form-row');
+      const lab = el('label'); lab.textContent = f.label;
+      const inp = el('input'); inp.type = 'text'; inp.id = f.id; inp.value = String(f.value);
+      row.appendChild(lab); row.appendChild(inp); edit.appendChild(row);
+    }
+    const btn = el('button', 'primary sm'); btn.textContent = 'Save changes';
+    btn.addEventListener('click', saveConfig);
+    edit.appendChild(btn);
+  }
 }
 
-// PUT /api/config es un PATCH (api.rs::ConfigPatch): sólo se mandan los
-// campos editados. En particular NO se manda `admin_token` (el GET no lo
-// revela y omitirlo lo preserva) ni `admin_token_configured` (sólo lectura).
 async function saveConfig() {
   const val = id => (document.getElementById(id) || { value: '' }).value;
   const mb = val('cfg-max_body_bytes');
@@ -476,50 +1297,220 @@ async function saveConfig() {
     fail_policy: val('cfg-fail_policy'),
     max_body_bytes: mb === '' ? null : Number(mb),
     health_path: val('cfg-health_path'),
-    log_level: val('cfg-log_level'),
+    log_level: val('cfg-log_level')
   };
   const resp = await sendJson('PUT', '/api/config', patch);
   if (!resp) return;
   if (!resp.ok) { await reportError('PUT /api/config', resp); return; }
   const body = await resp.json().catch(() => ({}));
   if (body.requires_restart) {
-    window.alert('Config guardada. El cambio de `listen` aplica en el siguiente arranque.');
+    window.alert('Configuration saved. The listen change takes effect on the next restart.');
   }
+  setMsg('config-msg', 'Saved', 'ok');
   loadData();
 }
 
-// ─── Helpers de mutación (F6) ────────────────────────────────────────────
-
-// Envía JSON con el admin token. Devuelve null si la sesión caducó (ya
-// gestionado mostrando el login), o la Response en cualquier otro caso.
-async function sendJson(method, url, payload) {
-  const resp = await fetch(url, {
-    method,
-    headers: { 'content-type': 'application/json', 'X-Cerberus-Admin-Token': getToken() },
-    body: JSON.stringify(payload)
-  });
-  if (resp.status === 401) {
-    if (window.localStorage) localStorage.removeItem(TOKEN_KEY);
-    showLogin('Token inválido o expirado.');
-    return null;
+// ── Mode / fail policy toggles ────────────────────────────────────
+async function setMode(mode) {
+  const resp = await sendJson('PUT', '/api/config', { mode });
+  if (!resp || !resp.ok) {
+    if (resp) await reportError('Mode change', resp);
+    loadConfigIntoControls();
+    return;
   }
-  return resp;
+  loadConfigIntoControls();
+  loadData();
 }
 
-// Muestra el `error` que devuelve la API (nunca se interpola en HTML: va por
-// textContent / window.alert).
-async function reportError(what, resp) {
-  const body = await resp.json().catch(() => null);
-  const detail = body && body.error ? body.error : `HTTP ${resp.status}`;
-  window.alert(`${what} falló: ${detail}`);
+async function setFailPolicy(fp) {
+  const resp = await sendJson('PUT', '/api/config', { fail_policy: fp });
+  if (!resp || !resp.ok) {
+    if (resp) await reportError('Fail policy change', resp);
+    loadConfigIntoControls();
+    return;
+  }
+  loadConfigIntoControls();
+  loadData();
 }
 
-function setMsg(id, text) {
-  const n = document.getElementById(id);
-  if (n) n.textContent = text || '';
+// ── Upstreams ────────────────────────────────────────────────────
+async function renderUpstreams() {
+  const box = document.getElementById('upstreams-view');
+  if (!box) return;
+  try {
+    const list = await fetchJson('/api/upstreams');
+    box.replaceChildren();
+    const rows = Array.isArray(list) ? list : [];
+    if (!rows.length) {
+      const d = el('div', 'loading'); d.textContent = 'No upstreams configured'; box.appendChild(d);
+      return;
+    }
+    const table = el('table');
+    const thead = el('thead'); const trH = el('tr');
+    for (const h of ['Name', 'URL', 'Auth Header', '']) trH.appendChild(th(h));
+    thead.appendChild(trH); table.appendChild(thead);
+    const tbody = el('tbody');
+    for (const u of rows) {
+      const tr = el('tr');
+      const name = u.name || '';
+      tr.appendChild(td(name));
+      tr.appendChild(td(u.url || ''));
+      tr.appendChild(td(u.auth_header || ''));
+      const tdb = el('td');
+      const btn = el('button', 'danger sm'); btn.type = 'button'; btn.textContent = 'Remove';
+      btn.addEventListener('click', () => deleteUpstream(name));
+      tdb.appendChild(btn); tr.appendChild(tdb); tbody.appendChild(tr);
+    }
+    table.appendChild(tbody); box.appendChild(table);
+  } catch (err) {
+    if (!getToken()) return;
+    box.replaceChildren();
+    const d = el('div', 'loading'); d.textContent = 'Upstreams: ' + (err.message || err); box.appendChild(d);
+  }
 }
 
-// ─── Rule packs (F6) — misma API que el CLI `cerberus pack` ─────────────
+async function addUpstream() {
+  const name = (document.getElementById('up-name').value || '').trim();
+  const url = (document.getElementById('up-url').value || '').trim();
+  const auth = (document.getElementById('up-auth').value || '').trim();
+  if (!name || !url) { setMsg('upstream-msg', 'Name and URL are required', 'err'); return; }
+  const payload = { name, url };
+  if (auth) payload.auth_header = auth;
+  const resp = await sendJson('POST', '/api/upstreams', payload);
+  if (!resp) return;
+  if (!resp.ok) { await reportError('Add upstream', resp); return; }
+  setMsg('upstream-msg', name + ' saved', 'ok');
+  renderUpstreams();
+}
+
+async function deleteUpstream(name) {
+  const resp = await sendJson('DELETE', '/api/upstreams/' + encodeURIComponent(name), {});
+  if (!resp) return;
+  if (!resp.ok) { await reportError('Delete upstream', resp); return; }
+  setMsg('upstream-msg', name + ' removed', 'ok');
+  renderUpstreams();
+}
+
+// ── Policy ───────────────────────────────────────────────────────
+let validActions = ['allow', 'warn', 'redact', 'block'];
+
+function fillActionSelect(id) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  const prev = sel.value;
+  sel.replaceChildren();
+  for (const a of validActions) {
+    const opt = el('option'); opt.value = a; opt.textContent = a;
+    if (a === prev) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+function renderPolicyTable(box, entries, onRemove) {
+  box.replaceChildren();
+  if (!entries.length) {
+    const d = el('div', 'loading'); d.textContent = 'No entries'; box.appendChild(d);
+    return;
+  }
+  const table = el('table');
+  const thead = el('thead'); const trH = el('tr');
+  for (const h of ['Key', 'Action', '']) trH.appendChild(th(h));
+  thead.appendChild(trH); table.appendChild(thead);
+  const tbody = el('tbody');
+  for (const [key, action] of entries) {
+    const tr = el('tr');
+    tr.appendChild(td(key));
+    const inherited = action === null;
+    const tda = el('td'); tda.appendChild(badge(inherited ? 'inherit' : action)); tr.appendChild(tda);
+    const tdb = el('td');
+    if (inherited) { tdb.textContent = 'rule default'; tdb.className = 'muted'; }
+    else {
+      const btn = el('button', 'danger sm'); btn.type = 'button'; btn.textContent = 'Remove';
+      btn.addEventListener('click', () => onRemove(key));
+      tdb.appendChild(btn);
+    }
+    tr.appendChild(tdb); tbody.appendChild(tr);
+  }
+  table.appendChild(tbody); box.appendChild(table);
+}
+
+async function renderPolicy() {
+  const catBox = document.getElementById('categories-view');
+  const ruleBox = document.getElementById('rules-view');
+  const allowBox = document.getElementById('allowlist-view');
+  if (!catBox || !ruleBox || !allowBox) return;
+  try {
+    const pol = await fetchJson('/api/policy');
+    if (Array.isArray(pol.valid_actions) && pol.valid_actions.length) validActions = pol.valid_actions;
+    fillActionSelect('cat-action');
+    fillActionSelect('rule-action');
+    const cats = pol.categories || {};
+    const catNames = Array.isArray(pol.valid_categories) ? pol.valid_categories : Object.keys(cats);
+    const catEntries = catNames.map(k => [k, Object.prototype.hasOwnProperty.call(cats, k) ? cats[k] : null]);
+    renderPolicyTable(catBox, catEntries, k => setCategory(k, null));
+    renderPolicyTable(ruleBox, Object.entries(pol.rules || {}), k => setRule(k, null));
+    renderAllowlist(allowBox, pol.allowlist || []);
+  } catch (err) {
+    if (!getToken()) return;
+    for (const box of [catBox, ruleBox, allowBox]) {
+      box.replaceChildren();
+      const d = el('div', 'loading'); d.textContent = 'Policy: ' + (err.message || err); box.appendChild(d);
+    }
+  }
+}
+
+function renderAllowlist(box, values) {
+  box.replaceChildren();
+  if (!values.length) {
+    const d = el('div', 'loading'); d.textContent = 'Allowlist is empty'; box.appendChild(d);
+    return;
+  }
+  const table = el('table');
+  const tbody = el('tbody');
+  for (const v of values) {
+    const tr = el('tr');
+    tr.appendChild(td(v));
+    const td2 = el('td');
+    const btn = el('button', 'danger sm'); btn.type = 'button'; btn.textContent = 'Remove';
+    btn.addEventListener('click', () => removeAllowlist(v));
+    td2.appendChild(btn); tr.appendChild(td2); tbody.appendChild(tr);
+  }
+  table.appendChild(tbody); box.appendChild(table);
+}
+
+async function patchPolicy(field, key, action) {
+  const payload = {};
+  payload[field] = {};
+  payload[field][key] = action;
+  const resp = await sendJson('PUT', '/api/policy', payload);
+  if (!resp) return;
+  if (!resp.ok) { await reportError('PUT /api/policy', resp); return; }
+  renderPolicy();
+}
+
+function setCategory(key, action) { return patchPolicy('categories', key, action); }
+function setRule(key, action) { return patchPolicy('rules', key, action); }
+
+async function addAllowlist() {
+  const value = (document.getElementById('allow-value').value || '').trim();
+  if (!value) { setMsg('allowlist-msg', 'Enter a value', 'err'); return; }
+  const resp = await sendJson('POST', '/api/allowlist', { value });
+  if (!resp) return;
+  if (!resp.ok) { await reportError('POST /api/allowlist', resp); return; }
+  document.getElementById('allow-value').value = '';
+  setMsg('allowlist-msg', 'Added', 'ok');
+  renderPolicy();
+}
+
+async function removeAllowlist(value) {
+  const resp = await sendJson('DELETE', '/api/allowlist', { value });
+  if (!resp) return;
+  if (!resp.ok) { await reportError('DELETE /api/allowlist', resp); return; }
+  setMsg('allowlist-msg', 'Removed', 'ok');
+  renderPolicy();
+}
+
+// ── Rule packs ───────────────────────────────────────────────────
 const PACK_WIRE_VERSION = 2;
 const MAX_PACK_BYTES = 523776;
 
@@ -537,8 +1528,7 @@ async function renderPacks() {
     box.replaceChildren();
     const msg = String(err && err.message ? err.message : err);
     const d = el('div', 'loading');
-    // 503 = el daemon corre sin pack worker (modo local/tests).
-    d.textContent = /503/.test(msg) ? 'pack worker no conectado (modo local)' : 'Packs: ' + msg;
+    d.textContent = /503/.test(msg) ? 'Pack worker not connected (local mode)' : 'Packs: ' + msg;
     box.appendChild(d);
   }
 }
@@ -546,294 +1536,59 @@ async function renderPacks() {
 async function installPack() {
   const input = document.getElementById('pack-file');
   const file = input && input.files ? input.files[0] : null;
-  if (!file) {
-    setMsg('packs-msg', 'Selecciona un archivo de pack firmado (.json).');
-    return;
-  }
-  if (file.size === 0) {
-    setMsg('packs-msg', 'El archivo seleccionado está vacío.');
-    return;
-  }
-  if (file.size > MAX_PACK_BYTES) {
-    setMsg('packs-msg', `El pack ocupa ${file.size} bytes; el máximo es ${MAX_PACK_BYTES}.`);
-    return;
-  }
-
-  setMsg('packs-msg', `Leyendo ${file.name || 'pack seleccionado'}…`);
+  if (!file) { setMsg('packs-msg', 'Select a signed pack file (.json)', 'err'); return; }
+  if (file.size === 0) { setMsg('packs-msg', 'The selected file is empty', 'err'); return; }
+  if (file.size > MAX_PACK_BYTES) { setMsg('packs-msg', 'Pack exceeds ' + MAX_PACK_BYTES + ' bytes', 'err'); return; }
+  setMsg('packs-msg', 'Reading ' + (file.name || 'pack') + '...');
   let pack;
   try {
     const bytes = await file.arrayBuffer();
     pack = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch (err) {
-    const detail = err && err.message ? err.message : String(err);
-    setMsg('packs-msg', `No se pudo leer el pack como UTF-8: ${detail}`);
+    setMsg('packs-msg', 'Cannot read as UTF-8: ' + (err.message || err), 'err');
     return;
   }
-
-  // PackInstallRequest wire v2 exacto: sólo contenido firmado, nunca
-  // input.value ni otro dato con semántica de ruta local.
   const request = { wire_version: PACK_WIRE_VERSION, pack };
-  setMsg('packs-msg', `Instalando ${file.name || 'pack seleccionado'}…`);
+  setMsg('packs-msg', 'Installing...');
   try {
     const resp = await sendJson('POST', '/api/packs/install', request);
     if (!resp) return;
     const body = await resp.json().catch(() => ({}));
-    setMsg(
-      'packs-msg',
-      resp.ok
-        ? (body.message || 'Pack instalado correctamente.')
-        : `No se pudo instalar el pack: ${body.error || `HTTP ${resp.status}`}`
-    );
-    if (resp.ok) {
-      input.value = '';
-      renderPacks();
-    }
+    setMsg('packs-msg', resp.ok ? (body.message || 'Installed') : ('Failed: ' + (body.error || 'HTTP ' + resp.status)), resp.ok ? 'ok' : 'err');
+    if (resp.ok) { input.value = ''; renderPacks(); }
   } catch (err) {
-    const detail = err && err.message ? err.message : String(err);
-    setMsg('packs-msg', `No se pudo contactar al daemon: ${detail}`);
+    setMsg('packs-msg', 'Cannot reach daemon: ' + (err.message || err), 'err');
   }
 }
 
 async function rollbackPack() {
-  setMsg('packs-msg', 'Revirtiendo…');
+  setMsg('packs-msg', 'Rolling back...');
   const resp = await sendJson('POST', '/api/packs/rollback', {});
   if (!resp) return;
   const body = await resp.json().catch(() => ({}));
-  setMsg('packs-msg', resp.ok ? (body.message || 'rollback aplicado') : (body.error || `HTTP ${resp.status}`));
+  setMsg('packs-msg', resp.ok ? (body.message || 'Rolled back') : (body.error || 'HTTP ' + resp.status), resp.ok ? 'ok' : 'err');
   renderPacks();
 }
 
-// ─── Política: categorías, reglas propias y allowlist (F6) ──────────────
-let validActions = ['allow', 'warn', 'redact', 'block'];
-
-function fillActionSelect(id) {
-  const sel = document.getElementById(id);
-  if (!sel) return;
-  const previous = sel.value;
-  sel.replaceChildren();
-  for (const a of validActions) {
-    const opt = el('option');
-    opt.value = a;
-    opt.textContent = a;
-    if (a === previous) opt.selected = true;
-    sel.appendChild(opt);
-  }
-}
-
-// Tabla clave → acción con un botón "Quitar" por fila. El nombre de la clave
-// se captura por closure, nunca se interpola en HTML ni en un atributo.
-function renderPolicyTable(box, entries, onRemove) {
-  box.replaceChildren();
-  if (!entries.length) {
-    const d = el('div', 'loading'); d.textContent = 'Sin entradas'; box.appendChild(d);
-    return;
-  }
-  const table = el('table');
-  const thead = el('thead');
-  const trH = el('tr');
-  for (const h of ['Clave', 'Acción', '']) trH.appendChild(thCell(h));
-  thead.appendChild(trH);
-  table.appendChild(thead);
-  const tbody = el('tbody');
-  for (const [key, action] of entries) {
-    const tr = el('tr');
-    tr.appendChild(tdCell(key));
-    const inherited = action === null;
-    const tda = el('td'); tda.appendChild(badge(inherited ? 'inherit' : action)); tr.appendChild(tda);
-    const tdb = el('td');
-    if (inherited) {
-      tdb.textContent = 'acción declarada por la regla';
-      tdb.className = 'muted';
-    } else {
-      const btn = el('button', 'danger');
-      btn.type = 'button';
-      btn.textContent = 'Quitar';
-      btn.addEventListener('click', () => onRemove(key));
-      tdb.appendChild(btn);
-    }
-    tr.appendChild(tdb);
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  box.appendChild(table);
-}
-
-async function renderPolicy() {
-  const catBox = document.getElementById('categories-view');
-  const ruleBox = document.getElementById('rules-view');
-  const allowBox = document.getElementById('allowlist-view');
-  if (!catBox || !ruleBox || !allowBox) return;
-  try {
-    const pol = await fetchJson('/api/policy');
-    if (Array.isArray(pol.valid_actions) && pol.valid_actions.length) validActions = pol.valid_actions;
-    fillActionSelect('cat-action');
-    fillActionSelect('rule-action');
-    const configuredCategories = pol.categories || {};
-    const categoryNames = Array.isArray(pol.valid_categories) ? pol.valid_categories : Object.keys(configuredCategories);
-    const categoryEntries = categoryNames.map(k => [
-      k,
-      Object.prototype.hasOwnProperty.call(configuredCategories, k) ? configuredCategories[k] : null
-    ]);
-    renderPolicyTable(catBox, categoryEntries, k => setCategory(k, null));
-    renderPolicyTable(ruleBox, Object.entries(pol.rules || {}), k => setRule(k, null));
-    // `persisted:false` = el overlay vive en memoria del daemon (ver api.rs).
-    if (pol.persisted === false) {
-      const note = el('div', 'note');
-      note.textContent = 'Este overlay vive en memoria del daemon: se pierde al reiniciar (aún no se serializa al YAML).';
-      ruleBox.appendChild(note);
-    }
-    renderAllowlist(allowBox, pol.allowlist || []);
-  } catch (err) {
-    if (!getToken()) return;
-    const msg = String(err && err.message ? err.message : err);
-    for (const box of [catBox, ruleBox, allowBox]) {
-      box.replaceChildren();
-      const d = el('div', 'loading'); d.textContent = 'Política: ' + msg; box.appendChild(d);
-    }
-  }
-}
-
-function renderAllowlist(box, values) {
-  box.replaceChildren();
-  if (!values.length) {
-    const d = el('div', 'loading'); d.textContent = 'Allowlist vacía'; box.appendChild(d);
-    return;
-  }
-  const table = el('table');
-  const tbody = el('tbody');
-  for (const v of values) {
-    const tr = el('tr');
-    tr.appendChild(tdCell(v));
-    const td = el('td');
-    const btn = el('button', 'danger');
-    btn.type = 'button';
-    btn.textContent = 'Quitar';
-    btn.addEventListener('click', () => removeAllowlist(v));
-    td.appendChild(btn);
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  box.appendChild(table);
-}
-
-// `action === null` borra la entrada (semántica de PolicyPatch en api.rs).
-async function patchPolicy(field, key, action) {
-  const payload = {};
-  payload[field] = {};
-  payload[field][key] = action;
-  const resp = await sendJson('PUT', '/api/policy', payload);
-  if (!resp) return;
-  if (!resp.ok) { await reportError('PUT /api/policy', resp); return; }
-  setMsg('policy-msg', action === null ? `${key} eliminado` : `${key} → ${action}`);
-  renderPolicy();
-}
-
-function setCategory(key, action) { return patchPolicy('categories', key, action); }
-function setRule(key, action) { return patchPolicy('rules', key, action); }
-
-async function addAllowlist() {
-  const value = (document.getElementById('allow-value').value || '').trim();
-  if (!value) { setMsg('allowlist-msg', 'Indica un valor.'); return; }
-  const resp = await sendJson('POST', '/api/allowlist', { value });
-  if (!resp) return;
-  if (!resp.ok) { await reportError('POST /api/allowlist', resp); return; }
-  document.getElementById('allow-value').value = '';
-  setMsg('allowlist-msg', `${value} añadido`);
-  renderPolicy();
-}
-
-async function removeAllowlist(value) {
-  const resp = await sendJson('DELETE', '/api/allowlist', { value });
-  if (!resp) return;
-  if (!resp.ok) { await reportError('DELETE /api/allowlist', resp); return; }
-  setMsg('allowlist-msg', `${value} eliminado`);
-  renderPolicy();
-}
-
-// ─── Providers: alta y baja (F6) ────────────────────────────────────────
-async function addUpstream() {
-  const name = (document.getElementById('up-name').value || '').trim();
-  const url = (document.getElementById('up-url').value || '').trim();
-  const auth = (document.getElementById('up-auth').value || '').trim();
-  if (!name || !url) { setMsg('upstream-msg', 'name y url son obligatorios.'); return; }
-  const payload = { name, url };
-  if (auth) payload.auth_header = auth;
-  const resp = await sendJson('POST', '/api/upstreams', payload);
-  if (!resp) return;
-  if (!resp.ok) { await reportError('POST /api/upstreams', resp); return; }
-  setMsg('upstream-msg', `${name} guardado`);
-  renderUpstreams();
-}
-
-async function deleteUpstream(name) {
-  const resp = await sendJson('DELETE', '/api/upstreams/' + encodeURIComponent(name), {});
-  if (!resp) return;
-  if (!resp.ok) { await reportError('DELETE /api/upstreams', resp); return; }
-  setMsg('upstream-msg', `${name} eliminado`);
-  renderUpstreams();
-}
-
-// ─── Providers (CRUD), añadido por el agente de API en paralelo ─────────
-// Resiliente: si /api/upstreams no existe (fetch 404), se muestra "no
-// disponible aún" sin bloquear el resto del dashboard. Nunca refleja datos en
-// href; usa textContent en celdas.
-async function renderUpstreams() {
-  const conEl = document.getElementById('upstreams-view');
-  if (!conEl) return;
-  try {
-    const list = await fetchJson('/api/upstreams');
-    conEl.replaceChildren();
-    const rows = Array.isArray(list) ? list : [];
-    if (!rows.length) {
-      const d = el('div', 'loading'); d.textContent = 'Sin providers configurados'; conEl.appendChild(d);
-      return;
-    }
-    const table = el('table');
-    const thead = el('thead');
-    const trH = el('tr');
-    for (const h of ['Provider', 'Base URL', 'auth_header', '']) trH.appendChild(thCell(h));
-    thead.appendChild(trH);
-    table.appendChild(thead);
-    const tbody = el('tbody');
-    for (const u of rows) {
-      const tr = el('tr');
-      const name = u.name || '';
-      tr.appendChild(tdCell(name));
-      tr.appendChild(tdCell(u.url || ''));
-      tr.appendChild(tdCell(u.auth_header || ''));
-      const td = el('td');
-      const btn = el('button', 'danger');
-      btn.type = 'button';
-      btn.textContent = 'Quitar';
-      btn.addEventListener('click', () => deleteUpstream(name));
-      td.appendChild(btn);
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    conEl.appendChild(table);
-  } catch (err) {
-    if (!getToken()) return;
-    conEl.replaceChildren();
-    const msg = String(err && err.message ? err.message : err);
-    const d = el('div', 'loading');
-    d.textContent = /404/.test(msg)
-      ? 'endpoint de providers no disponible aún'
-      : 'Providers: ' + msg;
-    conEl.appendChild(d);
-  }
-}
-
-// Todos los handlers se enganchan aquí: la CSP servida por api.rs ya no
-// lleva 'unsafe-inline', así que un `onclick=` en el HTML no se ejecutaría.
+// ── Event bindings ───────────────────────────────────────────────
 function on(id, fn) {
   const n = document.getElementById(id);
   if (n) n.addEventListener('click', fn);
 }
+
+// Tab navigation
+document.querySelectorAll('.nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    const tab = item.dataset.tab;
+    if (tab) switchTab(tab);
+  });
+});
+
+// Buttons
 on('btn-refresh', loadData);
 on('btn-save-token', saveToken);
 on('btn-apply-provider', applyProviderFilter);
+on('btn-clear-provider', clearProviderFilter);
 on('btn-add-upstream', addUpstream);
 on('btn-install-pack', installPack);
 on('btn-rollback-pack', rollbackPack);
@@ -846,14 +1601,28 @@ on('btn-set-rule', () => setRule(
   (document.getElementById('rule-id').value || '').trim(),
   document.getElementById('rule-action').value
 ));
-// El campo de token se envía también con Enter.
+
+// Mode toggle buttons
+document.querySelectorAll('#mode-toggle .toggle-opt').forEach(b => {
+  b.addEventListener('click', () => setMode(b.dataset.mode));
+});
+document.querySelectorAll('#failpolicy-toggle .toggle-opt').forEach(b => {
+  b.addEventListener('click', () => setFailPolicy(b.dataset.failpolicy));
+});
+
+// Token input: submit on Enter
 const tokenInput = document.getElementById('cerberus-token');
 if (tokenInput) {
   tokenInput.addEventListener('keydown', ev => { if (ev.key === 'Enter') saveToken(); });
 }
+
+// Init
 fillActionSelect('cat-action');
 fillActionSelect('rule-action');
 loadData();
+renderUpstreams();
+renderPolicy();
+renderPacks();
 setInterval(loadData, 10000);
 </script>
 </body>
