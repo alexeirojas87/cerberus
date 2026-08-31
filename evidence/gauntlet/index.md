@@ -37,7 +37,32 @@ the §8B build → evidence → independent review loop and its explicit phase g
   `evidence/f1/r9-pii-regression-repair.md`.
 - This unit PASS does **not** clear the Review 9 containment register or close
   F1/F9; all other invalidated units and the phase integration gate remain
-  required.
+  required. *(Historical note: F1 was subsequently closed the same day — see the
+  F1 phase-gate entry below.)*
+
+- **F1.3 engine throughput: CLOSED/PASS (2026-08-31, fix attempt 6; fresh
+  panel 2/2 — correctness + security — and clean-clone integration PASS).**
+  Attempt 5 was rejected by the security lens with a confirmed P1: the
+  Unicode-case-insensitive entropy keyword regex matches U+017F (ſ→s) and
+  U+212A (K→k) payloads that the merged ASCII presence automaton never marks,
+  so the detector was skipped and real findings lost (base `fccd9e4` detected
+  them). Attempt 6 restores detection via a build-time derived fold-to-ASCII
+  presence bucket plus 5 permanent regression tests (proven FAIL pre-fix, PASS
+  post-fix); the fold closure {U+017F, U+212A} was independently re-derived by
+  both panel lenses. Clean-clone battery: 664/0 debug, 664/0 release, pack
+  19/19, ReDoS 11/11, load 13/13, throughput gate 3/3 strict PASS with worst
+  p99 0.306 ms vs the 1.0 ms budget. Evidence:
+  `evidence/f1/r9-engine-throughput.md` (attempt-6 section),
+  `evidence/review9/f13-attempt6-correctness.md`,
+  `evidence/review9/f13-attempt6-security.md`,
+  `evidence/review9/f13-integrator-check.md`.
+
+- **F1 phase gate: CLOSED (2026-08-31, owner sign-off).** All three R9 repair
+  units of F1 are closed (F1.1, F1.2, F1.3) and the integration reviewer
+  reproduced the full battery from a clean clone of the pushed candidate
+  (`fdebc39` on `r9-remediation`), including frozen-hash verification (10/10)
+  and G0 containment intactness on the pushed branch. F2 opens; F2–F9 remain
+  under Review 9 containment.
 
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
