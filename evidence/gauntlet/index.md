@@ -1,11 +1,50 @@
 # Evidence Pack — Gauntlet v6.1: closed adversarial loop with Codex + OpenCode
 
+> **CURRENT RELEASE GATE: FAIL — REVIEW 9 CONTAINMENT ACTIVE (2026-08-26).**
+> The prior F1–F9 PASS/closure claims in this index are **SUPERSEDED AND
+> INVALIDATED BY REVIEW 9** as current gate evidence. They remain below only as
+> immutable history; they must not be cited to publish, release, or claim GA
+> readiness. See `evidence/review9/gauntlet-findings.md` and the G0 containment
+> record at `evidence/review9/g0-containment.md`.
+> G0 also requires both GitHub workflows that can publish or notify distribution
+> (`release.yml` and `notify-tap.yml`) to remain disabled remotely until their
+> inert replacements are merged.
+
+## Review 9 invalidation register
+
+| Prior phase status | Current gate status | Reason for invalidation |
+|---|---|---|
+| F1 PASS | **SUPERSEDED / INVALIDATED BY REVIEW 9** | Real/default-pack correctness and performance gates require re-verification. |
+| F2 PASS | **SUPERSEDED / INVALIDATED BY REVIEW 9** | Vault and allow-once production reachability/zeroization claims require re-verification. |
+| F3 PASS | **SUPERSEDED / INVALIDATED BY REVIEW 9** | Honest HTTP/JSON dataplane performance and hot-path behavior require re-verification. |
+| F4 PASS | **SUPERSEDED / INVALIDATED BY REVIEW 9** | Shipped default-pack and end-to-end product claims depend on reopened findings. |
+| F5 PASS | **SUPERSEDED / INVALIDATED BY REVIEW 9** | Synchronous hot-path logging/storage interactions require re-verification. |
+| F6 PASS | **SUPERSEDED / INVALIDATED BY REVIEW 9** | Control-plane auth, anti-rebinding, secret storage, and CLI/dashboard parity require repair. |
+| F7 PASS | **SUPERSEDED / INVALIDATED BY REVIEW 9** | Pack-backed precision/recall and related product evidence require re-verification. |
+| F8 PASS | **SUPERSEDED / INVALIDATED BY REVIEW 9** | Release automation and published installer/tap state are not a valid distribution gate. |
+| F9 PASS | **SUPERSEDED / INVALIDATED BY REVIEW 9** | Load/security/GA gates measured incomplete paths and cannot support release. |
+
+The invalidation applies to the **current verdict and release authority**, not
+to preservation of the underlying transcripts. Every historical record below
+is intentionally retained for auditability. A phase can regain PASS only via
+the §8B build → evidence → independent review loop and its explicit phase gate.
+
+## Review 9 revalidated units
+
+- **F1.2 shipped-pack PII repair: CLOSED/PASS (2026-08-31, panel 3/3 + human sign-off).** Four reported
+  PII regressions, subsequent PAN/Unicode/JSON adversarials, precision/recall,
+  ReDoS and release performance passed. Evidence:
+  `evidence/f1/r9-pii-regression-repair.md`.
+- This unit PASS does **not** clear the Review 9 containment register or close
+  F1/F9; all other invalidated units and the phase integration gate remain
+  required.
+
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
 - **Orchestration:** Orca Run `run_a64b51716aba`; workers exclusively **Codex** and **OpenCode**. No Claude was used in the v6.1 review/fix/recheck.
-- **Result:** **technical PASS v6.1 — 0 P0 / 0 P1 of the MVP**. Pending human sign-off for the phase per §8B.7.
+- **Historical result (SUPERSEDED / INVALIDATED BY REVIEW 9):** technical PASS v6.1 — 0 P0 / 0 P1 of the MVP. This is not a current gate.
 
-## Phase 9 — Hardening and GA (closed 2026-08-22)
+## Historical Phase 9 record — Hardening and GA (SUPERSEDED / INVALIDATED BY REVIEW 9)
 
 - **Commits:** `c327527` (feat F9) → `c684591` (fix P1 load_test flake, gauntlet loop)
 - **Adversarial reviewers:** Codex (initial gate: FAIL P1 flake) + OpenCode (recheck: PASS)
@@ -36,7 +75,7 @@
 - Fix P1 load_test debug flake: the p99 budget is a release gate (plan §5); debug only bounds the 30× pathology.
 - Docs updated with F4/F8 (MITM opt-in, Windows winget, feedback, telemetry, Helm, Ed25519 packs).
 
-## MVP status (consolidated after F9)
+## Historical MVP status (SUPERSEDED / INVALIDATED BY REVIEW 9)
 
 **All phases of the §8 DAG (F0→F9) closed with a technical PASS.**
 

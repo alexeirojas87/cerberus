@@ -24,3 +24,5 @@ opencode.json
 # Test run logs (regenerable, kept locally).
 evidence/r0/smoke-test/*.log
 evidence/sim/*.log
+# Local AI runtime state
+.atl/
