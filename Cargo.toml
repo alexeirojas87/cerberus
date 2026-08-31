@@ -17,6 +17,7 @@ cerberus-packs = { path = "crates/cerberus-packs" }
 cerberus-proxy = { path = "crates/cerberus-proxy" }
 bytes = "1"
 regex = "1"
+serde_json = "1"
 
 [[test]]
 name = "failsafe"

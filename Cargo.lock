@@ -396,6 +396,7 @@ dependencies = [
  "cerberus-packs",
  "cerberus-proxy",
  "regex",
+ "serde_json",
 ]
 
 [[package]]
