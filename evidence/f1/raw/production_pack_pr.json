@@ -1,0 +1,367 @@
+{
+  "report_schema_version": 1,
+  "pack_version": "1.2.3",
+  "pack_sha256": "sha256:cc2999f03792194f9aea73763fd8b4831b48d5564400546ba90a465556411379",
+  "pack_rule_count": 15,
+  "corpus_schema_version": 1,
+  "corpus_version": "cerberus-default-pack-pr-v4",
+  "corpus_manifest_sha256": "sha256:ddbc3b2da5943dba3fa5f348d3d5245120a35337108cc853d426d5149dad122a",
+  "corpus_sha256": "sha256:59a9f37c20e83fae0ad39f21b9907648e97667846bb680bf1c039088680ba28d",
+  "thresholds": {
+    "minimum_recall": 0.9,
+    "minimum_precision": 0.85,
+    "scope": "every evaluable category and every evaluable flag; aggregate is informational"
+  },
+  "aggregate": {
+    "name": "all",
+    "counts": {
+      "tp": 58,
+      "fp": 0,
+      "fn": 0
+    },
+    "recall": 1.0,
+    "precision": 1.0,
+    "recall_evaluable": true,
+    "precision_evaluable": true,
+    "gate_pass": true
+  },
+  "categories": [
+    {
+      "name": "pii",
+      "counts": {
+        "tp": 35,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secrets",
+      "counts": {
+        "tp": 23,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    }
+  ],
+  "flags": [
+    {
+      "name": "entropy.high_entropy_secret",
+      "counts": {
+        "tp": 8,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "pii.credit_card",
+      "counts": {
+        "tp": 17,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "pii.email_address",
+      "counts": {
+        "tp": 6,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "pii.phone_number",
+      "counts": {
+        "tp": 12,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.anthropic_api_key",
+      "counts": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.aws_access_key_id",
+      "counts": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.env_block",
+      "counts": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.generic_bearer_token",
+      "counts": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.github_token",
+      "counts": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.google_api_key",
+      "counts": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.id_rsa_ssh_key",
+      "counts": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.openai_api_key",
+      "counts": {
+        "tp": 2,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.pem_private_key",
+      "counts": {
+        "tp": 4,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.slack_token",
+      "counts": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    },
+    {
+      "name": "secret.stripe_key",
+      "counts": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0
+      },
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_evaluable": true,
+      "precision_evaluable": true,
+      "gate_pass": true
+    }
+  ],
+  "cases": [
+    {
+      "id": "api-keys",
+      "path": "tests/corpus/positives/01-api-keys.txt",
+      "expected": 7,
+      "findings": 7,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "emails",
+      "path": "tests/corpus/positives/02-emails.txt",
+      "expected": 6,
+      "findings": 6,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "credit-cards",
+      "path": "tests/corpus/positives/03-credit-cards.txt",
+      "expected": 5,
+      "findings": 5,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "phone-numbers",
+      "path": "tests/corpus/positives/04-phone-numbers.txt",
+      "expected": 5,
+      "findings": 5,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "private-keys",
+      "path": "tests/corpus/positives/05-pem-keys.txt",
+      "expected": 5,
+      "findings": 5,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "entropy",
+      "path": "tests/corpus/positives/06-high-entropy.txt",
+      "expected": 6,
+      "findings": 6,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "additional-default-rules",
+      "path": "tests/corpus/product-gate/01-default-pack-additional.txt",
+      "expected": 10,
+      "findings": 10,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "negative-code",
+      "path": "tests/corpus/negatives/01-code-snippets.txt",
+      "expected": 0,
+      "findings": 0,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "negative-readme",
+      "path": "tests/corpus/negatives/02-readme-files.txt",
+      "expected": 0,
+      "findings": 0,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "negative-prose",
+      "path": "tests/corpus/negatives/03-regular-text.txt",
+      "expected": 0,
+      "findings": 0,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "negative-short",
+      "path": "tests/corpus/negatives/04-short-strings.txt",
+      "expected": 0,
+      "findings": 0,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "negative-constraints",
+      "path": "tests/corpus/product-gate/02-constraints-and-validators-negative.txt",
+      "expected": 0,
+      "findings": 0,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "attempt5-separated-pans",
+      "path": "tests/corpus/positives/07-separated-pans.txt",
+      "expected": 14,
+      "findings": 14,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    },
+    {
+      "id": "negative-attempt5",
+      "path": "tests/corpus/negatives/05-attempt5-adversarial.txt",
+      "expected": 0,
+      "findings": 0,
+      "false_negative_flags": [],
+      "false_positive_flags": []
+    }
+  ]
+}

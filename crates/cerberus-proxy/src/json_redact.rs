@@ -8,6 +8,7 @@
 //! Non-JSON bodies fall back to whole-text redaction.
 
 use bytes::Bytes;
+use cerberus_engine::constraints::ContextAnalyzer;
 use cerberus_engine::engine::{CompiledEngine, Finding};
 use cerberus_engine::redact::{apply_redaction, RedactOptions};
 
@@ -57,7 +58,8 @@ fn redact_json(engine: &CompiledEngine, body: &Bytes, opts: &RedactOptions) -> R
     };
     // The full body as context for keyword constraints.
     let body_text = String::from_utf8_lossy(body).to_string();
-    redact_value(engine, &mut value, opts, &body_text)?;
+    let analyzer = ContextAnalyzer::new(&body_text);
+    redact_value(engine, &mut value, opts, &analyzer)?;
     serde_json::to_vec(&value)
         .map(Some)
         .map_err(|e| format!("json reserialize failed: {e}"))
@@ -67,14 +69,14 @@ fn redact_value(
     engine: &CompiledEngine,
     value: &mut serde_json::Value,
     opts: &RedactOptions,
-    body_text: &str,
+    analyzer: &ContextAnalyzer<'_>,
 ) -> Result<(), String> {
     match value {
         serde_json::Value::String(s) => {
             // scan_with_context: the contextKeywords can live in other
             // fields of the JSON (review 2 regression, P0). The leaf is
             // scanned with the full body as context.
-            let found = engine.scan_with_context(s, body_text);
+            let found = engine.scan_with_context_analyzer(s, analyzer);
             if !found.findings.is_empty() {
                 let redacted =
                     apply_redaction(s, &found.findings, opts).map_err(|e| format!("leaf redaction failed: {e}"))?;
@@ -83,12 +85,12 @@ fn redact_value(
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                redact_value(engine, item, opts, body_text)?;
+                redact_value(engine, item, opts, analyzer)?;
             }
         }
         serde_json::Value::Object(map) => {
             for (_k, v) in map {
-                redact_value(engine, v, opts, body_text)?;
+                redact_value(engine, v, opts, analyzer)?;
             }
         }
         _ => {}

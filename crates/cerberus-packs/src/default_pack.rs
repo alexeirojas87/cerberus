@@ -8,8 +8,24 @@
 //! Any change here is reflected in production and in the tests
 //! simultaneously (no drift).
 
-/// Default pack JSON (13 rules: OpenAI, Anthropic, AWS, Bearer,
-/// GitHub, Stripe, Google, Slack, email, phone, PEM, id_rsa, .env).
+/// Version of the exact default pack embedded in this crate.
+pub const DEFAULT_PACK_VERSION: &str = "1.2.3";
+
+/// Version and SHA-256 identity of the exact [`DEFAULT_PACK_JSON`] bytes.
+/// Product gates fail if either the version or pack bytes drift without an
+/// intentional identity update.
+pub const DEFAULT_PACK_IDENTITY: &str = "1.2.3@sha256:cc2999f03792194f9aea73763fd8b4831b48d5564400546ba90a465556411379";
+
+/// Virtual detectors that are part of the product engine rather than duplicate
+/// entries in [`DEFAULT_PACK_JSON`].
+///
+/// They are named here so product gates can
+/// require explicit coverage and report them alongside declarative rules.
+pub const DEFAULT_PACK_VIRTUAL_FLAGS: &[&str] = &["entropy.high_entropy_secret"];
+
+/// Default pack JSON (15 rules: OpenAI, Anthropic, AWS, Bearer,
+/// GitHub, Stripe, Google, Slack, email, credit card, two phone policies,
+/// PEM, id_rsa, .env).
 ///
 /// Keep in sync with `evidence/f9/redos-fuzz.md` and
 /// `evidence/f9/load-test.md`.
@@ -21,10 +37,10 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "severity": "critical",
     "action": "block",
     "hashNormalization": "trim",
-    "contextKeywords": ["openai", "api_key", "apikey"],
+    "contextKeywords": [],
     "minLength": 20,
     "maxLength": 128,
-    "allowedExamples": ["sk-test-example-not-real"],
+    "allowedExamples": ["sk-EXAMPLE000000000000000000000000"],
     "patterns": ["\\bsk-[A-Za-z0-9]{20,}\\b"],
     "validators": []
   },
@@ -33,7 +49,7 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "category": "secrets",
     "severity": "critical",
     "action": "block",
-    "contextKeywords": ["anthropic", "api_key", "apikey"],
+    "contextKeywords": [],
     "minLength": 20,
     "maxLength": 128,
     "patterns": ["\\bsk-ant-[A-Za-z0-9]{20,}\\b"],
@@ -44,9 +60,10 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "category": "secrets",
     "severity": "critical",
     "action": "block",
-    "contextKeywords": ["aws", "access", "key"],
+    "contextKeywords": [],
     "minLength": 16,
     "maxLength": 32,
+    "allowedExamples": ["AKIAIOSFODNN7EXAMPLE"],
     "patterns": ["\\bAKIA[0-9A-Z]{16}\\b"],
     "validators": []
   },
@@ -55,9 +72,10 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "category": "secrets",
     "severity": "high",
     "action": "redact",
-    "contextKeywords": ["bearer", "authorization", "auth"],
+    "contextKeywords": [],
     "minLength": 16,
     "maxLength": 256,
+    "allowedExamples": ["Bearer YOUR_TOKEN_HERE"],
     "patterns": ["\\bBearer\\s+[A-Za-z0-9._~+/-]+=*\\b"],
     "validators": []
   },
@@ -66,9 +84,10 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "category": "secrets",
     "severity": "critical",
     "action": "block",
-    "contextKeywords": ["github", "gh", "token"],
+    "contextKeywords": [],
     "minLength": 20,
     "maxLength": 200,
+    "allowedExamples": ["ghp_example_token_do_not_use_in_production"],
     "patterns": ["\\bgh[psou]_[A-Za-z0-9_]{20,}\\b"],
     "validators": []
   },
@@ -77,7 +96,7 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "category": "secrets",
     "severity": "critical",
     "action": "block",
-    "contextKeywords": ["stripe", "sk", "pk"],
+    "contextKeywords": [],
     "minLength": 20,
     "maxLength": 128,
     "patterns": ["\\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9]+\\b"],
@@ -88,7 +107,7 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "category": "secrets",
     "severity": "high",
     "action": "redact",
-    "contextKeywords": ["google", "gcp", "api_key"],
+    "contextKeywords": [],
     "minLength": 30,
     "maxLength": 100,
     "patterns": ["\\bAIza[0-9A-Za-z_-]{35}\\b"],
@@ -99,9 +118,10 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "category": "secrets",
     "severity": "high",
     "action": "redact",
-    "contextKeywords": ["slack", "xox"],
+    "contextKeywords": [],
     "minLength": 20,
     "maxLength": 100,
+    "allowedExamples": ["xoxb-EXAMPLE0000000000000000000000"],
     "patterns": ["\\bxox[abpors]-[A-Za-z0-9]{20,}\\b"],
     "validators": []
   },
@@ -113,8 +133,21 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "contextKeywords": [],
     "minLength": 5,
     "maxLength": 254,
+    "allowedExamples": ["user@example.com"],
     "patterns": ["\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"],
     "validators": []
+  },
+  {
+    "flag": "pii.credit_card",
+    "category": "pii",
+    "severity": "critical",
+    "action": "redact",
+    "contextKeywords": [],
+    "minLength": 13,
+    "maxLength": 38,
+    "allowedExamples": ["4111 1111 1111 1111"],
+    "patterns": ["(?:\\+[0-9](?:(?:[ \u00a0]{1,3}|[./-])?[0-9]){12,18}\\b|\\b[0-9](?:(?:[ \u00a0]{1,3}|[./-])?[0-9]){12,18}\\b)"],
+    "validators": ["payment-card"]
   },
   {
     "flag": "pii.phone_number",
@@ -124,8 +157,19 @@ pub const DEFAULT_PACK_JSON: &str = r#"[
     "contextKeywords": [],
     "minLength": 7,
     "maxLength": 20,
-    "patterns": ["\\b\\+?[0-9]{1,3}[-.\\s]?\\(?[0-9]{1,4}\\)?[-.\\s]?[0-9]{1,4}[-.\\s]?[0-9]{1,9}\\b"],
-    "validators": []
+    "patterns": ["(?-u)(?:\\+[1-9][0-9]{6,14}\\b|\\+[0-9]{1,3}[ .-](?:\\([0-9]{1,4}\\)|[0-9]{1,4})(?:[ .-][0-9]{2,4}){1,3}\\b|\\([0-9]{3}\\)[ .-][0-9]{3}[ .-][0-9]{4}\\b|\\b[0-9]{3}[ .-][0-9]{3}[ .-][0-9]{4}\\b|\\b[0-9]{1,3}[ ][0-9]{1,4}(?:[ ][0-9]{2,4}){1,2}\\b)"],
+    "validators": ["not-payment-card"]
+  },
+  {
+    "flag": "pii.phone_number",
+    "category": "pii",
+    "severity": "medium",
+    "action": "warn",
+    "contextKeywords": ["phone", "phones", "tel", "telephone", "mobile", "contact", "contacts", "hotline", "e.164", "e164"],
+    "minLength": 7,
+    "maxLength": 20,
+    "patterns": ["(?-u)\\b[1-9][0-9]{6,14}\\b"],
+    "validators": ["not-payment-card"]
   },
   {
     "flag": "secret.pem_private_key",

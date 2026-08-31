@@ -4,11 +4,13 @@
     clippy::items_after_test_module,
     clippy::too_many_lines
 )]
-//! Precision/Recall measurement harness for the Cerberus detection engine.
+//! Unit-feature measurement harness for the Cerberus detection engine.
 //!
-//! Scans a curated corpus of positive (secrets present) and negative
-//! (benign text) files, then computes recall, precision, and timing.
-//! Results are written to `evidence/f1/raw/precision_recall_results.txt`.
+//! This harness intentionally loads `test-rules.json` to exercise individual
+//! engine features. It is not the product acceptance gate. The product gate
+//! lives in `cerberus-packs/tests/production_pack_pr.rs`, loads the exact
+//! embedded `DEFAULT_PACK_JSON`, and enforces metrics per category and flag.
+//! Results here are written under `target/` and are never product evidence.
 //!
 //! The metric is PER-INSTANCE with real spans: each positive file declares a
 //! ground truth as a list of `ExpectedInstance { flag, value }`, where `value`
@@ -185,7 +187,7 @@ fn read_corpus_file(path: &str) -> String {
         .replace("\r\n", "\n")
 }
 
-fn load_engine() -> (
+fn load_unit_feature_engine() -> (
     cerberus_engine::engine::CompiledEngine,
     Vec<cerberus_engine::rule::Rule>,
 ) {
@@ -248,11 +250,11 @@ struct FlagRow {
 }
 
 fn write_results(results: &Results) {
-    let report_path = format!("{CORPUS_DIR}/evidence/f1/raw/precision_recall_results.txt");
+    let report_path = format!("{CORPUS_DIR}/target/unit_feature_measurement.txt");
     let mut output = String::new();
 
     output.push_str("========================================\n");
-    output.push_str(" Cerberus F1 - Precision/Recall Report  \n");
+    output.push_str(" Cerberus F1 - Unit Feature Diagnostic \n");
     output.push_str("========================================\n\n");
     output.push_str(&format!("Corpus positives: {} files\n", POSITIVE_FILES.len()));
     output.push_str(&format!("Corpus negatives: {} files\n\n", NEGATIVE_FILES.len()));
@@ -352,7 +354,7 @@ fn write_results(results: &Results) {
 }
 
 fn run_measurement() -> Results {
-    let (engine, _rules) = load_engine();
+    let (engine, _rules) = load_unit_feature_engine();
     let mut results = Results::default();
     let scan_start = Instant::now();
 
@@ -523,7 +525,7 @@ fn run_measurement() -> Results {
 }
 
 #[test]
-fn precision_recall_measurement() {
+fn unit_feature_measurement_is_accounted_per_instance() {
     let results = run_measurement();
     write_results(&results);
 
@@ -547,16 +549,12 @@ fn precision_recall_measurement() {
         POSITIVE_FILES.len() + NEGATIVE_FILES.len()
     );
 
-    // F1 Gauntlet gates with PER-INSTANCE metric:
-    //  - Recall >= 90%  (verified: 94.3% over 35 real instances).
-    //  - Precision >= 85% (verified: 89.2% with 1 entropy FP and 3 FPs from
-    //    negatives + horizons).
-    assert!(recall >= 0.90, "Recall too low: {:.1}% (gate >= 90%)", recall * 100.0);
-    assert!(
-        precision >= 0.85,
-        "Precision too low: {:.1}% (gate >= 85%)",
-        precision * 100.0
+    assert_eq!(
+        results.total_expected,
+        results.total_detected + results.total_fn,
+        "unit-feature measurement must account for every expected instance"
     );
+    assert!(recall.is_finite() && precision.is_finite());
 }
 
 #[test]
@@ -579,7 +577,7 @@ fn corpus_minimum_size() {
 
 #[test]
 fn positive_files_detected() {
-    let (engine, _rules) = load_engine();
+    let (engine, _rules) = load_unit_feature_engine();
     for entry in POSITIVE_FILES {
         let text = read_corpus_file(entry.path);
         let request = ScanRequest::new(&text);
@@ -656,31 +654,8 @@ fn per_instance_recall_does_not_substitute_same_flag() {
 }
 
 #[test]
-fn negative_files_no_false_positives() {
-    let (engine, _rules) = load_engine();
-    for entry in NEGATIVE_FILES {
-        let text = read_corpus_file(entry.path);
-        let request = ScanRequest::new(&text);
-        let output = scan(&engine, &request);
-
-        let regex_fps: Vec<&Finding> = output.findings.iter().filter(|f| !is_entropy_finding(f)).collect();
-        if !regex_fps.is_empty() {
-            eprintln!(
-                "WARNING: '{}' produced {} regex false positives:",
-                entry.path,
-                regex_fps.len()
-            );
-            for f in &regex_fps {
-                let snippet = &text[f.start..f.end];
-                eprintln!("  flag={} range=[{},{}] value='{}'", f.flag, f.start, f.end, snippet);
-            }
-        }
-    }
-}
-
-#[test]
-fn print_detailed_scan_report() {
-    let (engine, _rules) = load_engine();
+fn unit_feature_detailed_scan_report_is_diagnostic() {
+    let (engine, _rules) = load_unit_feature_engine();
 
     eprintln!("\n--- DETAILED SCAN REPORT ---\n");
     for entry in POSITIVE_FILES {

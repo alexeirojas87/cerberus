@@ -30,6 +30,33 @@ impl Validator for LuhnValidator {
     }
 }
 
+/// Validates a payment-card PAN using ISO 7812 length and Luhn.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PaymentCardValidator;
+
+impl Validator for PaymentCardValidator {
+    fn validate(&self, value: &str) -> bool {
+        payment_card_valid(value)
+    }
+}
+
+/// Rejects phone candidates that are valid payment-card numbers.
+///
+/// A leading `+` makes an otherwise valid PAN ambiguous with an international
+/// phone number. In that shape, only a recognized card issuer suppresses the
+/// phone finding; non-`+` PANs never depend on the issuer table.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NotPaymentCardValidator;
+
+impl Validator for NotPaymentCardValidator {
+    fn validate(&self, value: &str) -> bool {
+        let Some((digits, length)) = valid_pan_digits(value) else {
+            return true;
+        };
+        value.starts_with('+') && !recognized_payment_card_issuer(&digits, length)
+    }
+}
+
 /// Shannon entropy specification parsed from a validator name.
 #[derive(Debug, Clone, Copy)]
 enum EntropySpec {
@@ -106,6 +133,14 @@ fn luhn_ctor() -> Box<dyn Validator> {
     Box::new(LuhnValidator)
 }
 
+fn payment_card_ctor() -> Box<dyn Validator> {
+    Box::new(PaymentCardValidator)
+}
+
+fn not_payment_card_ctor() -> Box<dyn Validator> {
+    Box::new(NotPaymentCardValidator)
+}
+
 fn checksum_ctor() -> Box<dyn Validator> {
     Box::new(ChecksumValidator)
 }
@@ -113,7 +148,7 @@ fn checksum_ctor() -> Box<dyn Validator> {
 /// Maps validator names (as they appear in `Rule.validators`) to their
 /// implementations.
 ///
-/// Builtin names (`"luhn"`, `"checksum"`) are stored as constructor
+/// Builtin names (`"luhn"`, `"payment-card"`, `"not-payment-card"`, `"checksum"`) are stored as constructor
 /// functions; parametrized names such as `"shannon-entropy>4.0"` are parsed
 /// on demand.
 #[derive(Debug)]
@@ -133,6 +168,11 @@ impl ValidatorRegistry {
     pub fn new() -> Self {
         let mut builtins = HashMap::new();
         builtins.insert("luhn".to_string(), luhn_ctor as ValidatorConstructor);
+        builtins.insert("payment-card".to_string(), payment_card_ctor as ValidatorConstructor);
+        builtins.insert(
+            "not-payment-card".to_string(),
+            not_payment_card_ctor as ValidatorConstructor,
+        );
         builtins.insert("checksum".to_string(), checksum_ctor as ValidatorConstructor);
         Self { builtins }
     }
@@ -141,6 +181,8 @@ impl ValidatorRegistry {
     ///
     /// Recognised names:
     /// - `"luhn"` — Luhn checksum for card numbers
+    /// - `"payment-card"` — ISO 7812 PAN length + Luhn
+    /// - `"not-payment-card"` — keep ambiguous international phones while rejecting PANs
     /// - `"checksum"` — IBAN mod-97 checksum
     /// - `"shannon-entropy"` or `"shannon-entropy>N"` / `"shannon-entropy>=N"`
     #[must_use]
@@ -172,6 +214,8 @@ impl ValidatorRegistry {
 pub fn get_validator(name: &str) -> Option<Box<dyn Validator>> {
     match name {
         "luhn" => Some(luhn_ctor()),
+        "payment-card" => Some(payment_card_ctor()),
+        "not-payment-card" => Some(not_payment_card_ctor()),
         "checksum" => Some(checksum_ctor()),
         _ => parse_entropy_spec(name)
             .map(|spec| -> Box<dyn Validator> { Box::new(ShannonEntropyValidator::from_spec(spec)) }),
@@ -184,21 +228,35 @@ pub fn get_validator(name: &str) -> Option<Box<dyn Validator>> {
 /// Shannon entropy delegated to `entropy::shannon_entropy` (char-level).
 pub use crate::entropy::shannon_entropy;
 
-/// Check whether `value` passes the Luhn checksum (ISO 7812).
+/// Extract PAN digits from `value` into a stack buffer.
 ///
-/// Strips non-digit characters, doubles every second digit from the right,
-/// sums digits, and checks that the total is a multiple of 10.
-#[must_use]
-pub fn luhn_valid(value: &str) -> bool {
-    let digits: Vec<u32> = value
-        .chars()
-        .filter(char::is_ascii_digit)
-        .map(|c| u32::from(c as u8 - b'0'))
-        .collect();
-    if digits.len() < 2 {
-        return false;
+/// Returns `None` when the digit count cannot be a 13–19 digit ISO 7812 PAN
+/// (including runs of 20+ digits) or when all digits are identical — the
+/// rejection set of the original allocating checker, without per-candidate
+/// heap work (repair attempt 6 perf).
+fn pan_digits(value: &str) -> Option<([u8; 19], usize)> {
+    let mut digits = [0u8; 19];
+    let mut len = 0usize;
+    for byte in value.bytes() {
+        if byte.is_ascii_digit() {
+            if len == digits.len() {
+                return None;
+            }
+            digits[len] = byte - b'0';
+            len += 1;
+        }
     }
-    let sum: u32 = digits.iter().rev().enumerate().fold(0, |acc, (i, &d)| {
+    if !(13..=19).contains(&len) || digits[..len].iter().all(|digit| *digit == digits[0]) {
+        return None;
+    }
+    Some((digits, len))
+}
+
+/// Luhn checksum over extracted PAN digits (doubles every second digit from
+/// the right, sums and checks the multiple-of-10 total).
+fn luhn_sum_ok(digits: &[u8; 19], len: usize) -> bool {
+    let sum: u32 = digits[..len].iter().rev().enumerate().fold(0, |acc, (i, &d)| {
+        let d = u32::from(d);
         if i % 2 == 1 {
             let doubled = d * 2;
             if doubled > 9 {
@@ -211,6 +269,63 @@ pub fn luhn_valid(value: &str) -> bool {
         }
     });
     sum.is_multiple_of(10)
+}
+
+/// Check whether `value` passes the Luhn checksum (ISO 7812).
+///
+/// Strips non-digit characters, doubles every second digit from the right,
+/// sums digits, and checks that the total is a multiple of 10.
+#[must_use]
+pub fn luhn_valid(value: &str) -> bool {
+    pan_digits(value).is_some_and(|(digits, len)| luhn_sum_ok(&digits, len))
+}
+
+fn valid_pan_digits(value: &str) -> Option<([u8; 19], usize)> {
+    let (digits, length) = pan_digits(value)?;
+    if !luhn_sum_ok(&digits, length) {
+        return None;
+    }
+    Some((digits, length))
+}
+
+/// Whether a valid PAN belongs to a network whose issuer ranges are useful
+/// for disambiguating a leading `+` from an international phone number.
+fn recognized_payment_card_issuer(digits: &[u8; 19], length: usize) -> bool {
+    let first = u32::from(digits[0]);
+    let first_two = first * 10 + u32::from(digits[1]);
+    let first_three = first_two * 10 + u32::from(digits[2]);
+    let first_four = first_three * 10 + u32::from(digits[3]);
+    let maestro = matches!(
+        first_four,
+        5018 | 5020 | 5038 | 5893 | 6304 | 6390 | 6759 | 6761 | 6762 | 6763
+    ) || (56..=58).contains(&first_two);
+
+    (first == 4 && matches!(length, 13 | 16 | 19))
+        || (((51..=55).contains(&first_two) || (2221..=2720).contains(&first_four)) && length == 16)
+        || ((2200..=2204).contains(&first_four) && (16..=19).contains(&length))
+        || (matches!(first_two, 34 | 37) && length == 15)
+        || (matches!(first_two, 36 | 38 | 39) && length == 14)
+        || ((300..=305).contains(&first_three) && length == 14)
+        || (maestro && (13..=19).contains(&length))
+        || ((first_four == 6011
+            || matches!(first_two, 62 | 65)
+            || (644..=649).contains(&first_three)
+            || (3528..=3589).contains(&first_four))
+            && (16..=19).contains(&length))
+}
+
+/// Check whether `value` is a plausible payment-card PAN.
+///
+/// Every non-`+` value with an ISO 7812 length and valid Luhn checksum is
+/// accepted, regardless of issuer. A leading `+` is also accepted for known
+/// card issuers, preserving supported plus-prefixed PANs without turning
+/// Luhn-valid international phone numbers into cards.
+#[must_use]
+pub fn payment_card_valid(value: &str) -> bool {
+    let Some((digits, length)) = valid_pan_digits(value) else {
+        return false;
+    };
+    !value.starts_with('+') || recognized_payment_card_issuer(&digits, length)
 }
 
 /// Check whether `value` is a valid IBAN (ISO 13616, mod-97 check).
@@ -298,6 +413,48 @@ mod tests {
     #[test]
     fn luhn_empty() {
         assert!(!luhn_valid(""));
+    }
+
+    #[test]
+    fn luhn_rejects_repeated_digits_and_non_pan_lengths() {
+        assert!(!luhn_valid("0000000000000"));
+        assert!(!luhn_valid("79927398713"));
+    }
+
+    #[test]
+    fn payment_card_validator_uses_issuer_ranges() {
+        let validator = PaymentCardValidator;
+        assert!(validator.validate("+5500000000000004"));
+        assert!(validator.validate("+3400 0000 0000 009"));
+        assert!(validator.validate("2204 0000 0000 0000"));
+        assert!(validator.validate("6759 0000 0000 0000"));
+        assert!(!validator.validate("+86 138 0013 8002"));
+        assert!(!validator.validate("+44 20 7946 0958"));
+    }
+
+    #[test]
+    fn not_payment_card_rejects_luhn_pans_across_supported_lengths() {
+        let validator = NotPaymentCardValidator;
+        for pan in [
+            "4222222222222",
+            "30569309025904",
+            "340000000000009",
+            "5500000000000004",
+            "+5500000000000004",
+            "+3400 0000 0000 009",
+            "2204 0000 0000 0000",
+            "6759 0000 0000 0000",
+        ] {
+            assert!(!validator.validate(pan), "PAN must be rejected as phone: {pan}");
+        }
+    }
+
+    #[test]
+    fn not_payment_card_accepts_non_pan_phone() {
+        let validator = NotPaymentCardValidator;
+        assert!(validator.validate("+44 20 7946 0958"));
+        assert!(validator.validate("+86 138 0013 8002"));
+        assert!(validator.validate("5551234567"));
     }
 
     // -----------------------------------------------------------------------
@@ -409,6 +566,13 @@ mod tests {
         let v = get_validator("luhn");
         assert!(v.is_some());
         assert!(v.unwrap().validate("4111111111111111"));
+    }
+
+    #[test]
+    fn get_validator_not_payment_card() {
+        let validator = get_validator("not-payment-card").expect("not-payment-card must exist");
+        assert!(!validator.validate("4222222222222"));
+        assert!(validator.validate("+44 20 7946 0958"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! ReDoS fuzzing — verifies that no pattern causes catastrophic backtracking.
 //!
-//! Fuzzing over the **real default pack** (13 rules, source
+//! Fuzzing over the **real default pack** (15 rules, source
 //! `cerberus_packs::default_pack::DEFAULT_PACK_JSON`) — not over an inline
 //! copy. This covers acceptance criterion F9:
 //! "redos-fuzz(all packs)".
@@ -23,7 +23,7 @@ use cerberus_packs::default_pack::DEFAULT_PACK_JSON;
 /// specific millisecond budget.
 const MAX_SCAN_TIME_MS: u64 = 250;
 
-/// Load all rules from the real default pack (13 rules).
+/// Load all rules from the real default pack (15 rules).
 fn load_all_rules() -> Vec<Rule> {
     load_rules_from_str(DEFAULT_PACK_JSON).unwrap_or_else(|e| panic!("default pack must parse: {e:?}"))
 }
@@ -226,11 +226,85 @@ mod tests {
     fn load_all_rules_returns_default_pack() {
         let rules = load_all_rules();
         assert!(!rules.is_empty(), "default pack should load at least one rule");
-        // The default pack has 13 rules; we allow growth.
+        // The default pack has 15 rules; we allow growth.
         assert!(
-            rules.len() >= 13,
-            "default pack should have >=13 rules, got {}",
+            rules.len() >= 15,
+            "default pack should have >=15 rules, got {}",
             rules.len()
+        );
+    }
+}
+
+/// Repair attempt 5 (HIGH-1): every entropy keyword × multibyte filler lengths
+/// that straddle the 200-byte near-keyword window edge must scan without a
+/// panic and in linear time. The previous window slice panicked on
+/// non-char-boundary byte indices.
+#[test]
+fn redos_fuzz_multibyte_entropy_window_straddle() {
+    let rules = load_all_rules();
+    let engine = EngineBuilder::new(&rules).build().expect("engine build");
+    let keywords = ["password", "key", "token", "secret", "auth", "hash", "salt", "private"];
+    let fillers = ['é', '€', '密', '🎉'];
+    for kw in keywords {
+        for filler in fillers {
+            // Sweep filler sizes so the window edge lands inside every
+            // possible position of a multi-byte character.
+            for rep in 55..=75 {
+                let payload = format!("{kw}={}x", filler.to_string().repeat(rep));
+                let start = Instant::now();
+                let _ = engine.scan(&payload);
+                assert!(
+                    start.elapsed() < Duration::from_millis(MAX_SCAN_TIME_MS),
+                    "multibyte straddle scan slow for kw={kw} filler={filler} rep={rep}"
+                );
+            }
+        }
+    }
+}
+
+/// Repair attempt 5 (perf blocker 2): keyword-dense phone-list payloads must
+/// stay linear (previously ~40–130× over the p99 budget at 50–100 KB).
+#[test]
+fn redos_fuzz_keyword_dense_phone_list_linear() {
+    let rules = load_all_rules();
+    let engine = EngineBuilder::new(&rules).build().expect("engine build");
+    for size_kb in [50usize, 100, 200] {
+        let mut payload = String::with_capacity(size_kb * 1024);
+        while payload.len() < size_kb * 1024 {
+            payload.push_str("phone 1234567\n");
+        }
+        let start = Instant::now();
+        let result = engine.scan(&payload);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(MAX_SCAN_TIME_MS),
+            "{}KB keyword-dense phone list took {}ms (quadratic regression?)",
+            size_kb,
+            elapsed.as_millis(),
+        );
+        assert!(result.findings.iter().any(|f| f.flag == "pii.phone_number"));
+    }
+}
+
+/// Repair attempt 5 (MED-2): generalized PAN separator classes must not widen
+/// the regex into pathological matching.
+#[test]
+fn redos_fuzz_separated_pan_classes() {
+    let rules = load_all_rules();
+    let engine = EngineBuilder::new(&rules).build().expect("engine build");
+    for payload in [
+        format!("card {}", "4.".repeat(50_000)),
+        format!("card {}", "4/".repeat(50_000)),
+        format!("card {}", "4\u{a0}".repeat(10_000)),
+        format!("card {}", "4000.0566.5566.5556.".repeat(500)),
+    ] {
+        let start = Instant::now();
+        let _ = engine.scan(&payload);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(MAX_SCAN_TIME_MS),
+            "separator-class fuzz payload took {}ms",
+            elapsed.as_millis(),
         );
     }
 }
