@@ -13,6 +13,11 @@ pub struct DecodedBody {
     pub text: String,
     /// Detected content type.
     pub content_type: ContentType,
+    /// The parsed JSON tree when `content_type` is [`ContentType::Json`]
+    /// (fix F2.1 / review 9 R9-1: parse the body ONCE per request in the
+    /// pipeline — the redaction path reuses this value instead of parsing
+    /// the same bytes a second time). `None` for plain-text bodies.
+    pub parsed: Option<serde_json::Value>,
 }
 
 /// Body content type.
@@ -47,6 +52,7 @@ pub fn decode(body: &Bytes, _content_type_hint: Option<&str>) -> DecodedBody {
         return DecodedBody {
             text,
             content_type: ContentType::Json,
+            parsed: Some(json),
         };
     }
 
@@ -54,6 +60,7 @@ pub fn decode(body: &Bytes, _content_type_hint: Option<&str>) -> DecodedBody {
     DecodedBody {
         text,
         content_type: ContentType::Text,
+        parsed: None,
     }
 }
 

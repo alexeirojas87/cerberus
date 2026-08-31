@@ -33,7 +33,7 @@ pub fn redact_body(
 ) -> Result<Vec<u8>, String> {
     // JSON path first; if the body is not valid JSON it falls back to the text fallback.
     if decoded.content_type == ContentType::Json {
-        if let Some(redacted) = redact_json(engine, body, opts)? {
+        if let Some(redacted) = redact_json(engine, body, decoded.parsed.as_ref(), opts)? {
             return Ok(redacted);
         }
     }
@@ -51,10 +51,25 @@ fn fallback_text(decoded: &DecodedBody, findings: &[Finding], opts: &RedactOptio
 /// Returns `Ok(None)` if the body isn't valid JSON (caller falls back to
 /// whole-text redaction). Propagates redaction errors (review v4 #5): before
 /// it swallowed the `apply_redaction` error and forwarded the raw secret.
-fn redact_json(engine: &CompiledEngine, body: &Bytes, opts: &RedactOptions) -> Result<Option<Vec<u8>>, String> {
-    let mut value: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(_) => return Ok(None),
+///
+/// Fix F2.1 (review 9 R9-1): `parsed` carries the `serde_json::Value` already
+/// decoded by [`crate::decoder::decode`] on the scan path, so the body is
+/// parsed exactly once per request. `None` (hand-built `DecodedBody`) falls
+/// back to parsing here — same parser, same bytes, identical output.
+fn redact_json(
+    engine: &CompiledEngine,
+    body: &Bytes,
+    parsed: Option<&serde_json::Value>,
+    opts: &RedactOptions,
+) -> Result<Option<Vec<u8>>, String> {
+    let mut value: serde_json::Value = match parsed {
+        // The decoded tree is borrowed by the caller; clone is an exact copy
+        // (no re-parse, no re-validation) and is O(body) once per request.
+        Some(v) => v.clone(),
+        None => match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        },
     };
     // The full body as context for keyword constraints.
     let body_text = String::from_utf8_lossy(body).to_string();
@@ -217,5 +232,56 @@ mod tests {
         };
         let err = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[bad_finding]).err();
         assert!(err.is_some(), "invalid span must propagate as Err");
+    }
+
+    #[test]
+    fn single_parse_reuse_and_fallback_outputs_are_byte_identical() {
+        // F2.1 (R9-1): the pipeline parses the body once (decode stores the
+        // parsed tree) and redact_json reuses it. The fallback path (a
+        // hand-built DecodedBody carrying no parsed tree) must produce the
+        // BYTE-IDENTICAL redaction output.
+        let engine = engine();
+        let key = format!("AIza{}", "B".repeat(35));
+        let raw = format!(
+            r#"{{"context":"google api_key here","secret":"{key}","note":"Bearer abcdefghijklmnopqrstuvwxyz012345"}}"#
+        );
+        let body = Bytes::from(raw);
+
+        // Pipeline path: decode() parses once, redact reuses the tree.
+        let decoded = decode(&body, Some("application/json"));
+        assert!(decoded.parsed.is_some(), "JSON decode must retain the parsed tree");
+        let reused = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[]).expect("reuse path");
+
+        // Fallback path: same body, no pre-parsed tree.
+        let manual = crate::decoder::DecodedBody {
+            text: decoded.text,
+            content_type: crate::decoder::ContentType::Json,
+            parsed: None,
+        };
+        let fallback = redact_body(&engine, &body, &manual, &RedactOptions::default(), &[]).expect("fallback path");
+
+        assert_eq!(reused, fallback, "reuse and fallback redaction must be byte-identical");
+
+        let parsed: serde_json::Value = serde_json::from_slice(&reused).expect("valid output JSON");
+        assert!(parsed["secret"].as_str().unwrap().contains("[REDACTED"));
+        assert!(!String::from_utf8_lossy(&reused).contains(key.as_str()));
+    }
+
+    #[test]
+    fn text_body_decoded_without_parsed_tree_falls_back_to_text_redaction() {
+        // The `parsed` field is None exactly when the body is not JSON; the
+        // text fallback must keep working for such bodies (it redacts the
+        // caller-provided findings, as the proxy pipeline supplies them).
+        let engine = engine();
+        let body = Bytes::from("plain note with Bearer abcdefghijklmnopqrstuvwxyz012345 inside");
+        let decoded = decode(&body, Some("text/plain"));
+        assert!(decoded.parsed.is_none());
+        let scanned = engine.scan(&decoded.text);
+        assert!(!scanned.findings.is_empty(), "bearer token must be found by the scan");
+        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &scanned.findings)
+            .expect("text redaction");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.contains("[REDACTED"), "got {text:?}");
+        assert!(!text.contains("abcdefghijklmnopqrstuvwxyz012345"));
     }
 }
