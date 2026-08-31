@@ -58,7 +58,28 @@ const NEAR_KEYWORD_WINDOW: usize = 200;
 /// Minimum length of a candidate value to consider for entropy analysis.
 const MIN_VALUE_LENGTH: usize = 8;
 
-/// Public documentation fixtures that are intentionally non-secret.
+/// Exact-value detection carve-out (deliberate, declared).
+///
+/// A value byte-equal to one of these public documentation fixtures is never
+/// reported by the entropy detector, even though it co-occurs with a strong
+/// indicative keyword and clears the entropy threshold.
+///
+/// Why it exists: AWS's canonical example secret access key is ubiquitous in
+/// real traffic (vendor docs, tutorials, test fixtures) and always sits next
+/// to a strong keyword ("secret key"), so the entropy rule would otherwise
+/// fire a permanent false positive on it. The shipped product corpus pins
+/// this: `tests/corpus/product-gate/manifest-v1.json` (case `api-keys`)
+/// expects NO finding for that fixture line, and the production
+/// precision/recall gate treats an unexpected finding as a failure.
+///
+/// Risk: this is a hard, permanent detection gap for any payload embedding
+/// exactly this public string — an attacker can smuggle it past the entropy
+/// rule. Mitigations: the string itself is public and worthless as a
+/// credential; suppression is EXACT-match only (F1.2 attempt-4 review
+/// verified the variant `…EXAMPLEKEZX` is still flagged); and other rule
+/// paths are unaffected. If this list ever needs to grow beyond public
+/// vendor documentation fixtures, the carve-out must move from engine code
+/// into pack configuration (F1.2 attempt-4 LOW-2 layering finding).
 const KNOWN_SAFE_EXAMPLES: &[&str] = &["wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"];
 
 /// Precompiled state for the generic entropy detector.
@@ -114,6 +135,53 @@ impl EntropyDetector {
     /// presence automaton instead of using the standalone prefilter.
     pub(crate) const fn keywords() -> &'static [&'static str] {
         KEYWORDS
+    }
+
+    /// Byte patterns for every non-ASCII character that the compiled keyword
+    /// regex's `(?i)` case folding makes matchable against an ASCII keyword
+    /// letter (security review 9 attempt 5, P1): the vectors were U+017F (ſ,
+    /// folds to "s") and U+212A (KELVIN SIGN, folds to "k").
+    ///
+    /// The set is DERIVED from the regex crate's own case-folding tables by
+    /// parsing `(?i:<letter>)` with `regex-syntax` (the same crate and tables
+    /// the compiled keyword regex uses) and keeping the non-ASCII class
+    /// members, so it is exactly complete for the matching semantics of the
+    /// compiled regex at the locked crate versions. Note that the regex
+    /// crate's simple case folding is NARROWER than the full Unicode
+    /// `CaseFolding` table: under regex 1.13.1 / regex-syntax 0.8.11 the derived
+    /// set is exactly {U+017F, U+212A} — presentation-form letters
+    /// (fullwidth, circled, superscript/subscript) and accented letters do
+    /// NOT fold onto ASCII and must not be added by hand. Hand-maintaining
+    /// this table would risk both incompleteness (reopening the attempt-5
+    /// bypass class) and unsound over-marking; deriving it cannot drift from
+    /// the matcher.
+    ///
+    /// A caller that marks these patterns in the same presence automaton as
+    /// [`Self::keywords`] makes an automaton miss a sound absence proof for
+    /// every payload: any keyword regex match contains either a plain ASCII
+    /// keyword byte sequence or at least one of these fold-source characters.
+    pub(crate) fn fold_to_ascii_source_patterns() -> Result<Vec<Vec<u8>>, String> {
+        let mut sources: Vec<char> = Vec::new();
+        for letter in b'a'..=b'z' {
+            let pattern = format!(r"(?i:{})", letter as char);
+            let hir = regex_syntax::parse(&pattern)
+                .map_err(|error| format!("Fold-source HIR parse error for '{pattern}': {error}"))?;
+            let regex_syntax::hir::HirKind::Class(regex_syntax::hir::Class::Unicode(class)) = hir.kind() else {
+                return Err(format!("Fold-source HIR for '{pattern}' is not a Unicode class"));
+            };
+            for range in class.ranges() {
+                for scalar in u32::from(range.start())..=u32::from(range.end()) {
+                    if let Some(c) = char::from_u32(scalar) {
+                        if !c.is_ascii() {
+                            sources.push(c);
+                        }
+                    }
+                }
+            }
+        }
+        sources.sort_unstable();
+        sources.dedup();
+        Ok(sources.iter().map(|c| c.to_string().into_bytes()).collect())
     }
 
     #[cfg(test)]

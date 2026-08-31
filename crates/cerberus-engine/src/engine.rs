@@ -92,11 +92,21 @@ fn compile_context_keyword_prefilter(rules: &[Rule]) -> Result<(Option<AhoCorasi
     Ok((prefilter, has_context_keywords))
 }
 
+/// Pattern list and id buckets appended to the merged presence automaton
+/// after the literal prefixes, in single-pass order: entropy indicative
+/// keywords, deduped non-empty ASCII contextual keywords (same collection
+/// semantics as [`compile_context_keyword_prefilter`]), then the entropy
+/// fold-to-ASCII source characters.
+struct MergedPresenceBuckets {
+    patterns: Vec<Vec<u8>>,
+    entropy_ids: Vec<usize>,
+    context_ids: Vec<usize>,
+    fold_source_ids: Vec<usize>,
+}
+
 /// Keyword patterns appended to the merged presence automaton after the
-/// literal prefixes, with their pattern ids: entropy indicative keywords
-/// first, then the deduped non-empty ASCII contextual keywords (same
-/// collection semantics as [`compile_context_keyword_prefilter`]).
-fn merged_presence_keyword_buckets(rules: &[Rule], start_id: usize) -> (Vec<Vec<u8>>, Vec<usize>, Vec<usize>) {
+/// literal prefixes, with their pattern ids (see [`MergedPresenceBuckets`]).
+fn merged_presence_buckets(rules: &[Rule], start_id: usize) -> Result<MergedPresenceBuckets, String> {
     let mut patterns: Vec<Vec<u8>> = crate::entropy::EntropyDetector::keywords()
         .iter()
         .map(|keyword| keyword.as_bytes().to_vec())
@@ -115,7 +125,29 @@ fn merged_presence_keyword_buckets(rules: &[Rule], start_id: usize) -> (Vec<Vec<
     patterns.extend(context_keywords.iter().map(|keyword| keyword.as_bytes().to_vec()));
     let context_ids: Vec<usize> = (context_start..start_id + patterns.len()).collect();
 
-    (patterns, entropy_ids, context_ids)
+    let (fold_patterns, fold_ids) = entropy_fold_source_bucket(start_id + patterns.len())?;
+    patterns.extend(fold_patterns);
+
+    Ok(MergedPresenceBuckets {
+        patterns,
+        entropy_ids,
+        context_ids,
+        fold_source_ids: fold_ids,
+    })
+}
+
+/// Presence-bucket patterns for non-ASCII characters that Unicode simple case
+/// folding makes matchable by the entropy keyword regex (attempt-6 repair of
+/// the attempt-5 P1). A keyword regex match must contain either a plain ASCII
+/// keyword byte sequence (caught by the keyword bucket) or at least one
+/// fold-source character (caught here), so marking both buckets in the same
+/// single pass keeps an automaton miss a sound absence proof for every
+/// payload — ASCII and non-ASCII alike — without running the Unicode regex
+/// unconditionally.
+fn entropy_fold_source_bucket(start_id: usize) -> Result<(Vec<Vec<u8>>, Vec<usize>), String> {
+    let patterns = crate::entropy::EntropyDetector::fold_to_ascii_source_patterns()?;
+    let ids: Vec<usize> = (start_id..start_id + patterns.len()).collect();
+    Ok((patterns, ids))
 }
 
 /// A pattern compiled as part of the hybrid engine, linked back to its rule.
@@ -174,6 +206,12 @@ pub struct CompiledEngine {
     /// case-insensitive presence pass marks prefixes, entropy keywords and
     /// contextual keywords at once; these ids index the entropy bucket.
     entropy_keyword_ids: Vec<usize>,
+    /// Automaton pattern ids of non-ASCII characters whose Unicode simple
+    /// case folding is matchable by an ASCII keyword letter (see
+    /// [`entropy_fold_source_bucket`]). Together with [`Self::entropy_keyword_ids`]
+    /// this bucket makes the automaton miss a sound absence proof for the
+    /// entropy regex on non-ASCII payloads too.
+    entropy_fold_source_ids: Vec<usize>,
     /// Automaton pattern ids of non-empty ASCII contextual keywords (same
     /// collection and dedup semantics as [`compile_context_keyword_prefilter`]).
     context_keyword_ids: Vec<usize>,
@@ -319,14 +357,20 @@ impl CompiledEngine {
 
         // One case-insensitive automaton answers every presence question in a
         // single full-text pass: literal prefixes (prefixed and multiline
-        // regex gates), entropy indicative keywords and contextual keywords.
-        // Presence proofs are one-way — a miss proves absence, a hit may be a
-        // false positive that the per-pattern regex or analyzer later rejects
-        // — so folding the keyword sets into the prefix automaton can only
-        // skip more work, never change findings.
-        let (keyword_patterns, entropy_keyword_ids, context_keyword_ids) =
-            merged_presence_keyword_buckets(&rules, ac_patterns.len());
-        ac_patterns.extend(keyword_patterns);
+        // regex gates), entropy indicative keywords, contextual keywords and
+        // the entropy fold-to-ASCII source characters. Presence proofs are
+        // one-way — a miss proves absence, a hit may be a false positive that
+        // the per-pattern regex or analyzer later rejects — so folding the
+        // keyword sets into the prefix automaton can only skip more work,
+        // never change findings. Scope: the keyword bucket alone is sound for
+        // ASCII text; for non-ASCII text the Unicode-case-insensitive entropy
+        // regex can match folded keyword spellings (U+017F, U+212A, …) that
+        // the ASCII-only keyword bucket cannot see, so the fold-source bucket
+        // below marks every such character and keeps the miss-proves-absence
+        // property for all payloads. The context-analyzer decision keeps its
+        // own `!context.is_ascii()` fallback for the same folding reason.
+        let buckets = merged_presence_buckets(&rules, ac_patterns.len())?;
+        ac_patterns.extend(buckets.patterns);
 
         let ac = AhoCorasick::builder()
             .ascii_case_insensitive(true)
@@ -347,8 +391,9 @@ impl CompiledEngine {
             payload_secret,
             context_keyword_prefilter,
             has_context_keywords,
-            entropy_keyword_ids,
-            context_keyword_ids,
+            entropy_keyword_ids: buckets.entropy_ids,
+            entropy_fold_source_ids: buckets.fold_source_ids,
+            context_keyword_ids: buckets.context_ids,
         })
     }
 
@@ -466,9 +511,13 @@ impl CompiledEngine {
     }
 
     /// One full-text overlapping pass marking every merged automaton pattern
-    /// that occurs anywhere in `text`: literal prefixes, entropy keywords and
-    /// contextual keywords. A miss proves absence; a hit may be a false
-    /// positive that the per-pattern regex or analyzer later rejects.
+    /// that occurs anywhere in `text`: literal prefixes, entropy keywords,
+    /// contextual keywords and the entropy fold-to-ASCII source characters. A
+    /// miss proves absence (a hit may be a false positive that the
+    /// per-pattern regex or analyzer later rejects); the fold-source bucket
+    /// is what keeps that property valid for the entropy regex on non-ASCII
+    /// text, where Unicode case folding can hide a keyword from the
+    /// ASCII-only keyword bucket (see the scan gate).
     fn presence_scan(&self, text: &str) -> Vec<bool> {
         let n_ac = self.ac.patterns_len();
         let mut present = vec![false; n_ac];
@@ -579,7 +628,25 @@ impl CompiledEngine {
         // the value itself, which is correct for per-leaf warn/redact. The
         // merged presence pass already proved whether any indicative keyword
         // occurs, so the detector skips its own standalone prefilter.
-        if self.entropy_keyword_ids.iter().any(|&id| presence[id]) {
+        //
+        // The automaton is ASCII-case-insensitive while the entropy keyword
+        // regex is Unicode-case-insensitive (`(?i)`, entropy.rs): regex simple
+        // case folding matches folded keyword spellings such as U+017F (ſ→s)
+        // and U+212A (K→k) that the ASCII-only keyword bucket can never mark
+        // present, so on its own a presence miss does not prove absence for
+        // non-ASCII text (review 9 attempt 5, P1). The fold-source bucket
+        // closes that hole soundly: every keyword regex match contains either
+        // a plain ASCII keyword byte sequence (keyword bucket) or at least one
+        // fold-to-ASCII character (fold-source bucket), both marked in the
+        // same single pass. A miss on both buckets therefore proves the regex
+        // cannot match anywhere, so skipping the detector cannot change
+        // findings — while ASCII payloads keep the exact attempt-5 gate
+        // (fold-source patterns consist solely of non-ASCII bytes and can
+        // never match ASCII text) and non-ASCII payloads without folded
+        // keyword spellings skip exactly like before.
+        if self.entropy_keyword_ids.iter().any(|&id| presence[id])
+            || self.entropy_fold_source_ids.iter().any(|&id| presence[id])
+        {
             for f in self.entropy_detector.detect_near_keywords_proven(
                 text,
                 self.entropy_threshold,
@@ -1261,6 +1328,106 @@ mod tests {
         assert!(engine.context_keywords_may_match("ÉMAIL TOKEN-1234567"));
         assert_eq!(engine.scan("ÉMAIL TOKEN-1234567").findings.len(), 1);
         assert!(engine.scan("xÉMAILy TOKEN-1234567").findings.is_empty());
+    }
+
+    // ─── Attempt 6, P1 regression: Unicode-folded entropy keyword presence ──
+    //
+    // Review 9 attempt 5 (evidence/review9/f13-attempt5-security.md, V1/V4):
+    // the merged presence automaton is ASCII-case-insensitive while the
+    // entropy keyword regex is Unicode-case-insensitive, so folded keyword
+    // spellings (U+017F ſ→s, U+212A K→k) pass the regex but never mark
+    // presence. Base `fccd9e4` ran the entropy regex unconditionally and
+    // detected these payloads; the attempt-5 gate skipped the detector. The
+    // derived fold-to-ASCII source bucket restores that behavior; these tests
+    // FAIL on attempt-5 code.
+
+    #[test]
+    fn entropy_presence_gate_unicode_casefold_longs_s_keyword_detected() {
+        let token = "J8sK2m9xR4pL7vN3qW5tY1bH6fC0dE";
+        let text = format!("\u{017f}ecret={token}");
+        assert!(!text.is_ascii(), "test payload must exercise the non-ASCII fallback");
+        let engine = EngineBuilder::new(&[]).build().unwrap();
+        let result = engine.scan(&text);
+        assert_eq!(result.findings.len(), 1, "folded ſecret=… must still be detected");
+        assert_eq!(result.findings[0].flag, "entropy.high_entropy_secret");
+        assert_eq!(&text[result.findings[0].start..result.findings[0].end], token);
+    }
+
+    #[test]
+    fn entropy_presence_gate_unicode_casefold_kelvin_sign_keyword_detected() {
+        let token = "J8sK2m9xR4pL7vN3qW5tY1bH6fC0dE";
+        let text = format!("\u{212a}ey={token}");
+        assert!(!text.is_ascii(), "test payload must exercise the non-ASCII fallback");
+        let engine = EngineBuilder::new(&[]).build().unwrap();
+        let result = engine.scan(&text);
+        assert_eq!(result.findings.len(), 1, "folded <U+212A>ey=… must still be detected");
+        assert_eq!(result.findings[0].flag, "entropy.high_entropy_secret");
+        assert_eq!(&text[result.findings[0].start..result.findings[0].end], token);
+    }
+
+    #[test]
+    fn entropy_fold_source_bucket_matches_regex_folding_tables_exactly() {
+        // The bucket must stay DERIVED from the regex crate's folding tables,
+        // never hand-extended: under the locked regex 1.13.1 / regex-syntax
+        // 0.8.11, `(?i)` simple case folding matches exactly two non-ASCII
+        // characters against ASCII keyword letters — U+017F (ſ→s) and
+        // U+212A (K→k). Presentation-form letters (fullwidth, circled,
+        // modifier), accents and ß/İ are NOT matchable and must stay outside
+        // the bucket. If a regex upgrade ever widens the folding tables, the
+        // bucket re-derives automatically and this exact-set assertion flags
+        // the change for re-review.
+        let sources = crate::entropy::EntropyDetector::fold_to_ascii_source_patterns().unwrap();
+        let decoded: Vec<String> = sources
+            .iter()
+            .map(|pattern| String::from_utf8_lossy(pattern).into_owned())
+            .collect();
+        assert_eq!(decoded, ["\u{017f}", "\u{212a}"]);
+
+        // Behavioral boundary: none of these spellings is matchable by the
+        // keyword regex under the locked crate versions, so the engine must
+        // not report them (and a sound presence bucket must not claim them).
+        let engine = EngineBuilder::new(&[]).build().unwrap();
+        for spelling in ["\u{ff33}ecret", "\u{24e2}ey", "\u{02e2}ecret", "ßecret", "İey", "éey"] {
+            let text = format!("{spelling}=J8sK2m9xR4pL7vN3qW5tY1bH6fC0dE");
+            assert!(
+                engine.scan(&text).findings.is_empty(),
+                "{spelling} must not fold-match a keyword under the locked regex"
+            );
+        }
+    }
+
+    #[test]
+    fn entropy_presence_gate_ascii_keyword_control_detected() {
+        let token = "J8sK2m9xR4pL7vN3qW5tY1bH6fC0dE";
+        let text = format!("password={token}");
+        assert!(text.is_ascii(), "control payload must stay on the automaton gate");
+        let engine = EngineBuilder::new(&[]).build().unwrap();
+        let result = engine.scan(&text);
+        assert_eq!(result.findings.len(), 1, "ASCII keyword control must keep detecting");
+        assert_eq!(result.findings[0].flag, "entropy.high_entropy_secret");
+        assert_eq!(&text[result.findings[0].start..result.findings[0].end], token);
+    }
+
+    #[test]
+    fn entropy_presence_gate_unicode_casefold_detected_on_separate_context_leaf() {
+        // The same gate funnels the JSON leaf path (context != text), so a
+        // folded keyword inside a leaf value must be detected there too
+        // (security review vector V4) with an ASCII context that the
+        // automaton can legitimately judge.
+        let token = "J8sK2m9xR4pL7vN3qW5tY1bH6fC0dE";
+        let leaf = format!("\u{017f}ecret={token}");
+        let context = "ordinary ascii review context prose";
+        let engine = EngineBuilder::new(&[]).build().unwrap();
+        let result = engine.scan_with_context(&leaf, context);
+        assert_eq!(result.findings.len(), 1, "leaf path must detect the folded keyword");
+        assert_eq!(result.findings[0].flag, "entropy.high_entropy_secret");
+        assert_eq!(&leaf[result.findings[0].start..result.findings[0].end], token);
+
+        // Analyzer-prepared variant (the per-leaf redaction hot path).
+        let analyzer = ContextAnalyzer::new(context);
+        let prepared = engine.scan_with_context_analyzer(&leaf, &analyzer);
+        assert_eq!(prepared.findings.len(), 1, "analyzer leaf path must detect it too");
+        assert_eq!(&leaf[prepared.findings[0].start..prepared.findings[0].end], token);
     }
 
     #[test]
