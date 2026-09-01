@@ -64,6 +64,38 @@ the §8B build → evidence → independent review loop and its explicit phase g
   and G0 containment intactness on the pushed branch. F2 opens; F2–F9 remain
   under Review 9 containment.
 
+- **F2.1 JSON dataplane (R9-1 F2 scope): CLOSED/PASS (2026-09-01, attempt 1;
+  panel 2/2 — correctness + security).** Reconciliation found the residual:
+  the request body was parsed twice on the redact path (`decoder.rs` +
+  `json_redact.rs`); `DecodedBody` now retains the parsed value and
+  `redact_json` reuses it (byte-identical outputs proven by A/B over 25
+  hostile shapes). Review 9's 38.9 ms p99 claim does NOT reproduce: honest
+  HTTP probe of the R9-1 shape p99 ~1.8 ms; permanent 64/512-leaf gate
+  p99 0.298/0.361 ms vs the 5 ms budget. Evidence:
+  `evidence/f2/r9-json-redaction.md`,
+  `evidence/review9/f21-attempt1-correctness.md`,
+  `evidence/review9/f21-attempt1-security.md`.
+
+- **F2.2+F2.3 vault zeroization + live break-glass (R9-8): CLOSED/PASS
+  (2026-09-01, attempt 1; panel 2/2 — correctness + security, ~30 live
+  adversarial probes, zero successful attacks).** `Vault` rewritten
+  (`Zeroizing`, wipe on every exit path, CSPRNG ids, request-scoped,
+  irreversible default / reversible opt-in); `BreakGlassLedger` rewritten and
+  wired live: admin-gated `POST /api/break-glass` → 256-bit nonce → one-shot
+  `X-Cerberus-Bypass` → audited; restart fails closed. Evidence:
+  `evidence/f2/r9-vault-zeroization.md`,
+  `evidence/review9/f23-attempt1-correctness.md`,
+  `evidence/review9/f23-attempt1-security.md`.
+
+- **F2 phase gate: CLOSED (2026-09-01, owner sign-off).** Integration battery
+  reproduced on a clean clone of `975be15`: 680/0 debug and release, pack
+  19/19, ReDoS 11/11, load 13/13, smoke-harness e2e 42/42, frozen-hash
+  verification all-match across documented re-freeze chains, containment
+  intact. Provenance: two integration-reviewer sub-agent transport failures
+  were followed by an inline orchestrator battery (noted in the report).
+  Evidence: `evidence/review9/f2-integrator-check.md`. F3 opens; F3–F9 remain
+  under Review 9 containment.
+
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
 - **Orchestration:** Orca Run `run_a64b51716aba`; workers exclusively **Codex** and **OpenCode**. No Claude was used in the v6.1 review/fix/recheck.
