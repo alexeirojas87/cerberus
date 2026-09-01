@@ -2,12 +2,23 @@
 set -euo pipefail
 
 # ──────────────────────────────────────────────────────────────────────
-# Cerberus Smoke Test — R0 (FIXED per review feedback)
+# Cerberus Smoke Test — R0 (FIXED per review feedback; re-repaired per
+# R9-17, F4.3 — evidence/review9/gauntlet-findings.md)
 #
 # Implements §6.2 of CERBERUS_REVIEW_FINDINGS.md.
 #
-# Gate: the smoke test MUST FAIL on points 3, 4 and 5
-# (documents the broken state before R1+R2 fixes).
+# R9-17 repairs (fix-plan §F4.3):
+#   1. `cerberus init` failure is no longer swallowed by `|| true` —
+#      init is a hard precondition and a failed init fails the run.
+#   2. HTTP_CODE comes from the real response status
+#      (`curl -w '%{http_code}'`) and is asserted with an explicit
+#      comparison; the clean pass-through body is asserted too.
+#   3. The 'cerberus-smock-*' typo is gone. The leak-check inspects an
+#      enumerated list of real per-run artifacts (HOME tree, proxy log,
+#      mock log via CERBERUS_MOCK_LOG) and FAILS if an expected artifact
+#      is missing — grepping a missing file can only report "clean".
+#
+# Gate: any failed check fails the run (exit 1).
 #
 # Usage: ./tests/smoke-test.sh [--build] [--port PORT]
 #   --build    Build release binary before running (default: false)
@@ -22,6 +33,8 @@ PORT=18787
 MOCK_PORT=0          # will be assigned an ephemeral port
 EVIDENCE_DIR=""
 TEST_LOG=""
+DAEMON_LOG=""        # per-run proxy log (R9-17: real, enumerated artifact)
+MOCK_LOG=""          # per-run mock request log (R9-17: real, enumerated artifact)
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -85,6 +98,13 @@ cleanup() {
     if [ -n "${TEST_HOME:-}" ] && [ -d "$TEST_HOME" ]; then
         rm -rf "$TEST_HOME"
     fi
+    # R9-17/F4.3: deterministic cleanup — per-run log artifacts go with the run
+    if [ -n "${DAEMON_LOG:-}" ]; then
+        rm -f "$DAEMON_LOG"
+    fi
+    if [ -n "${MOCK_LOG:-}" ]; then
+        rm -f "$MOCK_LOG"
+    fi
 }
 
 # Ensure cleanup runs on exit, interrupt, or pipe-close
@@ -138,7 +158,15 @@ pass_check "Clean HOME created"
 # ── STEP 2: cerberus init ──────────────────────────────────────────────
 log_section "STEP 2: cerberus init"
 
-"$BINARY" init 2>&1 | tee -a "$TEST_LOG" || true
+# R9-17 repair: init is a hard precondition. The old `|| true` swallowed a
+# failed init and let the run continue on a broken installation.
+INIT_RC=0
+"$BINARY" init 2>&1 | tee -a "$TEST_LOG" || INIT_RC=$?
+if [ "$INIT_RC" -ne 0 ]; then
+    fail_check "cerberus init exited with code $INIT_RC (was previously swallowed by '|| true')"
+    echo "FATAL: init failed — aborting smoke test." | tee -a "$TEST_LOG"
+    exit 1
+fi
 
 if [ -d "$TEST_HOME/.cerberus" ]; then
     pass_check "Config directory ~/.cerberus created"
@@ -151,7 +179,13 @@ log_section "STEP 3: Start proxy daemon on port $PORT"
 
 # Tell the proxy where to forward upstream requests (must be set before daemon starts)
 export CERBERUS_UPSTREAM_URL="http://127.0.0.1:${MOCK_PORT}"
-"$BINARY" start --port "$PORT" > /tmp/cerberus-smoke-daemon.log 2>&1 &
+
+# R9-17/F4.3: the proxy log is a real per-run artifact (the old leak-check
+# 'covered' the proxy log with a typo'd path 'cerberus-smock-*.log' that
+# never existed). Fresh per run — stale logs must never feed a leak check.
+DAEMON_LOG="/tmp/cerberus-smoke-${PORT}.log"
+rm -f "$DAEMON_LOG"
+"$BINARY" start --port "$PORT" > "$DAEMON_LOG" 2>&1 &
 PROXY_PID=$!
 
 # Wait for daemon to be ready (hard precondition)
@@ -179,6 +213,12 @@ fi
 # ── STEP 4: Start mock upstream (HARD PRECONDITION) ────────────────────
 log_section "STEP 4: Start mock upstream server on port $MOCK_PORT"
 
+# R9-17/F4.3: the mock's request log becomes a real per-run artifact via
+# CERBERUS_MOCK_LOG (previously it went to a shared, never-inspected default
+# path while the leak-check pretended to grep mock logs).
+MOCK_LOG="/tmp/cerberus-smoke-mock-${MOCK_PORT}.log"
+export CERBERUS_MOCK_LOG="$MOCK_LOG"
+rm -f "$MOCK_LOG"
 python3 tools/mock-server.py "$MOCK_PORT" > /dev/null 2>&1 &
 MOCK_PID=$!
 
@@ -232,27 +272,34 @@ log_section "STEP 6: TEST POINT 4 — Clean pass-through (P0-4, P0-5)"
 
 CLEAN_PAYLOAD='{"messages":[{"role":"user","content":"hello"}]}'
 
-# Try to forward to the mock upstream
-HTTP_CODE=""
-if curl -s -m 5 -o /tmp/cerberus-smoke-upstream-body.txt \
+# R9-17 repair: HTTP_CODE comes from the REAL response status via
+# `-w '%{http_code}'`. The old block derived it from curl's EXIT STATUS
+# (exit 0 → hardcoded "200"), so any completed transfer — including a 4xx/5xx
+# block response — was reported as HTTP 200.
+HTTP_CODE=$(curl -s -m 5 -o /tmp/cerberus-smoke-upstream-body.txt \
+    -w '%{http_code}' \
     -X POST "http://127.0.0.1:${PORT}/openai/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -d "$CLEAN_PAYLOAD" 2>/dev/null; then
-    HTTP_CODE="200"
-else
-    HTTP_CODE="000"
-fi
+    -d "$CLEAN_PAYLOAD" 2>/dev/null) || HTTP_CODE="000"
 UPSTREAM_BODY=$(cat /tmp/cerberus-smoke-upstream-body.txt 2>/dev/null || echo "")
 
 echo "  Request: clean payload to /openai/v1/chat/completions" | tee -a "$TEST_LOG"
 echo "  HTTP response code: $HTTP_CODE" | tee -a "$TEST_LOG"
 echo "  Response body: ${UPSTREAM_BODY:0:200}" | tee -a "$TEST_LOG"
 
-# Distinguish proxy forwarding failure from mock failure
+# Explicit status assertion
 if [ "$HTTP_CODE" = "200" ]; then
     pass_check "P0-4/P0-5: CLEAN REQUEST forwarded successfully (HTTP 200)"
 else
-    fail_check "P0-4/P0-5: CLEAN REQUEST NOT forwarded — exit code $HTTP_CODE"
+    fail_check "P0-4/P0-5: CLEAN REQUEST NOT forwarded — HTTP response code $HTTP_CODE"
+fi
+
+# Explicit body assertion (F4.3: asertar body/status) — the clean content
+# must come back un-mangled: no false redaction, response passthrough intact.
+if echo "$UPSTREAM_BODY" | grep -q 'hello'; then
+    pass_check "P0-4/P0-5: clean content echoed back by upstream (body passthrough intact)"
+else
+    fail_check "P0-4/P0-5: clean content NOT echoed back by upstream (body passthrough broken)"
 fi
 
 # Check if mock received the request (independent verification)
@@ -307,17 +354,40 @@ log_section "STEP 8: TEST POINT 6 — Zero leak (no raw secrets in logs/DB)"
 
 RAW_SECRET="sk-abc123def456ghi789jkl012mno345"
 
-LOG_LEAK=$(grep -r "$RAW_SECRET" "$TEST_HOME" 2>/dev/null || true)
-PROXY_LOG_LEAK=$(grep -r "$RAW_SECRET" /tmp/cerberus-smoke-daemon.log 2>/dev/null || true)
-PROXY_LOG_LEAK2=$(grep -r "$RAW_SECRET" /tmp/cerberus-smock-${PORT}.log 2>/dev/null || true)
+# R9-17 repair: every inspected surface is enumerated up-front and MUST
+# exist. Grepping a missing file can only ever report "clean" — that is how
+# the old check stayed vacuous ('/tmp/cerberus-smock-*.log' never existed).
+# A missing expected artifact is a failure, not a silent pass.
+LEAK_SURFACES=("$TEST_HOME" "$DAEMON_LOG" "$MOCK_LOG")
 
-if [ -z "$LOG_LEAK" ] && [ -z "$PROXY_LOG_LEAK" ] && [ -z "$PROXY_LOG_LEAK2" ]; then
-    pass_check "No raw secret leaked in HOME, proxy logs, or mock logs"
-else
+MISSING_SURFACES=""
+LEAK_HITS=""
+for surface in "${LEAK_SURFACES[@]}"; do
+    if [ ! -e "$surface" ]; then
+        MISSING_SURFACES="${MISSING_SURFACES}
+  - ${surface}"
+        continue
+    fi
+    GREP_RC=0
+    HITS=$(grep -r "$RAW_SECRET" "$surface" 2>/dev/null) || GREP_RC=$?
+    if [ "$GREP_RC" -ge 2 ]; then
+        fail_check "Leak grep errored (rc=$GREP_RC) on $surface — cannot certify no-leak"
+    elif [ -n "$HITS" ]; then
+        LEAK_HITS="${LEAK_HITS}
+--- ${surface} ---
+${HITS}"
+    fi
+done
+
+if [ -n "$MISSING_SURFACES" ]; then
+    fail_check "Leak-check surface(s) missing — evidence would be vacuous:${MISSING_SURFACES}"
+fi
+
+if [ -n "$LEAK_HITS" ]; then
     fail_check "RAW SECRET FOUND in logs or data files!"
-    echo "  HOME leak: $LOG_LEAK" | tee -a "$TEST_LOG"
-    echo "  Proxy log leak: $PROXY_LOG_LEAK" | tee -a "$TEST_LOG"
-    echo "  Mock log leak: $PROXY_LOG_LEAK2" | tee -a "$TEST_LOG"
+    echo "$LEAK_HITS" | tee -a "$TEST_LOG"
+elif [ -z "$MISSING_SURFACES" ]; then
+    pass_check "No raw secret leaked in HOME tree, proxy log ($DAEMON_LOG), or mock log ($MOCK_LOG) — 3/3 surfaces present and inspected"
 fi
 
 # ── Summary ─────────────────────────────────────────────────────────────
