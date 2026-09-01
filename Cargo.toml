@@ -18,6 +18,9 @@ cerberus-proxy = { path = "crates/cerberus-proxy" }
 bytes = "1"
 regex = "1"
 serde_json = "1"
+# F3.3 (R9-2): the honest HTTP round-trip latency gate drives the real
+# in-process proxy server (`spawn_proxy`) on a multi-thread runtime.
+tokio = { version = "1", features = ["full"] }
 
 [[test]]
 name = "failsafe"

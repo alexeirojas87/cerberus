@@ -400,6 +400,7 @@ dependencies = [
  "cerberus-proxy",
  "regex",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
