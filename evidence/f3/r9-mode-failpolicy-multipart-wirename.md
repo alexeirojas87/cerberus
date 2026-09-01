@@ -184,3 +184,134 @@ aacf8b2c864e92709e9f252838259ad802c8457ba7dddfa29092ae53ad579184  crates/cerberu
 ## Builder verdict
 
 **FIX executed for R9-11, R9-12, R9-13, R9-20 — returns to VERIFY** with an independent reviewer. The unit is NOT closed; per §8B.7 closure requires the independent VERIFY pass and the F3 phase gate sign-off.
+
+---
+
+# FIX attempt 2 — builder repair round (post attempt-1 panel FAIL)
+
+- Attempt: 2    Builder: F3.1+F3.2 builder subagent    Verdict: **FIX executed — returns to VERIFY** (unit NOT closed; §8B.3)
+- Date: 2026-09-01    Candidate base: `7519ad9` (branch `r9-remediation`, clean tree; parent of the attempt-1 candidate 71c5939 = the attempt-1 panel reports)
+- Work branch: `r9-f3-attempt3` (isolated worktree `/var/folders/l8/.../opencode/f3-attempt3-builder`, NOT pushed)
+- Scope guard: all four findings' (R9-11/12/13/20) attempt-1 acceptance criteria kept intact; no threshold moved; `tests/load_test.rs` untouched; no scope beyond §4.2 MVP.
+
+## Root causes and fixes (per finding)
+
+### F-1 [P1, correctness] scan-context asymmetry → critical-rule matches routed into fail-open
+- **Root cause:** TWO different scan models over one body. The pipeline decision scanned `decoded.text` (part payloads joined with `\n`, same-line proximity, `engine::scan`), while the multipart redaction re-scanned each region with a `ContextAnalyzer` over the FULL raw body (`keyword_anywhere`) — headers, preamble, epilogue and binary bytes included. A rule could fire in the re-scan but not in the decision; on redaction failure the policy's criticality oracle (the pipeline view) never saw the critical finding → fail-open forwarded the raw secret (200).
+- **Fix — one authoritative scan pass feeding both the decision and the redaction:**
+  - `scan_multipart_regions` (json_redact.rs:129) is now THE one scan pass: every recorded text region is scanned **in isolation** with `engine.scan_with_context_analyzer` against ONE `ContextAnalyzer` built over the full lossy body (the same context machinery as the JSON leaf path — cross-part and metadata keywords validate matches, fix P1-3). It produces `MultipartScan { regions, per-region findings }` (json_redact.rs:115) with the allowlist applied per region on the region-relative raw value.
+  - The pipeline consumes it at proxy.rs:710-719: decision view = `multipart_scan_output(&scan)` (json_redact.rs:171), so block/redact/criticality is judged from exactly these findings.
+  - The redaction performs **NO scan of its own**: `redact_body_with_multipart_scan` (json_redact.rs:68) → `redact_multipart` (json_redact.rs:202) splices the very same per-region findings (pipeline call site proxy.rs:793-801). There is no surface left where a region scan can fire a rule the decision never saw — or vice versa. This reaches the same consistency the JSON leaf path already had (one analyzer per body).
+  - Direct callers of the 6-arg `redact_body` (tests, load_test) keep the old signature; on multipart they get an identical local self-scan (empty allowlist — can only over-redact, never under-redact). The PIPELINE always uses the 7-arg entry with its own pass.
+- **Why this also closes the allowlist window honestly:** the allowlist is now authoritative end to end on multipart (same as the pre-existing text path): an operator-allowlisted value is neither flagged nor redacted — no "failure" is manufactured by a re-scan the policy cannot see. Known limit #3 below is updated accordingly.
+- **Tests (pipeline layer):** `f1_repro_keyword_in_part_header_blocks_via_pipeline` (smoke_harness.rs) drives the EXACT attempt-1 adv1 payload (critblock rule, keyword `harmlessword=` ONLY in part-2's header, low-redact secret in part-1): the decision now fires the critical block rule → **403, upstream received nothing**. Companion `multipart_authoritative_scan_is_the_single_consistent_model` (json_redact.rs) proves decision-view and redaction agree with and without the allowlist.
+
+### P1-3 [P1, security] cross-part context keywords dead in the DECISION path; acceptance test at the wrong layer
+- **Root cause:** the decision scan joined payloads with `\n` and applied same-line proximity (`constraints.rs:157 keyword_near_match`) — a keyword in another part (or in field-name metadata) could never be on the same line as the match → no finding → the redact-layer re-scan never ran. The attempt-1 acceptance test called `redact_body` directly, bypassing the pipeline.
+- **Fix:** the authoritative per-region scan uses `keyword_anywhere` over the full body for the DECISION too (same machinery as the JSON leaf path). The wrong-layer acceptance test was rewritten at the pipeline layer.
+- **Tests (pipeline layer):** `multipart_context_keyword_in_other_part_redacts_via_pipeline` (keyword in part-1 payload, secret in part-2 → 200, upstream receives `[REDACTED:test.ctxredact]`) and `multipart_keyword_in_part_metadata_redacts_via_pipeline` (keyword ONLY in `name="zeta"` part-header metadata → secret redacted) — both through `spawn_proxy` → `proxy_handler` with a byte-capturing upstream. The redaction-layer unit test (`multipart_context_keyword_in_other_part_redacts`, json_redact.rs) now documents that the acceptance lives in the harness.
+
+### P1-1 [P1, security] preamble / epilogue / part headers never scanned (silent under-scan vs the old lossy path)
+- **Root cause:** `parse_multipart` recorded regions for part payloads only; preamble, epilogue and all part-header bytes were dropped from the scan surface (no finding, no event, no feedback).
+- **Fix (decoder.rs):**
+  - `TextRegion` gains `kind: RegionKind` (`Preamble | PartHeaders | Payload | Epilogue`, decoder.rs:71-93).
+  - `parse_multipart` (decoder.rs:277) now records: the **preamble** (decoder.rs:294-302, ending before the line break that belongs to the first delimiter line so a redaction splice can never de-line-start a delimiter), the **epilogue** (decoder.rs:313-324, after the closing `--` and its terminating line break — nothing structural follows, splicing is safe), and every part's **header block** (decoder.rs:349-361, for ALL parts including binary-claimed ones — header bytes are text regardless of the part type; the blank separator line stays OUT of the region so redaction cannot eat it).
+  - All recorded regions are scanned by the authoritative pass and redacted in place (reverse-offset splice); boundaries and binary part PAYLOADS remain byte-exact (F3.1 mandate).
+- **Tests:** decoder-level `multipart_preamble_epilogue_and_headers_are_scanned_regions`, `multipart_preamble_region_never_swallows_the_delimiter_line_break`, `multipart_part_header_secret_is_scanned_and_redacted_in_place`, `multipart_preamble_and_epilogue_secrets_are_redacted` (redaction in place, body re-parses as multipart); pipeline-level `multipart_preamble_epilogue_and_header_secrets_never_forward_raw` (200 + zero raw secrets in the captured upstream body + structure intact) and `multipart_block_secret_in_part_header_blocks_via_pipeline` (403, detection parity with the old lossy path).
+
+### P1-2 [P1, security] per-upstream mode silently inert on the MITM path
+- **Root cause:** `forward.rs` set `DirectUpstream.provider = CONNECT hostname` (`api.openai.com`); the mode lookup keys on upstream map KEYS (`openai`) → unless an operator literally named an upstream by hostname, every MITM request inherited the global mode; with global `shadow` + per-upstream `enforce`, MITM traffic silently forwarded unredacted (task-forbidden state).
+- **Fix — resolve the mapping per the config's own keying (preferred over fail-closed):** `mitm_provider_of` (proxy.rs:1091) resolves the CONNECT host at request time: (1) exact key match (the documented hostname-keying convention, unchanged); (2) the upstream whose `url` HOST equals the CONNECT host — case-insensitive, deterministic name-order tiebreak (`upstream_url_host`, proxy.rs:1067, parsed via `hyper::Uri`); (3) unmapped host keeps the hostname as provider and inherits the global mode — the same documented fallback as an unknown provider on the reverse-proxy path (audit shows the raw host; `tracing::debug!` marks both fallbacks). The resolution feeds mode, audit provider and break-glass scope consistently.
+- **Tests (MITM layer, forward.rs):** `connect_tls_per_upstream_mode_resolves_by_url_host_and_never_silently_shadows` — the exact forbidden state: global `shadow` + upstream `openai` (url host = CONNECT host) with `mode: enforce` → intercepted request **403, nothing reaches the upstream**; control: an unmapped host under the same ctx inherits global shadow → 200 intact. `connect_tls_per_upstream_shadow_mode_never_blocks_on_mitm_path` — reverse direction: per-upstream `shadow` under global `enforce` never blocks, body passes intact. Unit tests: `mitm_provider_maps_connect_host_to_upstream_url_host`, `mitm_provider_exact_hostname_key_wins_and_mapping_is_deterministic`, `upstream_url_host_parses_scheme_and_port` (proxy.rs).
+
+### F-2 / P2 [correctness] cross-join multiline matches visible to the pipeline but to no region
+- **Root cause:** the `\n` join let a multiline pattern match ACROSS a part boundary in the pipeline scan; the region-wise redaction could never splice such a span → silent non-redaction (latent behind custom rules).
+- **Fix — consistent model, documented:** regions are the scan unit. The pipeline now scans each region in isolation (payloads, headers, preamble, epilogue) — there is NO joined-text view left for the decision to disagree with. A pattern spanning two regions is visible to NEITHER the decision NOR the redaction; a region-local multiline match is visible to BOTH. Decision and redaction can no longer diverge. Documented as known limit #2 below. (The structured-parse fallback — part bombs, unusable boundary — remains the whole-text model where redaction consumes the pipeline findings, consistent by construction.)
+
+### P2-2 [security] fail-open audited as `action_taken: "redact"`
+- **Root cause:** the event was derived from the rule action (`Redacted` + `action_taken="redact"`) regardless of whether redaction SUCCEEDED; an auditor could not distinguish "redacted" from "redaction failed, raw forwarded". Shadow events had the mirror ambiguity.
+- **Fix (proxy.rs):**
+  - `RedactDecision::FailOpenForward` is its own variant (proxy.rs:478); `SecurityEvent::RedactFailed` (log.rs:25, WARN level) logs the true outcome.
+  - Every outcome is audited with an honest action + flag (flags: proxy.rs:163-173; `record_outcome_event`, proxy.rs:1231): fail-open forward after redaction failure → `action_taken="fail-open"` + flag `redact-failed` (never plain `redact`); the 502 fail-closed reject → `action_taken="fail-closed"` + `redact-failed`; decode failure → flag `decode-failed` with `fail-closed` (reject) / `fail-open` (Open-policy forward); shadow with findings → flag `shadow` on the would-be-action event.
+- **Tests:** `closed_on_critical_fail_open_is_audited_honestly` (200 + original byte-exact forwarded + exactly one event with `action_taken="fail-open"` + `redact-failed`), `closed_on_critical_reject_is_audited_honestly` (502 + event `fail-closed`), `shadow_mode_events_carry_the_shadow_flag` (would-be `block` recorded while the body passed, flag `shadow`) — all pipeline-layer; plus the forward.rs fail-policy loop now asserts the flag and the honest action on the MITM path for all three policies, and the MITM shadow test asserts the `shadow` flag.
+
+### P2-1 [security] binary-claimed parts carry text secrets raw — silently
+- **Root cause:** skipped binary payloads were invisible (documented trade-off, but silent — A4/A5 probes).
+- **Fix:** `DecodedBody.binary_parts_skipped: usize` (decoder.rs:61) counts every non-empty binary-claimed payload skipped by the structured parse; the pipeline pushes the `binary-unscanned` flag + a WARN log on such requests (proxy.rs:743-750), and records a visibility event even with zero findings (proxy.rs:893-905) — under-scan is never silent. Byte-exact preservation unchanged (plan trade-off kept).
+- **Tests:** `multipart_binary_claimed_part_under_scan_is_audited` (pipeline layer: 200 forwarded, audit event carries `binary-unscanned`).
+
+### P3-1 [cosmetic, security-adjacent] boot config parse errors swallowed
+- **Fix:** `load_proxy_config_from` (daemon.rs:125-143) logs the real serde error at ERROR level with the file path and the fail-closed consequence; behavior unchanged (invalid file ignored, defaults apply / boot refuses where required).
+
+### P3-2 [theoretical TOCTOU] — accepted residual, unchanged
+Mode/provider and `resolve_route` still take separate config snapshots; exploiting it requires authenticated control-plane access mid-request. Out of this fix round's scope (not a required finding); unchanged behavior, still documented.
+
+## Updated known limits (MVP boundary)
+
+1. **Multipart** (§4.2 MVP): text-part scan only for PAYLOADS; binary classification unchanged (explicit textual list; everything else binary, byte-exact, now flagged `binary-unscanned`). No recursive MIME walking. Part bombs / unusable boundary → whole-text fallback (over-scan).
+2. **Consistent scan model (fix F-2):** regions are the scan unit — a pattern spanning two regions (only possible for custom multiline rules whose charset tolerates the delimiter text between them) is matched by neither the decision nor the redaction. No silent non-redaction is possible: the redaction never sees a different model than the decision. The whole-text fallback paths scan everything.
+3. **Allowlist semantics on multipart (updated):** the operator allowlist is authoritative end to end — an allowlisted value is neither flagged nor redacted on any path (JSON leaf re-scan still over-redacts allowlisted values; text/multipart do not). A redaction failure under the default policy therefore fails closed iff the request carries non-allowlisted critical findings visible to the authoritative scan.
+4. **R9-20** unchanged (input-compat alias, never serialized).
+5. `tests/load_test.rs` untouched (gate budgets frozen); the honest HTTP gate re-ran green with the identical drift-guard fingerprint.
+
+## Acceptance evidence — attempt-1 findings closed
+
+| Finding | Closing mechanism (file:line) | Closing test (pipeline layer unless noted) | Result |
+|---|---|---|---|
+| F-1 (P1) | One authoritative scan pass: scan_multipart_regions json_redact.rs:129; decision view proxy.rs:710-719; redaction consumes the same findings proxy.rs:793-801 | `f1_repro_keyword_in_part_header_blocks_via_pipeline` — adv1 payload → 403, nothing forwarded; `multipart_authoritative_scan_is_the_single_consistent_model` (unit) | ✅ |
+| P1-3 (P1) | `keyword_anywhere` over the full body in the decision pass; wrong-layer test rewritten | `multipart_context_keyword_in_other_part_redacts_via_pipeline`; `multipart_keyword_in_part_metadata_redacts_via_pipeline` | ✅ |
+| P1-1 (P1) | Preamble/epilogue/part-header regions: decoder.rs:294-361; scanned + redacted in place | `multipart_preamble_epilogue_and_header_secrets_never_forward_raw`; `multipart_block_secret_in_part_header_blocks_via_pipeline` (+ 4 decoder/json_redact unit tests) | ✅ |
+| P1-2 (P1) | mitm_provider_of URL-host mapping: proxy.rs:1067-1134 | `connect_tls_per_upstream_mode_resolves_by_url_host_and_never_silently_shadows`; `connect_tls_per_upstream_shadow_mode_never_blocks_on_mitm_path` (+ 3 unit tests) | ✅ |
+| F-2 (P2) | Region-isolation model — decision cannot depend on joins redaction cannot see; documented | Covered by the authoritative-scan consistency unit test + all multipart pipeline tests | ✅ |
+| P2-2 (P2) | FailOpenForward variant proxy.rs:478; SecurityEvent::RedactFailed log.rs:25; honest actions + flags proxy.rs:163-173, 799-871, 1231 | `closed_on_critical_fail_open_is_audited_honestly`; `closed_on_critical_reject_is_audited_honestly`; `shadow_mode_events_carry_the_shadow_flag`; forward.rs loop flag assertions (all three policies, MITM path) | ✅ |
+| P2-1 (P2) | binary_parts_skipped decoder.rs:61; `binary-unscanned` flag + visibility event proxy.rs:743-750, 893-905 | `multipart_binary_claimed_part_under_scan_is_audited` | ✅ |
+| P3-1 (P3) | Loud ERROR log on parse failure: daemon.rs:125-143 | behavior unchanged (fail-closed); log-only fix | ✅ |
+
+## Verification matrix (builder run, attempt 2, all commands verbatim)
+
+| # | Command | Exit | Result |
+|---|---|---|---|
+| 1 | `rtk cargo fmt --all -- --check` (after `rtk cargo fmt --all`) | 0 | clean |
+| 2 | `rtk cargo clippy --workspace --all-targets -- -D warnings` | 0 | `No issues found` |
+| 3 | `cargo test --workspace --all-targets` (debug) | 0 | **753 passed; 0 failed** (25 suites; baseline 734 + 19 net new) |
+| 4 | `rtk cargo test -p cerberus-packs --test production_pack_pr` | 0 | **19/19 passed** |
+| 5 | `cargo test --release --test redos_fuzz -- --test-threads=1` | 0 | **11/11 passed** |
+| 6 | `cargo test --release --test load_test -- --test-threads=1 --nocapture` | 0 | **14/14 passed** incl. the honest HTTP gate (below) |
+| 7 | `git diff --check` | 0 | clean |
+
+### Honest HTTP latency gate (matrix run 6 detail) — no-latency-regression proof
+
+`f3_3_http_round_trip: profile=release payload_bytes=51200 leaves=37 warmup=100 samples_per_scenario=2000 interleaving=proxy_direct_1to1 fingerprint=sha256:e3f206dd25ecce9adfdd7b16f752e64f4db75faf7f51677f3214f62ff1667022` (drift-guard fingerprint UNCHANGED — the workload was not touched).
+
+| Metric | Attempt-2 run | Attempt-1 builder run | F3.3 baseline @ fac8236 |
+|---|---:|---:|---:|
+| proxy p50 | 0.699 ms | 0.686 ms | 0.686–0.720 |
+| proxy p95 | 0.763 ms | — | — |
+| proxy p99 | **0.917 ms** | 0.848 ms | 0.851–1.553 |
+| direct p99 | 0.194 ms | 0.172 ms | 0.168–0.225 |
+| overhead p99 | 0.723 ms | 0.676 ms | 0.684–1.327 |
+| strict budget | p99 < 5.0 ms → **PASS** | PASS | 5/5 PASS |
+
+The +0.07 ms p99 delta vs attempt 1 is inside the baseline's run-to-run spread and far under the 5.0 ms strict budget. The attempt-2 scan model does not add a pass (the redaction no longer re-scans regions; the header-region scan adds only the header bytes).
+
+## Frozen SHA-256 hashes (touched files, attempt-2 commit state)
+
+```
+d5e1b4a077f7dcb7e80eb451bdd6942fe5d42d1cc095d224234c6ec463056eea  crates/cerberus-proxy/src/decoder.rs
+6e1da7f0b8bb4e6ccc26edf66a32c27e56dcd28700a067f7e113f61db7bdcb56  crates/cerberus-proxy/src/forward.rs
+bfc4596b1b2f76b21a7c5b5b1f978dcb34fde93a0e7b0bcf14fc5d2a67d42e3b  crates/cerberus-proxy/src/json_redact.rs
+8177059c789b3e22b857d0189c84f4938e739b861340606c07e613f7b1503fed  crates/cerberus-proxy/src/log.rs
+94f9e82a5717bd507bbf557b056f3df800af3a1e96252c7e59d387e6bcf72d1e  crates/cerberus-proxy/src/proxy.rs
+ea3d41a727accd3f0f53f3228f918cd8dd1fac6b0c7fe91939d97690b2c4b431  crates/cerberus-proxy/tests/smoke_harness.rs
+72c8f39fc7fdd46c3da334b8b5595c9dcef0a1454e7d6d319d9df1761b51c801  crates/cerberus/src/daemon.rs
+```
+
+(Attempt-1 hashes above remain the record for the files this round did not touch. `tests/load_test.rs` untouched — zero changes, verified via `git status`.)
+
+## If FAIL: what fails and how to reproduce it
+
+Nothing failed in this attempt. All matrix commands re-runnable verbatim from the worktree `/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/f3-attempt3-builder` (branch `r9-f3-attempt3`, commit recorded in the repo history; worktree left in place for the panel).
+
+## Builder verdict (attempt 2)
+
+**FIX executed for F-1, P1-1, P1-2, P1-3, P2-1, P2-2, F-2, P3-1 — returns to VERIFY.** The unit is NOT closed; per §8B.7 closure requires the independent re-verification pass and the F3 phase gate sign-off.

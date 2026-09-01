@@ -122,11 +122,26 @@ fn load_proxy_config() -> Option<ProxyConfig> {
 }
 
 /// Load config from an explicit path to isolate the filesystem in tests.
+///
+/// Fix P3-1 (attempt 2): a config file that EXISTS but fails to parse is
+/// never silently swallowed — the real serde error is logged loudly (the
+/// operator previously saw the misleading `no upstreams configured` instead).
+/// The behavior stays fail-closed: the invalid file is ignored and the
+/// defaults apply (or boot refuses where required).
 fn load_proxy_config_from(path: &std::path::Path) -> Option<ProxyConfig> {
     if !path.exists() {
         return None;
     }
-    ProxyConfig::from_file(path).ok()
+    match ProxyConfig::from_file(path) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            tracing::error!(
+                "proxy config file {} is INVALID and will be IGNORED (fail-closed defaults apply — fix the parse error or remove the file): {e}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 /// Payload-hash secret (HMAC-SHA256, P1-12) from `CERBERUS_HMAC_SECRET`.

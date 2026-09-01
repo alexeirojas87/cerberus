@@ -19,6 +19,10 @@ pub enum SecurityEvent {
     Warned,
     /// Bypass (break-glass used).
     Bypassed,
+    /// REDACTION FAILED and the fail policy decided the outcome: the raw
+    /// original was forwarded (fail-open) or the request rejected
+    /// (fail-closed). Never recorded as a plain "redacted" (fix P2-2).
+    RedactFailed,
     /// Clean request.
     Clean,
 }
@@ -26,7 +30,7 @@ pub enum SecurityEvent {
 impl SecurityEvent {
     const fn level(self) -> Level {
         match self {
-            Self::Blocked | Self::Bypassed => Level::WARN,
+            Self::Blocked | Self::Bypassed | Self::RedactFailed => Level::WARN,
             Self::Redacted | Self::Warned => Level::INFO,
             Self::Clean => Level::DEBUG,
         }
@@ -38,6 +42,7 @@ impl SecurityEvent {
             Self::Redacted => "request redacted by Cerberus",
             Self::Warned => "request warned by Cerberus",
             Self::Bypassed => "request bypassed (break-glass) by Cerberus",
+            Self::RedactFailed => "request REDACTION FAILED — fail policy decided the outcome (raw original forwarded on fail-open; request rejected on fail-closed)",
             Self::Clean => "request clean — no secrets detected",
         }
     }
@@ -97,6 +102,7 @@ mod tests {
         assert_eq!(SecurityEvent::Redacted.level(), Level::INFO);
         assert_eq!(SecurityEvent::Warned.level(), Level::INFO);
         assert_eq!(SecurityEvent::Bypassed.level(), Level::WARN);
+        assert_eq!(SecurityEvent::RedactFailed.level(), Level::WARN);
         assert_eq!(SecurityEvent::Clean.level(), Level::DEBUG);
     }
 
@@ -105,6 +111,9 @@ mod tests {
         assert!(SecurityEvent::Blocked.message().contains("blocked"));
         assert!(SecurityEvent::Redacted.message().contains("redacted"));
         assert!(SecurityEvent::Clean.message().contains("clean"));
+        // Fix P2-2: the redaction-failure event can never be confused with a
+        // successful redaction.
+        assert!(SecurityEvent::RedactFailed.message().contains("REDACTION FAILED"));
     }
 
     #[test]

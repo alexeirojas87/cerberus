@@ -9,18 +9,18 @@
 
 use bytes::Bytes;
 use cerberus_engine::constraints::ContextAnalyzer;
-use cerberus_engine::engine::{CompiledEngine, Finding};
+use cerberus_engine::engine::{CompiledEngine, Finding, ScanOutput};
 use cerberus_engine::redact::{apply_redaction, RedactOptions};
 use cerberus_engine::vault::{apply_redaction_reversible, Vault};
 
-use crate::decoder::{ContentType, DecodedBody};
+use crate::decoder::{ContentType, DecodedBody, TextRegion};
 
 /// Redact the body preserving structure.
 ///
 /// Returns the transformed bytes. For JSON bodies the structure is preserved
 /// (only matching string leaves are replaced); for `multipart/form-data`
-/// bodies (R9-13) only the recorded TEXTUAL part payloads are redacted and
-/// everything else — boundaries, part headers, binary parts — is preserved
+/// bodies (R9-13) only the recorded TEXT regions are redacted and
+/// everything else — boundaries and binary part payloads — is preserved
 /// byte-exact; for text bodies the whole text is redacted in place using the
 /// already-produced findings.
 ///
@@ -28,6 +28,13 @@ use crate::decoder::{ContentType, DecodedBody};
 /// spans are replaced by `[VAULT:<random>]` tokens and the originals are
 /// stored zeroized for the response un-redaction; `None` (the default) →
 /// standard irreversible `[REDACTED:flag]` tokens.
+///
+/// This is the 6-argument convenience form: on a multipart body it performs
+/// its own authoritative region scan (identical algorithm to the pipeline's,
+/// minus the allowlist — it can only over-redact, never under-redact). The
+/// PIPELINE must call [`redact_body_with_multipart_scan`] and pass the ONE
+/// scan pass the decision was made from, so the decision and the redaction
+/// can never disagree (fix F-1/P1-3, attempt 2).
 ///
 /// # Errors
 ///
@@ -41,17 +48,43 @@ pub fn redact_body(
     findings: &[Finding],
     vault: Option<&Vault>,
 ) -> Result<Vec<u8>, String> {
+    redact_body_with_multipart_scan(engine, body, decoded, opts, findings, vault, None)
+}
+
+/// Pipeline entry: redact the body using the AUTHORITATIVE multipart scan
+/// (fix F-1/P1-3, attempt 2).
+///
+/// `multipart_scan` is the single per-region scan
+/// pass the pipeline's decision (block/redact/criticality) was made from;
+/// the redaction consumes the very same findings, so there is no surface
+/// where a region re-scan can fire a rule the decision never saw — or vice
+/// versa. `None` (or a scan built from different regions) falls back to the
+/// identical local self-scan of [`redact_body`].
+///
+/// # Errors
+///
+/// Returns an error if the redaction itself fails internally (fail-policy
+/// decides at the caller: Open → forward original, Closed → reject).
+pub fn redact_body_with_multipart_scan(
+    engine: &CompiledEngine,
+    body: &Bytes,
+    decoded: &DecodedBody,
+    opts: &RedactOptions,
+    findings: &[Finding],
+    vault: Option<&Vault>,
+    multipart_scan: Option<&MultipartScan>,
+) -> Result<Vec<u8>, String> {
     // JSON path first; if the body is not valid JSON it falls back to the text fallback.
     if decoded.content_type == ContentType::Json {
         if let Some(redacted) = redact_json(engine, body, decoded.parsed.as_ref(), opts, vault)? {
             return Ok(redacted);
         }
     }
-    // Multipart path (R9-13): the decoder recorded the textual payload
-    // regions of the raw body — redact in place, no multipart re-parse.
+    // Multipart path (R9-13): the decoder recorded the scanned TEXT regions
+    // of the raw body — redact in place, no multipart re-parse.
     if decoded.content_type == ContentType::Multipart {
         if let Some(regions) = &decoded.multipart {
-            return redact_multipart(engine, body, regions, opts, vault);
+            return redact_multipart(engine, body, regions, multipart_scan, opts, vault);
         }
         // A hand-built `DecodedBody` without regions falls through to the
         // text fallback (whole-text redaction of the decoded text).
@@ -59,40 +92,146 @@ pub fn redact_body(
     fallback_text(decoded, findings, opts, vault)
 }
 
-/// Redact the textual parts of a `multipart/form-data` body (R9-13).
+/// The ONE authoritative per-region scan of a multipart body (fix F-1/P1-3,
+/// attempt 2).
 ///
-/// Each recorded region is scanned with the SAME context machinery as the
-/// JSON leaf path ([`CompiledEngine::scan_with_context_analyzer`] with the
-/// full body as keyword context), then redacted in place. Regions are
-/// spliced in REVERSE order so earlier offsets stay valid. Boundaries, part
-/// headers and binary parts are never touched — they are preserved
-/// byte-exact.
+/// Every recorded text region (payloads, part headers, preamble, epilogue)
+/// is scanned IN ISOLATION with [`CompiledEngine::scan_with_context_analyzer`]
+/// against ONE [`ContextAnalyzer`] built over the full lossy body — the same
+/// context machinery as the JSON leaf path, so a keyword anywhere in the
+/// body (another part's payload, a part header, the preamble) validates a
+/// match. The union of the region findings is the pipeline's decision view;
+/// the per-region findings are what the redaction splices. Both come from
+/// THIS pass, so they can never disagree.
+///
+/// The consistent scan model (fix F-2, attempt 2): regions are the scan
+/// unit. A pattern that spans two regions (e.g. a multiline rule whose match
+/// bridges two parts) is visible to NEITHER the decision nor the redaction —
+/// there is no joined-text view for the pipeline to disagree with. The
+/// allowlist is applied per region on the region-relative raw value (the
+/// operator allowlist is authoritative end to end: an allowlisted value is
+/// not flagged and not redacted).
+#[derive(Debug, Clone)]
+pub struct MultipartScan {
+    /// Regions in decode (ascending offset) order — the same vector as
+    /// `DecodedBody.multipart`.
+    pub regions: Vec<TextRegion>,
+    /// Post-allowlist findings per region, in the same order as `regions`;
+    /// offsets are relative to each region's lossy text.
+    pub findings: Vec<Vec<Finding>>,
+}
+
+/// Build the authoritative multipart scan for one request.
+///
+/// `allowlist` is the operator allowlist (exact-value match, same semantics
+/// as the pipeline's [`crate::proxy`] allowlist filter).
+#[must_use]
+pub fn scan_multipart_regions(
+    engine: &CompiledEngine,
+    body: &Bytes,
+    regions: &[TextRegion],
+    allowlist: &[String],
+) -> MultipartScan {
+    // ONE analyzer over the full lossy body: the shared keyword context for
+    // every region (keyword_anywhere semantics, cached per keyword set —
+    // identical to the JSON leaf path).
+    let body_text = String::from_utf8_lossy(body).into_owned();
+    let analyzer = ContextAnalyzer::new(&body_text);
+    let mut per_region: Vec<Vec<Finding>> = Vec::with_capacity(regions.len());
+    // Dedup key includes the region index: offsets are region-relative, so
+    // identical (flag, start, end) in two regions are two real matches.
+    let mut seen: std::collections::HashSet<(String, usize, usize, usize)> = std::collections::HashSet::new();
+    for (index, region) in regions.iter().enumerate() {
+        let slice = String::from_utf8_lossy(&body[region.start..region.end]).into_owned();
+        let found = engine.scan_with_context_analyzer(&slice, &analyzer);
+        let mut kept = Vec::new();
+        for f in found.findings {
+            // Allowlist on the region-relative raw value (same trim/exact
+            // semantics as the pipeline's text-path filter).
+            let allowlisted = f
+                .end
+                .le(&slice.len())
+                .then(|| slice.get(f.start..f.end).map(str::trim))
+                .flatten()
+                .is_some_and(|raw| allowlist.iter().any(|a| a.as_str() == raw));
+            if !allowlisted && seen.insert((f.flag.clone(), index, f.start, f.end)) {
+                kept.push(f);
+            }
+        }
+        per_region.push(kept);
+    }
+    MultipartScan {
+        regions: regions.to_vec(),
+        findings: per_region,
+    }
+}
+
+/// The union of all region findings as the pipeline decision view.
+#[must_use]
+pub fn multipart_scan_output(scan: &MultipartScan) -> ScanOutput {
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, usize, usize)> = std::collections::HashSet::new();
+    for region in &scan.findings {
+        for f in region {
+            if seen.insert((f.flag.clone(), f.start, f.end)) {
+                findings.push(f.clone());
+            }
+        }
+    }
+    let action_overall = findings
+        .iter()
+        .map(|f| f.action)
+        .max()
+        .unwrap_or(cerberus_engine::rule::Action::Allow);
+    ScanOutput {
+        findings,
+        action_overall,
+    }
+}
+
+/// Redact the scanned TEXT regions of a `multipart/form-data` body (R9-13).
+///
+/// Each region is redacted with the findings of the AUTHORITATIVE scan pass
+/// (`scan` — the SAME pass the pipeline decision was made from; fix F-1/P1-3,
+/// attempt 2). When no authoritative scan is supplied (direct callers,
+/// tests), an identical local self-scan is performed: same regions, same
+/// analyzer model, empty allowlist — it can only over-redact, never
+/// under-redact. Regions are spliced in REVERSE order so earlier offsets
+/// stay valid. Boundaries and binary part payloads are never touched — they
+/// are preserved byte-exact.
 fn redact_multipart(
     engine: &CompiledEngine,
     body: &Bytes,
     regions: &[crate::decoder::TextRegion],
+    scan: Option<&MultipartScan>,
     opts: &RedactOptions,
     vault: Option<&Vault>,
 ) -> Result<Vec<u8>, String> {
-    // The full body as context for keyword constraints — identical to the
-    // JSON leaf path, so a keyword in one part validates a secret in another.
-    let body_text = String::from_utf8_lossy(body).into_owned();
-    let analyzer = ContextAnalyzer::new(&body_text);
+    // The per-region findings: the caller-supplied authoritative pass when it
+    // covers exactly these regions, otherwise the identical local self-scan.
+    let authoritative = scan.is_some_and(|s| s.findings.len() == regions.len());
+    let owned;
+    let per_region: &[Vec<Finding>] = if authoritative {
+        scan.map(|s| &s.findings[..]).expect("checked above")
+    } else {
+        owned = scan_multipart_regions(engine, body, regions, &[]).findings;
+        &owned
+    };
     let mut out = body.to_vec();
-    for region in regions.iter().rev() {
-        let slice = String::from_utf8_lossy(&body[region.start..region.end]);
-        let found = engine.scan_with_context_analyzer(&slice, &analyzer);
-        if found.findings.is_empty() {
+    for (index, region) in regions.iter().enumerate().rev() {
+        let slice = String::from_utf8_lossy(&body[region.start..region.end]).into_owned();
+        let findings = &per_region[index];
+        if findings.is_empty() {
             continue;
         }
         let redacted = match vault {
             // Reversible (opt-in): unique vault token per span, the original
             // value goes into the request-scoped vault.
-            Some(vault) => apply_redaction_reversible(&slice, &found.findings, vault)
+            Some(vault) => apply_redaction_reversible(&slice, findings, vault)
                 .map(String::into_bytes)
                 .map_err(|e| format!("multipart part redaction failed: {e}"))?,
             // Irreversible (default, closed decision §9 #4).
-            None => apply_redaction(&slice, &found.findings, opts)
+            None => apply_redaction(&slice, findings, opts)
                 .map(String::into_bytes)
                 .map_err(|e| format!("multipart part redaction failed: {e}"))?,
         };
@@ -347,6 +486,7 @@ mod tests {
             content_type: crate::decoder::ContentType::Json,
             parsed: None,
             multipart: None,
+            binary_parts_skipped: 0,
         };
         let fallback =
             redact_body(&engine, &body, &manual, &RedactOptions::default(), &[], None).expect("fallback path");
@@ -437,8 +577,12 @@ mod tests {
 
     #[test]
     fn multipart_context_keyword_in_other_part_redacts() {
-        // Same context machinery as the JSON leaf path: the keyword lives in
-        // a DIFFERENT part than the secret, and the secret is still redacted.
+        // REDACTION-LAYER mechanics (attempt 2): the keyword lives in a
+        // DIFFERENT part than the secret, and the secret is still redacted.
+        // The ACCEPTANCE for cross-part context in the DECISION path is
+        // `multipart_context_keyword_in_other_part_redacts_via_pipeline` in
+        // tests/smoke_harness.rs (attempt-1 review P1-3: the old acceptance
+        // test lived here, at the wrong layer).
         let engine = engine();
         let key = format!("AIza{}", "D".repeat(35));
         let mut body = Vec::new();
@@ -454,6 +598,133 @@ mod tests {
         let text = String::from_utf8_lossy(&out);
         assert!(!text.contains(&key), "cross-part context must redact the secret");
         assert!(text.contains("google api_key here"), "the other part stays intact");
+    }
+
+    #[test]
+    fn multipart_authoritative_scan_is_the_single_consistent_model() {
+        // FIX F-1/P1-3 (attempt 2): `scan_multipart_regions` is the ONE pass
+        // that feeds both the decision (multipart_scan_output) and the
+        // redaction (redact_body_with_multipart_scan). The allowlist applied
+        // in that pass is authoritative end to end: an allowlisted value is
+        // neither flagged nor redacted; a non-allowlisted one is both.
+        let engine = engine();
+        let key = format!("AIza{}", "E".repeat(35));
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{MP_BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"context\"\r\n\r\ngoogle api_key here\r\n");
+        body.extend_from_slice(format!("--{MP_BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"secret\"\r\n\r\n");
+        body.extend_from_slice(key.as_bytes());
+        body.extend_from_slice(format!("\r\n--{MP_BOUNDARY}--\r\n").as_bytes());
+        let body = Bytes::from(body);
+        let decoded = decode(&body, Some(&format!("multipart/form-data; boundary={MP_BOUNDARY}")));
+        let regions = decoded.multipart.as_ref().expect("regions");
+
+        // Without the allowlist: the decision view carries the finding and
+        // the redaction redacts it.
+        let scan = scan_multipart_regions(&engine, &body, regions, &[]);
+        let view = multipart_scan_output(&scan);
+        assert_eq!(view.findings.len(), 1, "one cross-part-context finding");
+        assert_eq!(view.action_overall, cerberus_engine::rule::Action::Redact);
+        let out = redact_body_with_multipart_scan(
+            &engine,
+            &body,
+            &decoded,
+            &RedactOptions::default(),
+            &[],
+            None,
+            Some(&scan),
+        )
+        .expect("redact");
+        assert!(!String::from_utf8_lossy(&out).contains(&key));
+
+        // With the value allowlisted: the SAME pass drops it from the
+        // decision view and the redaction leaves it alone — no disagreement
+        // between what the policy saw and what redaction did.
+        let scan_allow = scan_multipart_regions(&engine, &body, regions, std::slice::from_ref(&key));
+        let view_allow = multipart_scan_output(&scan_allow);
+        assert!(view_allow.findings.is_empty(), "allowlisted value must not be flagged");
+        let out_allow = redact_body_with_multipart_scan(
+            &engine,
+            &body,
+            &decoded,
+            &RedactOptions::default(),
+            &[],
+            None,
+            Some(&scan_allow),
+        )
+        .expect("redact");
+        assert!(
+            String::from_utf8_lossy(&out_allow).contains(&key),
+            "allowlisted value is forwarded (operator decision, visible in the audit flags)"
+        );
+    }
+
+    #[test]
+    fn multipart_part_header_secret_is_scanned_and_redacted_in_place() {
+        // FIX P1-1 (attempt 2): a secret in a part HEADER is text — the
+        // authoritative scan detects it and the redaction redacts it in
+        // place without breaking the header line or the structure.
+        let engine = engine();
+        let key = format!("AIza{}", "F".repeat(35));
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{MP_BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"f\"\r\n");
+        body.extend_from_slice(b"X-Note: google api_key\r\n");
+        body.extend_from_slice(format!("X-Api-Key: {key}\r\n\r\n").as_bytes());
+        body.extend_from_slice(b"clean payload\r\n");
+        body.extend_from_slice(format!("--{MP_BOUNDARY}--\r\n").as_bytes());
+        let body = Bytes::from(body);
+        let decoded = decode(&body, Some(&format!("multipart/form-data; boundary={MP_BOUNDARY}")));
+        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[], None).expect("redact");
+        let text = String::from_utf8_lossy(&out);
+        assert!(!text.contains(&key), "header secret must not survive: {text}");
+        assert!(
+            text.contains("x-api-key: [REDACTED") || text.contains("X-Api-Key: [REDACTED"),
+            "{text}"
+        );
+        assert!(text.contains("clean payload"), "payload untouched");
+        assert_eq!(text.matches(&format!("--{MP_BOUNDARY}")).count(), 2, "structure intact");
+        // The output still re-parses as multipart with the same region count.
+        let re = decode(
+            &Bytes::from(out),
+            Some(&format!("multipart/form-data; boundary={MP_BOUNDARY}")),
+        );
+        assert_eq!(
+            re.multipart.as_ref().map(Vec::len),
+            decoded.multipart.as_ref().map(Vec::len)
+        );
+    }
+
+    #[test]
+    fn multipart_preamble_and_epilogue_secrets_are_redacted() {
+        // FIX P1-1 (attempt 2): preamble/epilogue secrets are redacted in
+        // place; boundaries stay intact and the body re-parses.
+        let engine = engine();
+        let key = format!("AIza{}", "G".repeat(35));
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("preamble google api_key {key}\r\n").as_bytes());
+        body.extend_from_slice(format!("--{MP_BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Type: text/plain\r\n\r\nclean\r\n");
+        body.extend_from_slice(format!("--{MP_BOUNDARY}--\r\n").as_bytes());
+        body.extend_from_slice(format!("epilogue google api_key {key}\r\n").as_bytes());
+        let body = Bytes::from(body);
+        let decoded = decode(&body, Some(&format!("multipart/form-data; boundary={MP_BOUNDARY}")));
+        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[], None).expect("redact");
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(
+            text.matches(&key).count(),
+            0,
+            "preamble+epilogue secrets redacted: {text}"
+        );
+        assert!(text.contains(&format!("--{MP_BOUNDARY}\r\n")));
+        assert!(text.contains(&format!("--{MP_BOUNDARY}--")));
+        assert!(text.contains("clean"));
+        let re = decode(
+            &Bytes::from(out),
+            Some(&format!("multipart/form-data; boundary={MP_BOUNDARY}")),
+        );
+        assert_eq!(re.content_type, crate::decoder::ContentType::Multipart);
     }
 
     #[test]

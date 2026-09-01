@@ -2996,7 +2996,10 @@ async fn a1_yaml_config_drives_the_proxy_end_to_end() {
 }
 
 /// ── R9-13 unit-level: the decoder is reachable from the pipeline path with
-/// the same `DecodedBody` contract (single parse; regions recorded) ──
+/// the same `DecodedBody` contract (single parse; regions recorded — since
+/// the attempt-2 fix they cover payloads, part headers, preamble and
+/// epilogue; `binary_parts_skipped` counts the byte-exact-preservation
+/// trade-off) ──
 #[test]
 fn decoder_records_multipart_regions_for_single_parse_redaction() {
     let body = Bytes::from(
@@ -3006,5 +3009,434 @@ fn decoder_records_multipart_regions_for_single_parse_redaction() {
     assert_eq!(decoded.content_type, cerberus_proxy::decoder::ContentType::Multipart);
     assert!(decoded.parsed.is_none(), "multipart bodies carry no JSON tree");
     let regions = decoded.multipart.expect("regions recorded at decode time");
-    assert_eq!(regions.len(), 2, "both text parts recorded once for the redaction path");
+    assert_eq!(regions.len(), 4, "two header blocks + two payloads recorded once");
+    assert_eq!(decoded.binary_parts_skipped, 0, "no binary payloads in this body");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FIX attempt 2 — pipeline-layer closure tests for the attempt-1 panel P1s:
+// F-1/P1-3 (one authoritative scan model), P1-1 (preamble/epilogue/headers),
+// P1-2 (MITM mode lives in forward.rs), P2-1/P2-2 (visible, honest audit).
+// Every test drives the REAL request path (spawn_proxy → proxy_handler), not
+// direct redact_body calls.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Block rule for `BLOCKSECRET1…` (critical) gated by a context keyword.
+fn f3_context_block_rule(keyword: &str) -> cerberus_engine::rule::Rule {
+    let mut r = f3_block_rule();
+    r.context_keywords = vec![keyword.to_string()];
+    r
+}
+
+/// Redact rule for `CTXSECRET-…` (critical) gated by a context keyword.
+fn f3_context_redact_rule(keyword: &str) -> cerberus_engine::rule::Rule {
+    cerberus_engine::rule::Rule {
+        flag: "test.ctxredact".to_string(),
+        category: cerberus_engine::rule::Category::Secrets,
+        severity: cerberus_engine::rule::Severity::Critical,
+        action: cerberus_engine::rule::Action::Redact,
+        hash_normalization: None,
+        context_keywords: vec![keyword.to_string()],
+        min_length: None,
+        max_length: None,
+        allowed_examples: Vec::new(),
+        patterns: vec![r"CTXSECRET-[A-Za-z0-9]{10,}".to_string()],
+        validators: Vec::new(),
+    }
+}
+
+/// ── FIX F-1 (attempt-1 correctness P1): the EXACT reproduction payload —
+/// a critical BLOCK rule whose contextKeyword appears ONLY in a part header
+/// — must now yield closed behavior through the real pipeline. Under the
+/// authoritative scan the keyword (part header) validates the payload match,
+/// the DECISION itself sees the block finding → 403, nothing forwarded.
+#[tokio::test]
+async fn f1_repro_keyword_in_part_header_blocks_via_pipeline() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[
+            f3_redact_rule(cerberus_engine::rule::Severity::Low), // test.lowredact, no keywords
+            f3_context_block_rule("harmlessword="),               // test.critblock
+        ],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let redactable = format!("REDACTSECRET2{}", "dddddddddddd");
+    let block = format!("BLOCKSECRET1{}", "cccccccccccc");
+
+    // The attempt-1 adv1 payload: keyword ONLY in part-2's header.
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--XBOUND123\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"f1\"\r\n\r\n");
+    body.extend_from_slice(redactable.as_bytes());
+    body.extend_from_slice(b"\r\n--XBOUND123\r\n");
+    body.extend_from_slice(b"X-Note: harmlessword=\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"f2\"\r\n\r\n");
+    body.extend_from_slice(block.as_bytes());
+    body.extend_from_slice(b"\r\n--XBOUND123--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "multipart/form-data; boundary=XBOUND123")
+        .body(body)
+        .send()
+        .await
+        .expect("f1 repro request");
+    assert_eq!(
+        r.status(),
+        403,
+        "the block rule must fire in the PIPELINE decision (closed behavior, got {})",
+        r.status()
+    );
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "closed behavior: nothing may be forwarded when the critical block rule fires"
+    );
+    mock_handle.abort();
+}
+
+/// ── FIX P1-3 (attempt-1 security P1): cross-part context keywords must work
+/// in the DECISION path through the REAL pipeline. This is the rewritten
+/// acceptance test — the attempt-1 version called `redact_body` directly,
+/// validating the wrong layer.
+#[tokio::test]
+async fn multipart_context_keyword_in_other_part_redacts_via_pipeline() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_context_redact_rule("zeta")],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("CTXSECRET-{}", "kkkkkkkkkkkk");
+
+    // Keyword in part 1's PAYLOAD, secret in part 2's payload.
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--ZETAB\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"context\"\r\n\r\n");
+    body.extend_from_slice(b"zeta\r\n");
+    body.extend_from_slice(b"--ZETAB\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"secret\"\r\n\r\n");
+    body.extend_from_slice(secret.as_bytes());
+    body.extend_from_slice(b"\r\n--ZETAB--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "multipart/form-data; boundary=ZETAB")
+        .body(body)
+        .send()
+        .await
+        .expect("cross-part keyword request");
+    assert_eq!(r.status(), 200, "a redact finding forwards (got {})", r.status());
+    let forwarded = captured.lock().unwrap().clone();
+    let fwd_text = String::from_utf8_lossy(&forwarded);
+    assert!(
+        !fwd_text.contains(&secret),
+        "cross-part context must redact: {fwd_text}"
+    );
+    assert!(fwd_text.contains("[REDACTED:test.ctxredact]"), "{fwd_text}");
+    mock_handle.abort();
+}
+
+/// ── FIX P1-3 (companion): the keyword placed in part METADATA (a form field
+/// name, part header) must validate the payload secret in the DECISION path
+/// too — the redaction then removes it (A6/A6b from the attempt-1 panel).
+#[tokio::test]
+async fn multipart_keyword_in_part_metadata_redacts_via_pipeline() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_context_redact_rule("zeta")],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("CTXSECRET-{}", "llllllllllll");
+
+    // The keyword appears ONLY in the part HEADER (`name="zeta"` metadata).
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--ZETAC\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"zeta\"\r\n\r\n");
+    body.extend_from_slice(secret.as_bytes());
+    body.extend_from_slice(b"\r\n--ZETAC--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "multipart/form-data; boundary=ZETAC")
+        .body(body)
+        .send()
+        .await
+        .expect("metadata keyword request");
+    assert_eq!(r.status(), 200);
+    let forwarded = captured.lock().unwrap().clone();
+    let fwd_text = String::from_utf8_lossy(&forwarded);
+    assert!(
+        !fwd_text.contains(&secret),
+        "metadata-keyword context must redact: {fwd_text}"
+    );
+    assert!(fwd_text.contains("[REDACTED:test.ctxredact]"), "{fwd_text}");
+    mock_handle.abort();
+}
+
+/// ── FIX P1-1 (attempt-1 security P1): secrets in the PREAMBLE, the
+/// EPILOGUE and a part HEADER are scanned and redacted through the real
+/// pipeline — the old lossy path covered them; the attempt-1 structured path
+/// forwarded them raw silently.
+#[tokio::test]
+async fn multipart_preamble_epilogue_and_header_secrets_never_forward_raw() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_redact_rule(cerberus_engine::rule::Severity::High)],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let pre = format!("REDACTSECRET2{}", "mmmmmmmmmm");
+    let epi = format!("REDACTSECRET2{}", "nnnnnnnnnn");
+    let hdr = format!("REDACTSECRET2{}", "oooooooooo");
+
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("preamble has {pre}\r\n").as_bytes());
+    body.extend_from_slice(b"--P1BOUND\r\n");
+    body.extend_from_slice(b"Content-Type: text/plain\r\n");
+    body.extend_from_slice(format!("X-Note: header has {hdr}\r\n\r\n").as_bytes());
+    body.extend_from_slice(b"clean payload\r\n");
+    body.extend_from_slice(b"--P1BOUND--\r\n");
+    body.extend_from_slice(format!("epilogue has {epi}\r\n").as_bytes());
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "multipart/form-data; boundary=P1BOUND")
+        .body(body)
+        .send()
+        .await
+        .expect("preamble/epilogue/header request");
+    assert_eq!(r.status(), 200);
+    let forwarded = captured.lock().unwrap().clone();
+    let fwd_text = String::from_utf8_lossy(&forwarded);
+    assert!(
+        !fwd_text.contains(&pre),
+        "PREAMBLE secret must not forward raw: {fwd_text}"
+    );
+    assert!(
+        !fwd_text.contains(&epi),
+        "EPILOGUE secret must not forward raw: {fwd_text}"
+    );
+    assert!(
+        !fwd_text.contains(&hdr),
+        "PART HEADER secret must not forward raw: {fwd_text}"
+    );
+    assert!(fwd_text.contains("clean payload"), "payload intact: {fwd_text}");
+    assert_eq!(fwd_text.matches("--P1BOUND").count(), 2, "structure intact: {fwd_text}");
+    mock_handle.abort();
+}
+
+/// ── FIX P1-1, block direction: a critical BLOCK secret in a part header
+/// must block the request (detection parity with the old lossy path).
+#[tokio::test]
+async fn multipart_block_secret_in_part_header_blocks_via_pipeline() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_block_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("BLOCKSECRET1{}", "pppppppppp");
+
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--HDRVICTIM\r\n");
+    body.extend_from_slice(b"Content-Type: text/plain\r\n");
+    body.extend_from_slice(format!("X-Custom: token {secret}\r\n\r\n").as_bytes());
+    body.extend_from_slice(b"harmless payload\r\n");
+    body.extend_from_slice(b"--HDRVICTIM--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "multipart/form-data; boundary=HDRVICTIM")
+        .body(body)
+        .send()
+        .await
+        .expect("header block secret request");
+    assert_eq!(r.status(), 403, "a block secret in a part header must block");
+    assert!(captured.lock().unwrap().is_empty(), "nothing forwarded when blocked");
+    mock_handle.abort();
+}
+
+/// ── FIX P2-1: a text secret inside a BINARY-CLAIMED part still forwards
+/// (documented §4.2 byte-exact trade-off) but the under-scan is now VISIBLE:
+/// the audit event carries the `binary-unscanned` flag even with zero
+/// findings.
+#[tokio::test]
+async fn multipart_binary_claimed_part_under_scan_is_audited() {
+    let (mock_adj, mock_handle, _captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(&[], OperationMode::Enforce, &format!("http://{mock_adj}"));
+    let events = ctx.api.events.clone();
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--BINAUDIT\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"\r\n");
+    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    body.extend_from_slice(b"text secret hidden in a binary-claimed part\r\n");
+    body.extend_from_slice(b"\r\n--BINAUDIT--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "multipart/form-data; boundary=BINAUDIT")
+        .body(body)
+        .send()
+        .await
+        .expect("binary under-scan request");
+    assert_eq!(r.status(), 200, "the byte-exact trade-off still forwards");
+
+    let events = events.lock().await;
+    assert!(
+        events.iter().any(|e| e.flags.iter().any(|f| f == "binary-unscanned")),
+        "the skipped binary payload must be visible in the audit: {:?}",
+        events.iter().map(|e| (&e.action_taken, &e.flags)).collect::<Vec<_>>()
+    );
+    drop(events);
+    mock_handle.abort();
+}
+
+/// ── FIX P2-2: a fail-open forward after a redaction failure is audited with
+/// the honest action `fail-open` + the `redact-failed` flag — NEVER as plain
+/// `redact` while the raw original went upstream.
+#[tokio::test]
+async fn closed_on_critical_fail_open_is_audited_honestly() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let block = format!("BLOCKSECRET1{}", "eeeeeeeeee");
+    let redactable = format!("REDACTSECRET2{}", "ffffffffff");
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_block_rule(), f3_redact_rule(cerberus_engine::rule::Severity::Low)],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let events = ctx.api.events.clone();
+    ctx.config.write().unwrap().policy.allowlist = vec![block.clone()];
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let original = format!(r#"{{"content":"{block} {redactable}"}}"#);
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body(original.clone())
+        .send()
+        .await
+        .expect("fail-open audit request");
+    assert_eq!(r.status(), 200, "non-critical redaction failure fails open");
+    let forwarded = captured.lock().unwrap().clone();
+    let body_start = forwarded.windows(4).position(|w| w == b"\r\n\r\n").expect("headers") + 4;
+    assert_eq!(
+        &forwarded[body_start..],
+        original.as_bytes(),
+        "original forwarded (fail-open)"
+    );
+
+    let events = events.lock().await;
+    let failure_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.flags.iter().any(|f| f == "redact-failed"))
+        .collect();
+    assert_eq!(
+        failure_events.len(),
+        1,
+        "exactly one honest fail-open event: {:?}",
+        events.iter().map(|e| (&e.action_taken, &e.flags)).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        failure_events[0].action_taken, "fail-open",
+        "the audited action must name the outcome, never plain 'redact'"
+    );
+    drop(events);
+    mock_handle.abort();
+}
+
+/// ── FIX P2-2, fail-closed direction: a 502 redact-failure reject is also
+/// audited (action `fail-closed`, flag `redact-failed`) — the outcome is
+/// visible without reading daemon logs.
+#[tokio::test]
+async fn closed_on_critical_reject_is_audited_honestly() {
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let block = format!("BLOCKSECRET1{}", "cccccccccc");
+    let redactable = format!("REDACTSECRET2{}", "dddddddddd");
+    let ctx = make_ctx_default_fail_policy(
+        &[
+            f3_block_rule(),
+            f3_redact_rule(cerberus_engine::rule::Severity::Critical),
+        ],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let events = ctx.api.events.clone();
+    ctx.config.write().unwrap().policy.allowlist = vec![block.clone()];
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body(format!(r#"{{"content":"{block} {redactable}"}}"#))
+        .send()
+        .await
+        .expect("fail-closed audit request");
+    assert_eq!(r.status(), 502, "critical findings → closed behavior");
+
+    let events = events.lock().await;
+    let failure_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.flags.iter().any(|f| f == "redact-failed"))
+        .collect();
+    assert_eq!(
+        failure_events.len(),
+        1,
+        "the fail-closed outcome is audited: {events:?}"
+    );
+    assert_eq!(failure_events[0].action_taken, "fail-closed");
+    drop(events);
+    mock_handle.abort();
+}
+
+/// ── FIX P2-2, shadow flag: a shadow-mode event records what WOULD have
+/// happened while the body passed intact — the `shadow` flag makes that
+/// unmistakable in the audit store.
+#[tokio::test]
+async fn shadow_mode_events_carry_the_shadow_flag() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(&[f3_block_rule()], OperationMode::Shadow, &format!("http://{mock_adj}"));
+    let events = ctx.api.events.clone();
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("BLOCKSECRET1{}", "iiiiiiiiii");
+
+    let r = client
+        .post(format!("http://{addr}/v1/x"))
+        .header("content-type", "application/json")
+        .body(format!(r#"{{"content":"{secret}"}}"#))
+        .send()
+        .await
+        .expect("shadow request");
+    assert_eq!(r.status(), 200, "shadow never blocks");
+    assert!(!captured.lock().unwrap().is_empty(), "shadow forwards");
+
+    let events = events.lock().await;
+    let shadow_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.flags.iter().any(|f| f == "shadow"))
+        .collect();
+    assert_eq!(shadow_events.len(), 1, "the shadow event carries the flag: {events:?}");
+    assert_eq!(
+        shadow_events[0].action_taken, "block",
+        "the recorded action is the WOULD-BE action"
+    );
+    drop(events);
+    mock_handle.abort();
 }
