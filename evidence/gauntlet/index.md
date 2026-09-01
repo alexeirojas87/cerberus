@@ -96,6 +96,57 @@ the §8B build → evidence → independent review loop and its explicit phase g
   Evidence: `evidence/review9/f2-integrator-check.md`. F3 opens; F3–F9 remain
   under Review 9 containment.
 
+- **F3.3 honest HTTP latency gate (R9-2): CLOSED/PASS (2026-09-01, attempt 1;
+  panel 2/2 — correctness+security and performance).** The gate measures the
+  real HTTP round trip (client → proxy in enforce mode with the default pack →
+  mock upstream → client), 2,000 individual samples per scenario, interleaved
+  1:1 with a direct upstream baseline, strict absolute proxy p99 < 5.0 ms
+  (§5 closed budget). Builder series 5/5 (worst p99 1.553 ms); the
+  `phone_list` probe was reclassified to its pre-existing documented 8.0 ms
+  emission-class ceiling (no §5 budget moved; the performance lens
+  independently reproduced the marginality). The performance lens's P1
+  (contention fragility of the absolute assert) was resolved by **owner
+  decision: keep the absolute strict assert**; quiet-host requirement
+  documented; the gate fails loudly, never silently. Evidence:
+  `evidence/f3/r9-honest-latency-gate.md`,
+  `evidence/review9/f33-attempt1-correctness.md`,
+  `evidence/review9/f33-attempt1-performance.md`.
+
+- **F3.1+F3.2 per-upstream mode / ClosedOnCritical / multipart MVP decoder /
+  wire-name (R9-11/12/13/20): CLOSED/PASS (2026-09-01, attempt 2; panel
+  re-verification 2/2).** Attempt 1 was REJECTED by both lenses with 4×P1
+  (scan-context asymmetry routing critical-rule matches into the fail-open
+  branch under the new default; preamble/epilogue/part-header under-scan;
+  per-upstream mode silently inert on MITM; cross-part context keywords dead
+  in the decision path). Attempt 2 closed every P1: ONE authoritative scan
+  pass now feeds both the criticality decision and redaction (no re-scan),
+  preamble/epilogue/part headers are scanned regions, MITM resolves
+  per-upstream mode by url-host mapping, fail-open is audited honestly
+  (`fail-open` + `redact-failed` flag), binary-part skips emit a
+  `binary-unscanned` event. Evidence:
+  `evidence/f3/r9-mode-failpolicy-multipart-wirename.md`,
+  `evidence/review9/f32-attempt1-correctness.md`,
+  `evidence/review9/f32-attempt1-security.md`,
+  `evidence/review9/f32-attempt2-correctness.md`,
+  `evidence/review9/f32-attempt2-security.md`.
+
+- **F3 phase gate: CLOSED (2026-09-01, owner sign-off).** Integration battery
+  on a clean clone of `5ac2564`: 753/0 debug and release, pack 19/19, ReDoS
+  11/11, load 14/14, smoke-harness e2e 63/63, honest HTTP gate p99 0.871 ms
+  vs strict 5.0 ms, frozen hashes verified (attempt-2 block 7/7; every
+  mismatch explained by re-freeze chains), containment intact. Evidence:
+  `evidence/review9/f3-integrator-check.md`.
+
+- **R9-21 (NEW, P1-class, registered 2026-09-01, OPEN)** — JSON key-name
+  context asymmetry: a `contextKeywords` match can fire in the JSON leaf
+  re-scan while the pipeline decision path misses it (the JSON analog of the
+  multipart F-1 fixed in F3.1/F3.2; the JSON code predates R9-13 and was
+  unchanged in that diff). Surfaced by the F3 re-verification panel
+  (`evidence/review9/f32-attempt2-correctness.md`). Must be repaired and
+  re-verified before GA; tracked as a standalone repair unit.
+
+F4 opens; F4–F9 remain under Review 9 containment.
+
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
 - **Orchestration:** Orca Run `run_a64b51716aba`; workers exclusively **Codex** and **OpenCode**. No Claude was used in the v6.1 review/fix/recheck.
