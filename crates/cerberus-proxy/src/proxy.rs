@@ -461,23 +461,43 @@ enum RedactDecision {
 
 /// Apply `fail_policy` to a redaction failure. Closed → 502 with
 /// `{"error":"redact failure",...}` (the raw secret is NEVER sent);
-/// Open → forward the ORIGINAL body and mark warn (real fail-open).
+/// Open → forward the ORIGINAL body and mark warn (real fail-open);
+/// `closed-on-critical` (§4.1 default, R9-12) → reject ONLY when the request
+/// carries `critical`-severity findings (the critical rules), otherwise
+/// forward the original body (fail-open for the rest). `findings` is the
+/// pipeline view of the request (post-allowlist).
 #[must_use]
 fn decide_redact_result(
     redaction: Result<Vec<u8>, String>,
     fail_policy: FailPolicy,
     original: &[u8],
+    findings: &[cerberus_engine::engine::Finding],
 ) -> RedactDecision {
     match redaction {
         Ok(b) => RedactDecision::Forward(b),
-        Err(e) if fail_policy == FailPolicy::Closed => RedactDecision::Reject(
-            StatusCode::BAD_GATEWAY,
-            format!(r#"{{"error":"redact failure","detail":"{e}"}}"#),
-        ),
-        Err(e) => {
-            tracing::warn!("redaction failed — fail_policy=open, forwarding original body: {e}");
-            RedactDecision::Forward(original.to_vec())
-        }
+        Err(e) => match fail_policy {
+            FailPolicy::Closed => RedactDecision::Reject(
+                StatusCode::BAD_GATEWAY,
+                format!(r#"{{"error":"redact failure","detail":"{e}"}}"#),
+            ),
+            FailPolicy::ClosedOnCritical
+                if findings
+                    .iter()
+                    .any(|f| f.severity == cerberus_engine::rule::Severity::Critical) =>
+            {
+                RedactDecision::Reject(
+                    StatusCode::BAD_GATEWAY,
+                    format!(r#"{{"error":"redact failure","detail":"{e}"}}"#),
+                )
+            }
+            _ => {
+                tracing::warn!(
+                    "redaction failed — fail_policy={:?}, no critical findings, forwarding original body: {e}",
+                    fail_policy
+                );
+                RedactDecision::Forward(original.to_vec())
+            }
+        },
     }
 }
 
@@ -556,6 +576,16 @@ pub(crate) async fn proxy_handler(
     let provider = direct_upstream
         .as_ref()
         .map_or_else(|| provider_of(path.as_str(), ctx), |direct| direct.provider.clone());
+
+    // R9-11 (§4.7): the operation mode may be set PER UPSTREAM
+    // (`mode: shadow|enforce` in `UpstreamConfig`). An upstream without an
+    // explicit mode inherits the global `ProxyConfig::mode` — a shadow
+    // upstream never blocks/redacts, an enforce upstream enforces, mixed
+    // fleets route each request by its provider.
+    let mode = {
+        let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        cfg.upstreams.get(&provider).and_then(|u| u.mode).unwrap_or(mode)
+    };
     let bypass: Option<BypassKind> = {
         let present = parts
             .headers
@@ -607,13 +637,16 @@ pub(crate) async fn proxy_handler(
 
     // Decode and scan, wrapping the engine phase in the failure policy
     // (fix P1 #2): fail_policy=Open → if the engine cannot decode/redact
-    // the ORIGINAL body is forwarded intact; Closed → 502.
+    // the ORIGINAL body is forwarded intact; Closed → 502. With the
+    // `closed-on-critical` default (R9-12) an UNDECODABLE body has no
+    // findings, so criticality is indeterminate → fail-closed posture
+    // (same observable behavior as Closed here; documented in the pack).
     let content_type_hint = parts.headers.get("content-type").and_then(|v| v.to_str().ok());
     let decoded = decode(&body_bytes, content_type_hint);
     // Decode failure: content-type declares JSON but the body is not valid JSON.
     let json_hint = content_type_hint.is_some_and(|h| h.to_ascii_lowercase().contains("json"));
     let decode_failed = json_hint && decoded.content_type != ContentType::Json;
-    if decode_failed && fail_policy == FailPolicy::Closed {
+    if decode_failed && fail_policy != FailPolicy::Open {
         return json_status(StatusCode::BAD_GATEWAY, r#"{"error":"cannot decode"}"#);
     }
     if decode_failed {
@@ -684,7 +717,7 @@ pub(crate) async fn proxy_handler(
             &scan_result.findings,
             request_vault.as_ref(),
         );
-        match decide_redact_result(redaction, fail_policy, &body_bytes) {
+        match decide_redact_result(redaction, fail_policy, &body_bytes, &scan_result.findings) {
             RedactDecision::Forward(b) => b,
             RedactDecision::Reject(status, reason) => return json_status(status, &reason),
         }
@@ -796,23 +829,25 @@ pub(crate) async fn proxy_handler(
     // so both modes reject but with different proxy semantics:
     // Closed → 503 (the proxy is part of the chain and decides to reject);
     // Open → 502 (bad gateway: the destination did not respond).
+    // `closed-on-critical` (R9-12) is an ENGINE-failure policy; a connection
+    // failure carries no criticality signal → closed posture (503).
     let resp = match tokio::time::timeout(std::time::Duration::from_secs(30), client.request(up_req)).await {
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
-            // fail_policy Closed → 503 (proxy failure); Open → 502 and we
-            // surface the visible error (review 2, P1 #7).
-            let status = if fail_policy == crate::config::FailPolicy::Closed {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
+            // fail_policy Closed/closed-on-critical → 503 (proxy failure);
+            // Open → 502 and we surface the visible error (review 2, P1 #7).
+            let status = if fail_policy == crate::config::FailPolicy::Open {
                 StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
             };
             return json_status(status, &format!(r#"{{"error":"upstream failure","detail":"{e}"}}"#));
         }
         Err(_) => {
-            let status = if fail_policy == crate::config::FailPolicy::Closed {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
+            let status = if fail_policy == crate::config::FailPolicy::Open {
                 StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
             };
             return json_status(status, r#"{"error":"upstream timeout"}"#);
         }
@@ -1031,6 +1066,8 @@ mod tests {
                 url: "https://api.openai.com".to_string(),
                 path_prefix: None,
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         upstreams.insert(
@@ -1039,6 +1076,8 @@ mod tests {
                 url: "http://mock.local".to_string(),
                 path_prefix: Some("/myproj".to_string()),
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         let cfg = crate::config::ProxyConfig {
@@ -1096,6 +1135,8 @@ mod tests {
                 url: "http://short.local".to_string(),
                 path_prefix: Some("/v1".to_string()),
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         upstreams.insert(
@@ -1104,6 +1145,8 @@ mod tests {
                 url: "http://longer.local".to_string(),
                 path_prefix: Some("/v1/admin".to_string()),
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         let ctx = test_ctx(upstreams);
@@ -1245,7 +1288,7 @@ mod tests {
         // Review v4 #5: if redaction fails and fail_policy=Closed, the
         // response is 502 JSON and the raw secret never goes in the body.
         let original = br#"{"content":"RAW-SECRET-DO-NOT-LEAK999"}"#;
-        match decide_redact_result(Err("invalid span".to_string()), FailPolicy::Closed, original) {
+        match decide_redact_result(Err("invalid span".to_string()), FailPolicy::Closed, original, &[]) {
             RedactDecision::Reject(status, body) => {
                 assert_eq!(status, StatusCode::BAD_GATEWAY, "closed → 502");
                 assert!(body.contains("redact failure"), "body: {body}");
@@ -1260,13 +1303,81 @@ mod tests {
         // Review v4 #5: fail_policy=Open → the ORIGINAL body is forwarded intact
         // (marked warn) and an OK redact is forwarded as is.
         let original = b"raw-original-bytes".to_vec();
-        match decide_redact_result(Err("oops".to_string()), FailPolicy::Open, &original) {
+        match decide_redact_result(Err("oops".to_string()), FailPolicy::Open, &original, &[]) {
             RedactDecision::Forward(b) => assert_eq!(b, original, "open forwards original"),
             RedactDecision::Reject(..) => panic!("expected Forward"),
         }
-        match decide_redact_result(Ok(b"redacted".to_vec()), FailPolicy::Closed, &original) {
+        match decide_redact_result(Ok(b"redacted".to_vec()), FailPolicy::Closed, &original, &[]) {
             RedactDecision::Forward(b) => assert_eq!(b, b"redacted".to_vec()),
             RedactDecision::Reject(..) => panic!("expected Forward"),
+        }
+    }
+
+    // ── R9-12: `closed-on-critical` redaction-failure decision table ──
+
+    fn finding_with_severity(severity: cerberus_engine::rule::Severity) -> cerberus_engine::engine::Finding {
+        cerberus_engine::engine::Finding {
+            flag: "secret.test".to_string(),
+            category: cerberus_engine::rule::Category::Secrets,
+            severity,
+            action: cerberus_engine::rule::Action::Redact,
+            start: 0,
+            end: 1,
+            hashed_value: "sha256:test".to_string(),
+        }
+    }
+
+    #[test]
+    fn closed_on_critical_rejects_when_critical_findings_present() {
+        // §4.1: fail-closed for critical rules — a redaction failure on a
+        // request with critical findings is a 502, the raw secret never
+        // leaves.
+        let original = br#"{"content":"RAW-SECRET-DO-NOT-LEAK999"}"#;
+        let findings = [finding_with_severity(cerberus_engine::rule::Severity::Critical)];
+        match decide_redact_result(
+            Err("invalid span".to_string()),
+            FailPolicy::ClosedOnCritical,
+            original,
+            &findings,
+        ) {
+            RedactDecision::Reject(status, body) => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY, "critical finding → fail closed");
+                assert!(!body.contains("RAW-SECRET"), "raw secret leaked: {body}");
+            }
+            RedactDecision::Forward(_) => panic!("expected Reject for critical findings"),
+        }
+    }
+
+    #[test]
+    fn closed_on_critical_forwards_original_for_non_critical_findings() {
+        // §4.1: fail-open for the rest — a redaction failure with only
+        // non-critical findings forwards the ORIGINAL body (real fail-open).
+        let original = b"non-critical-original".to_vec();
+        let findings = [
+            finding_with_severity(cerberus_engine::rule::Severity::Low),
+            finding_with_severity(cerberus_engine::rule::Severity::High),
+        ];
+        match decide_redact_result(
+            Err("oops".to_string()),
+            FailPolicy::ClosedOnCritical,
+            &original,
+            &findings,
+        ) {
+            RedactDecision::Forward(b) => assert_eq!(b, original, "non-critical → fail open"),
+            RedactDecision::Reject(..) => panic!("expected Forward for non-critical findings"),
+        }
+    }
+
+    #[test]
+    fn closed_on_critical_forwards_original_when_no_critical_findings() {
+        // §4.1: fail-open for the rest — a redaction failure with no
+        // critical findings forwards the ORIGINAL body (real fail-open).
+        // (Indeterminate criticality — undecodable bodies — is decided at
+        // the decode site, which fails closed for everything but Open.)
+        let original = b"non-critical-original".to_vec();
+        match decide_redact_result(Err("oops".to_string()), FailPolicy::ClosedOnCritical, &original, &[]) {
+            RedactDecision::Forward(b) => assert_eq!(b, original, "no critical findings → fail open"),
+            RedactDecision::Reject(..) => panic!("expected Forward when no critical findings"),
         }
     }
 }

@@ -239,6 +239,8 @@ fn resolve_config(port: u16, file_cfg: Option<ProxyConfig>) -> Result<ProxyConfi
                 url: url.clone(),
                 path_prefix: Some("/openai/".to_string()),
                 auth_header: upstream_auth.clone(),
+                mode: None,
+                expected_auth: None,
             },
         );
         m.insert(
@@ -247,6 +249,8 @@ fn resolve_config(port: u16, file_cfg: Option<ProxyConfig>) -> Result<ProxyConfi
                 url: url.clone(),
                 path_prefix: Some("/anthropic/".to_string()),
                 auth_header: upstream_auth.clone(),
+                mode: None,
+                expected_auth: None,
             },
         );
         m.insert(
@@ -255,6 +259,8 @@ fn resolve_config(port: u16, file_cfg: Option<ProxyConfig>) -> Result<ProxyConfi
                 url,
                 path_prefix: None,
                 auth_header: upstream_auth,
+                mode: None,
+                expected_auth: None,
             },
         );
         config.upstreams = m;

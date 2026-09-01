@@ -1370,9 +1370,10 @@ mod tests {
         let secret = "INVALID-JSON-SECRET-12345678";
         let invalid_body = format!(r#"{{"prompt":"{secret}""#);
 
-        for fail_policy in [FailPolicy::Closed, FailPolicy::Open] {
+        for fail_policy in [FailPolicy::Closed, FailPolicy::ClosedOnCritical, FailPolicy::Open] {
             let case_name = match fail_policy {
                 FailPolicy::Closed => "closed",
+                FailPolicy::ClosedOnCritical => "closed-on-critical",
                 FailPolicy::Open => "open",
             };
             let paths = ca_paths(&temp.path().join(case_name));
@@ -1395,7 +1396,10 @@ mod tests {
                 "proxy response leaked invalid input: {response_text}"
             );
             match fail_policy {
-                FailPolicy::Closed => {
+                // R9-12: an undecodable body has no findings → criticality
+                // indeterminate → `closed-on-critical` fails closed, exactly
+                // like `Closed`.
+                FailPolicy::Closed | FailPolicy::ClosedOnCritical => {
                     assert!(response_text.starts_with("HTTP/1.1 502"), "{response_text}");
                     assert!(captured_rx.try_recv().is_err(), "closed policy forwarded invalid JSON");
                     upstream_task.abort();
@@ -1430,9 +1434,10 @@ mod tests {
         let redact_secret = "REDACT-SECRET-12345678";
         let body = format!(r#"{{"prompt":"{block_secret} {redact_secret}"}}"#);
 
-        for fail_policy in [FailPolicy::Closed, FailPolicy::Open] {
+        for fail_policy in [FailPolicy::Closed, FailPolicy::ClosedOnCritical, FailPolicy::Open] {
             let case_name = match fail_policy {
                 FailPolicy::Closed => "redact-closed",
+                FailPolicy::ClosedOnCritical => "redact-closed-on-critical",
                 FailPolicy::Open => "redact-open",
             };
             let paths = ca_paths(&temp.path().join(case_name));
@@ -1469,7 +1474,11 @@ mod tests {
                     upstream_task.abort();
                     let _ = upstream_task.await;
                 }
-                FailPolicy::Open => {
+                // R9-12: the pipeline findings here carry only the
+                // non-critical (High) redact finding — the block finding was
+                // allowlisted out — so `closed-on-critical` fails OPEN for
+                // the rest (§4.1), forwarding the original body.
+                FailPolicy::ClosedOnCritical | FailPolicy::Open => {
                     assert!(response_text.starts_with("HTTP/1.1 200"), "{response_text}");
                     let captured = captured_rx.await.unwrap();
                     let body_start = captured.windows(4).position(|window| window == b"\r\n\r\n").unwrap() + 4;

@@ -18,8 +18,11 @@ use crate::decoder::{ContentType, DecodedBody};
 /// Redact the body preserving structure.
 ///
 /// Returns the transformed bytes. For JSON bodies the structure is preserved
-/// (only matching string leaves are replaced); for text bodies the whole text
-/// is redacted in place using the already-produced findings.
+/// (only matching string leaves are replaced); for `multipart/form-data`
+/// bodies (R9-13) only the recorded TEXTUAL part payloads are redacted and
+/// everything else — boundaries, part headers, binary parts — is preserved
+/// byte-exact; for text bodies the whole text is redacted in place using the
+/// already-produced findings.
 ///
 /// `vault` is the **request-scoped** reversible vault (F2.2/R9-8): `Some` →
 /// spans are replaced by `[VAULT:<random>]` tokens and the originals are
@@ -44,7 +47,58 @@ pub fn redact_body(
             return Ok(redacted);
         }
     }
+    // Multipart path (R9-13): the decoder recorded the textual payload
+    // regions of the raw body — redact in place, no multipart re-parse.
+    if decoded.content_type == ContentType::Multipart {
+        if let Some(regions) = &decoded.multipart {
+            return redact_multipart(engine, body, regions, opts, vault);
+        }
+        // A hand-built `DecodedBody` without regions falls through to the
+        // text fallback (whole-text redaction of the decoded text).
+    }
     fallback_text(decoded, findings, opts, vault)
+}
+
+/// Redact the textual parts of a `multipart/form-data` body (R9-13).
+///
+/// Each recorded region is scanned with the SAME context machinery as the
+/// JSON leaf path ([`CompiledEngine::scan_with_context_analyzer`] with the
+/// full body as keyword context), then redacted in place. Regions are
+/// spliced in REVERSE order so earlier offsets stay valid. Boundaries, part
+/// headers and binary parts are never touched — they are preserved
+/// byte-exact.
+fn redact_multipart(
+    engine: &CompiledEngine,
+    body: &Bytes,
+    regions: &[crate::decoder::TextRegion],
+    opts: &RedactOptions,
+    vault: Option<&Vault>,
+) -> Result<Vec<u8>, String> {
+    // The full body as context for keyword constraints — identical to the
+    // JSON leaf path, so a keyword in one part validates a secret in another.
+    let body_text = String::from_utf8_lossy(body).into_owned();
+    let analyzer = ContextAnalyzer::new(&body_text);
+    let mut out = body.to_vec();
+    for region in regions.iter().rev() {
+        let slice = String::from_utf8_lossy(&body[region.start..region.end]);
+        let found = engine.scan_with_context_analyzer(&slice, &analyzer);
+        if found.findings.is_empty() {
+            continue;
+        }
+        let redacted = match vault {
+            // Reversible (opt-in): unique vault token per span, the original
+            // value goes into the request-scoped vault.
+            Some(vault) => apply_redaction_reversible(&slice, &found.findings, vault)
+                .map(String::into_bytes)
+                .map_err(|e| format!("multipart part redaction failed: {e}"))?,
+            // Irreversible (default, closed decision §9 #4).
+            None => apply_redaction(&slice, &found.findings, opts)
+                .map(String::into_bytes)
+                .map_err(|e| format!("multipart part redaction failed: {e}"))?,
+        };
+        out.splice(region.start..region.end, redacted);
+    }
+    Ok(out)
 }
 
 /// Fallback: plain-text redaction of the decoded text.
@@ -292,6 +346,7 @@ mod tests {
             text: decoded.text,
             content_type: crate::decoder::ContentType::Json,
             parsed: None,
+            multipart: None,
         };
         let fallback =
             redact_body(&engine, &body, &manual, &RedactOptions::default(), &[], None).expect("fallback path");
@@ -326,5 +381,129 @@ mod tests {
         let text = String::from_utf8(out).expect("utf8");
         assert!(text.contains("[REDACTED"), "got {text:?}");
         assert!(!text.contains("abcdefghijklmnopqrstuvwxyz012345"));
+    }
+
+    // ── R9-13: multipart redaction (§4.2 MVP) ──
+
+    const MP_BOUNDARY: &str = "XxCERBERUSTESTxX";
+
+    fn mp_body(text_part: &str, binary_part: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{MP_BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt\"\r\nContent-Type: text/plain\r\n\r\n");
+        body.extend_from_slice(text_part.as_bytes());
+        body.extend_from_slice(format!("\r\n--{MP_BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n",
+        );
+        body.extend_from_slice(binary_part);
+        body.extend_from_slice(format!("\r\n--{MP_BOUNDARY}--\r\n").as_bytes());
+        body
+    }
+
+    #[test]
+    fn multipart_text_part_redacted_binary_part_byte_exact() {
+        // The secret in the TEXT part is redacted; the binary part, the
+        // boundaries and every part header survive byte-exact (F3.1).
+        let engine = engine();
+        let secret = "Bearer abcdefghijklmnopqrstuvwxyzA123456";
+        let binary: Vec<u8> = (0u8..=255).cycle().take(512).collect();
+        let body = Bytes::from(mp_body(&format!("authorization: {secret}"), &binary));
+        let decoded = decode(&body, Some(&format!("multipart/form-data; boundary={MP_BOUNDARY}")));
+        assert_eq!(decoded.content_type, crate::decoder::ContentType::Multipart);
+        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[], None).expect("redact");
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            !text.contains("abcdefghijklmnopqrstuvwxyzA123456"),
+            "secret must not reach upstream raw"
+        );
+        assert!(text.contains("[REDACTED"), "got {text:?}");
+        // Structure preserved: boundary count and both part headers intact.
+        assert_eq!(text.matches(&format!("--{MP_BOUNDARY}")).count(), 3);
+        assert!(text.contains("name=\"prompt\""));
+        assert!(text.contains("filename=\"audio.wav\""));
+        // The binary payload is byte-exact.
+        let bin_pos = out
+            .windows(b"audio/wav".len())
+            .position(|w| w == b"audio/wav")
+            .expect("audio header present");
+        let bin_start = bin_pos + b"audio/wav\r\n\r\n".len();
+        assert_eq!(
+            &out[bin_start..bin_start + 512],
+            &binary[..],
+            "binary part must be byte-exact"
+        );
+    }
+
+    #[test]
+    fn multipart_context_keyword_in_other_part_redacts() {
+        // Same context machinery as the JSON leaf path: the keyword lives in
+        // a DIFFERENT part than the secret, and the secret is still redacted.
+        let engine = engine();
+        let key = format!("AIza{}", "D".repeat(35));
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{MP_BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"context\"\r\n\r\ngoogle api_key here\r\n");
+        body.extend_from_slice(format!("--{MP_BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"secret\"\r\n\r\n");
+        body.extend_from_slice(key.as_bytes());
+        body.extend_from_slice(format!("\r\n--{MP_BOUNDARY}--\r\n").as_bytes());
+        let body = Bytes::from(body);
+        let decoded = decode(&body, Some(&format!("multipart/form-data; boundary={MP_BOUNDARY}")));
+        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[], None).expect("redact");
+        let text = String::from_utf8_lossy(&out);
+        assert!(!text.contains(&key), "cross-part context must redact the secret");
+        assert!(text.contains("google api_key here"), "the other part stays intact");
+    }
+
+    #[test]
+    fn multipart_redaction_failure_propagates() {
+        // A block-action finding inside a text part makes apply_redaction
+        // fail; the error must reach the caller (fail-policy decides).
+        let rules: Vec<Rule> = load_rules_from_str(
+            r#"[{"flag":"secret.block","category":"secrets","severity":"critical","action":"block",
+                "contextKeywords":[],"minLength":8,"maxLength":256,
+                "patterns":["\\bBlockMe[A-Za-z0-9]{20,}\\b"]}]"#,
+        )
+        .expect("rules");
+        let engine = EngineBuilder::new(&rules).build().expect("engine");
+        let body = Bytes::from(mp_body("BlockMeSuperSecretDoNotLeak1234567890", &[0u8, 1, 2]));
+        let decoded = decode(&body, Some(&format!("multipart/form-data; boundary={MP_BOUNDARY}")));
+        let err = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[], None)
+            .expect_err("block finding in a text part must fail redaction");
+        assert!(err.contains("multipart"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn multipart_reversible_vault_round_trip() {
+        // F2.2 interop: with the opt-in vault the text part carries vault
+        // tokens that un-redact back to the originals; binaries stay exact.
+        let engine = engine();
+        let secret = "Bearer abcdefghijklmnopqrstuvwxyzA123456";
+        let binary: Vec<u8> = vec![7u8; 64];
+        let body = Bytes::from(mp_body(&format!("authorization: {secret}"), &binary));
+        let decoded = decode(&body, Some(&format!("multipart/form-data; boundary={MP_BOUNDARY}")));
+        let vault = cerberus_engine::vault::Vault::new();
+        let out =
+            redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[], Some(&vault)).expect("vault redact");
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            !text.contains("abcdefghijklmnopqrstuvwxyzA123456"),
+            "raw secret must not be forwarded"
+        );
+        assert!(text.contains("[VAULT:"), "got {text:?}");
+        let restored = vault.unredact(&out);
+        let restored_text = String::from_utf8_lossy(&restored);
+        assert!(
+            restored_text.contains("abcdefghijklmnopqrstuvwxyzA123456"),
+            "vault must restore the original"
+        );
+        // And the binary payload is byte-exact after the round trip.
+        let bin_pos = restored
+            .windows(b"audio/wav".len())
+            .position(|w| w == b"audio/wav")
+            .unwrap();
+        let bin_start = bin_pos + b"audio/wav\r\n\r\n".len();
+        assert_eq!(&restored[bin_start..bin_start + 64], &binary[..]);
     }
 }

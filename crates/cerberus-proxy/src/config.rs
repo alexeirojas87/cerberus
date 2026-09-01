@@ -19,8 +19,10 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub mode: OperationMode,
 
-    /// Fail policy when the engine errors.
-    #[serde(default)]
+    /// Fail policy when the engine errors. Canonical wire name:
+    /// `fail_policy`. `fail_mode` (the Appendix A.1 spelling) is accepted as
+    /// a deserialization alias (R9-12).
+    #[serde(default, alias = "fail_mode")]
     pub fail_policy: FailPolicy,
 
     /// Upstream providers (map of name → upstream config).
@@ -104,15 +106,24 @@ pub enum OperationMode {
     Enforce,
 }
 
-/// Fail policy when the engine cannot scan.
+/// Fail policy when the engine cannot scan (§4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailPolicy {
     /// Let the request pass through even if the engine fails.
     Open,
     /// Reject the request if the engine fails.
-    #[default]
     Closed,
+    /// §4.1 default: **fail-closed for `critical` rules, fail-open for the
+    /// rest** (R9-12). Concretely, an engine failure (redaction failure) is
+    /// rejected only when the request carries `critical`-severity findings;
+    /// otherwise the original body is forwarded (fail-open). A failure that
+    /// happens BEFORE any finding exists (undecodable body) or outside the
+    /// engine (upstream connection failure) has indeterminate criticality →
+    /// fail-closed posture.
+    #[default]
+    #[serde(rename = "closed-on-critical", alias = "closedoncritical")]
+    ClosedOnCritical,
 }
 
 /// Configuration for a single upstream provider.
@@ -130,10 +141,43 @@ pub struct UpstreamConfig {
     /// Expected authentication header name. Default: `"authorization"`
     #[serde(default = "default_auth_header")]
     pub auth_header: String,
+
+    /// Per-upstream operation mode (§4.7 / R9-11): `shadow` or `enforce`.
+    /// `None` (absent) → the upstream inherits the global `ProxyConfig::mode`.
+    #[serde(default)]
+    pub mode: Option<OperationMode>,
+
+    /// Appendix A.1 compat wire name (R9-20): the YAML example writes
+    /// `expected_auth: header` while the implementation canonically names the
+    /// header carrying the provider credential `auth_header`. **Canonical
+    /// name: `auth_header`**; `expected_auth` is accepted for parse
+    /// compatibility, its only supported MVP value is `header` (the
+    /// credential travels in a header — the one named by `auth_header`), any
+    /// other value is a parse error. Input-compat only: it is never
+    /// serialized back (the canonical serialized state is `auth_header`).
+    #[serde(default, deserialize_with = "deserialize_expected_auth", skip_serializing)]
+    pub expected_auth: Option<String>,
 }
 
 fn default_auth_header() -> String {
     "authorization".to_string()
+}
+
+/// Validate the Appendix A.1 `expected_auth` compat field (R9-20): the only
+/// supported MVP value is `header` (the Appendix A.1 example). Anything else
+/// fails the parse (fail-closed: no silently ignored config).
+fn deserialize_expected_auth<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref() {
+        None | Some("header") => Ok(value),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "unsupported expected_auth value {other:?}: only \"header\" is supported (the credential \
+             travels in the header named by `auth_header`, default \"authorization\")"
+        ))),
+    }
 }
 
 impl ProxyConfig {
@@ -168,6 +212,8 @@ impl ProxyConfig {
                 url: url.to_string(),
                 path_prefix: None,
                 auth_header: default_auth_header(),
+                mode: None,
+                expected_auth: None,
             },
         );
         Self {
@@ -203,7 +249,8 @@ mod tests {
         let cfg = ProxyConfig::default();
         assert_eq!(cfg.listen, "127.0.0.1:8787");
         assert_eq!(cfg.mode, OperationMode::Enforce);
-        assert_eq!(cfg.fail_policy, FailPolicy::Closed);
+        // R9-12: `closed-on-critical` (§4.1) is the DEFAULT fail policy.
+        assert_eq!(cfg.fail_policy, FailPolicy::ClosedOnCritical);
         assert!(cfg.upstreams.is_empty());
     }
 
@@ -344,6 +391,16 @@ policy:
             serde_yaml::from_str::<FailPolicy>("closed").unwrap(),
             FailPolicy::Closed
         );
+        // R9-12: the §4.1 / Appendix A.1 value parses (canonical + compat
+        // spellings).
+        assert_eq!(
+            serde_yaml::from_str::<FailPolicy>("closed-on-critical").unwrap(),
+            FailPolicy::ClosedOnCritical
+        );
+        assert_eq!(
+            serde_yaml::from_str::<FailPolicy>("closedoncritical").unwrap(),
+            FailPolicy::ClosedOnCritical
+        );
     }
 
     #[test]
@@ -376,5 +433,131 @@ policy:
         let yaml = "listen: 127.0.0.1:8787\nadmin_token: s3cr3t\n";
         let cfg = ProxyConfig::parse(yaml).unwrap();
         assert_eq!(cfg.admin_token.as_deref(), Some("s3cr3t"));
+    }
+
+    // ── R9-12: `closed-on-critical` default + `fail_mode` alias ──
+
+    #[test]
+    fn a1_yaml_with_fail_mode_and_expected_auth_parses() {
+        // The EXACT Appendix A.1 shape (subset): `fail_mode` key and
+        // `expected_auth: header` upstreams must parse (R9-12 + R9-20).
+        let yaml = r"
+listen: 127.0.0.1:8787
+fail_mode: closed-on-critical
+upstreams:
+  anthropic:  { url: https://api.anthropic.com, expected_auth: header }
+  openai:     { url: https://api.openai.com,    expected_auth: header }
+";
+        let cfg = ProxyConfig::parse(yaml).expect("the A.1 example must parse");
+        assert_eq!(cfg.fail_policy, FailPolicy::ClosedOnCritical);
+        assert_eq!(cfg.upstreams["anthropic"].expected_auth.as_deref(), Some("header"));
+        // `expected_auth: header` is compat sugar: the credential header name
+        // keeps the canonical default.
+        assert_eq!(cfg.upstreams["anthropic"].auth_header, "authorization");
+        // No per-upstream mode in A.1 → inherit the global.
+        assert_eq!(cfg.upstreams["anthropic"].mode, None);
+        assert_eq!(cfg.upstreams["openai"].mode, None);
+    }
+
+    #[test]
+    fn fail_policy_defaults_to_closed_on_critical_when_absent() {
+        // §4.1: the RECOMMENDED default is fail-closed for critical rules,
+        // fail-open for the rest — a YAML without the key must get it.
+        let cfg = ProxyConfig::parse("listen: 127.0.0.1:8787\n").unwrap();
+        assert_eq!(cfg.fail_policy, FailPolicy::ClosedOnCritical);
+    }
+
+    #[test]
+    fn fail_policy_open_and_closed_still_configurable() {
+        for (raw, expected) in [
+            ("fail_policy: open", FailPolicy::Open),
+            ("fail_policy: closed", FailPolicy::Closed),
+            ("fail_policy: closed-on-critical", FailPolicy::ClosedOnCritical),
+            // A.1 key spelling as an alias on the full config too.
+            ("fail_mode: closed-on-critical", FailPolicy::ClosedOnCritical),
+        ] {
+            let cfg = ProxyConfig::parse(&format!("listen: 127.0.0.1:8787\n{raw}\n")).unwrap();
+            assert_eq!(cfg.fail_policy, expected, "input: {raw}");
+        }
+    }
+
+    #[test]
+    fn fail_policy_serializes_canonical_name_and_round_trips() {
+        let dumped = serde_yaml::to_string(&FailPolicy::ClosedOnCritical).expect("serialize");
+        assert_eq!(
+            dumped.trim(),
+            "closed-on-critical",
+            "serialized wire name must match A.1"
+        );
+        let reloaded: FailPolicy = serde_yaml::from_str(&dumped).expect("reparse");
+        assert_eq!(reloaded, FailPolicy::ClosedOnCritical);
+    }
+
+    // ── R9-11: per-upstream `mode: shadow|enforce` ──
+
+    #[test]
+    fn per_upstream_mode_parses_with_global_fallback() {
+        let yaml = r"
+listen: 127.0.0.1:8787
+mode: enforce
+upstreams:
+  anthropic: { url: https://api.anthropic.com, mode: shadow }
+  openai:    { url: https://api.openai.com,    mode: enforce }
+  nanbuilders: { url: https://api.nan.builders/v1 }
+";
+        let cfg = ProxyConfig::parse(yaml).unwrap();
+        assert_eq!(cfg.upstreams["anthropic"].mode, Some(OperationMode::Shadow));
+        assert_eq!(cfg.upstreams["openai"].mode, Some(OperationMode::Enforce));
+        // Absent per-upstream mode → the global `mode: enforce` applies.
+        assert_eq!(cfg.upstreams["nanbuilders"].mode, None);
+        // Flow-style YAML (the A.1 inline-map shape) parses the same way.
+        let flow = ProxyConfig::parse("upstreams:\n  x: { url: https://x.test, mode: shadow }\n").unwrap();
+        assert_eq!(flow.upstreams["x"].mode, Some(OperationMode::Shadow));
+    }
+
+    #[test]
+    fn per_upstream_mode_rejects_invalid_value() {
+        let err = ProxyConfig::parse("upstreams:\n  x: { url: https://x.test, mode: bogus }\n").unwrap_err();
+        assert!(err.contains("error"), "got: {err}");
+    }
+
+    #[test]
+    fn per_upstream_mode_survives_config_serialization() {
+        // The YAML is the serialized state of the Config API: a per-upstream
+        // mode must survive a dump/reload round trip (hot-reload persistence).
+        let cfg = ProxyConfig::parse(
+            "mode: shadow\nupstreams:\n  a: { url: https://a.test, mode: enforce }\n  b: { url: https://b.test }\n",
+        )
+        .unwrap();
+        let dumped = serde_yaml::to_string(&cfg).expect("dump");
+        let reloaded = ProxyConfig::parse(&dumped).expect("reparse");
+        assert_eq!(reloaded.upstreams["a"].mode, Some(OperationMode::Enforce));
+        assert_eq!(reloaded.upstreams["b"].mode, None);
+        assert_eq!(reloaded.mode, OperationMode::Shadow);
+    }
+
+    // ── R9-20: `expected_auth` compat validation ──
+
+    #[test]
+    fn expected_auth_header_only_supported_value() {
+        let ok: UpstreamConfig = serde_yaml::from_str("url: https://x.test\nexpected_auth: header\n").unwrap();
+        assert_eq!(ok.expected_auth.as_deref(), Some("header"));
+        assert_eq!(ok.auth_header, "authorization", "canonical name keeps its default");
+        // Anything else is a parse error (fail-closed, never ignored silently).
+        let err = serde_yaml::from_str::<UpstreamConfig>("url: https://x.test\nexpected_auth: query\n").unwrap_err();
+        assert!(err.to_string().contains("expected_auth"), "got: {err}");
+        // …and it is input-compat only: never serialized back.
+        let dumped = serde_yaml::to_string(&ok).expect("dump");
+        assert!(!dumped.contains("expected_auth"), "dumped: {dumped}");
+    }
+
+    #[test]
+    fn auth_header_wire_name_remains_canonical() {
+        // R9-20 decision: `auth_header` (the header NAME) stays the single
+        // canonical wire name; `expected_auth` accepts the A.1 spelling.
+        let cfg: UpstreamConfig =
+            serde_yaml::from_str("url: https://x.test\nauth_header: x-api-key\nexpected_auth: header\n").unwrap();
+        assert_eq!(cfg.auth_header, "x-api-key");
+        assert_eq!(cfg.expected_auth.as_deref(), Some("header"));
     }
 }

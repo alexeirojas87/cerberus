@@ -13,8 +13,8 @@
 //! - `POST /api/allowlist` — add to allowlist (FP triage)
 //! - `POST /api/break-glass` — issue a one-shot bypass token (F2.3/R9-8;
 //!   authenticated; nonce redeemed once via `X-Cerberus-Bypass`)
-//! - `GET  /api/upstreams` — list upstreams/providers `{name,url,auth_header}`
-//! - `POST /api/upstreams` — add an upstream `{name,url,auth_header?}`
+//! - `GET  /api/upstreams` — list upstreams/providers `{name,url,auth_header,mode}`
+//! - `POST /api/upstreams` — add an upstream `{name,url,auth_header?,mode?}`
 //! - `DELETE /api/upstreams/{name}` — remove a provider (not the last one)
 //!   (upstream CRUD: review v6 F6, UI/API parity. Each mutation persists
 //!   to YAML with the SAME policy as `PUT /api/config`.)
@@ -807,6 +807,9 @@ struct UpstreamPayload {
     name: String,
     url: String,
     auth_header: Option<String>,
+    /// Per-upstream operation mode (R9-11): `shadow` | `enforce`. `None`
+    /// (absent) → inherit the global mode, exactly like the YAML.
+    mode: Option<crate::config::OperationMode>,
 }
 
 async fn handle_get_upstreams(ctx: &ApiContext) -> Result<Response<Full<Bytes>>, String> {
@@ -816,9 +819,14 @@ async fn handle_get_upstreams(ctx: &ApiContext) -> Result<Response<Full<Bytes>>,
         .iter()
         .map(|(name, up)| {
             format!(
-                r#"{{"name":{name:?},"url":{url:?},"auth_header":{auth:?}}}"#,
+                r#"{{"name":{name:?},"url":{url:?},"auth_header":{auth:?},"mode":{mode}}}"#,
                 url = up.url,
-                auth = up.auth_header
+                auth = up.auth_header,
+                mode = match up.mode {
+                    None => "null".to_string(),
+                    Some(crate::config::OperationMode::Shadow) => r#""shadow""#.to_string(),
+                    Some(crate::config::OperationMode::Enforce) => r#""enforce""#.to_string(),
+                },
             )
         })
         .collect();
@@ -863,6 +871,8 @@ async fn handle_post_upstreams(ctx: &ApiContext, body: hyper::body::Incoming) ->
             url: payload.url.clone(),
             path_prefix: None,
             auth_header: payload.auth_header.unwrap_or_else(|| "authorization".to_string()),
+            mode: payload.mode,
+            expected_auth: None,
         },
     );
     if let Err(e) = validate_control_plane_exposure(&candidate) {
@@ -1863,6 +1873,8 @@ mod tests {
                 url: "https://api.openai.com".to_string(),
                 path_prefix: None,
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         let patch: ConfigPatch = serde_json::from_str(r#"{"mode":"shadow"}"#).unwrap();

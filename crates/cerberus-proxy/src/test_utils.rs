@@ -95,6 +95,8 @@ pub async fn spawn_test_proxy_with_upstream(
             url: upstream_url.to_string(),
             path_prefix: None,
             auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
         },
     );
     let ctx = build_test_context(&[], upstreams, OperationMode::Enforce);

@@ -66,6 +66,8 @@ fn make_ctx_with_token_and_config_path(
             url: upstream_url.to_string(),
             path_prefix: None,
             auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
         },
     );
     let config = ProxyConfig {
@@ -112,6 +114,8 @@ fn make_ctx_opts(
             url: upstream_url.to_string(),
             path_prefix: None,
             auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
         },
     );
     let config = ProxyConfig {
@@ -149,6 +153,8 @@ fn make_ctx_with_config_path(
             url: upstream_url.to_string(),
             path_prefix: None,
             auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
         },
     );
     let config = ProxyConfig {
@@ -2101,6 +2107,8 @@ fn make_ctx_r9(
             url: upstream_url.to_string(),
             path_prefix: None,
             auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
         },
     );
     let config = ProxyConfig {
@@ -2375,4 +2383,628 @@ async fn test_reversible_redaction_is_opt_in_default_irreversible() {
         "raw secret never restored without the opt-in"
     );
     mock_handle.abort();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// F3.1 + F3.2 — R9-11 (per-upstream mode), R9-12 (closed-on-critical default),
+// R9-13 (multipart MVP decoder), R9-20 (expected_auth wire-name compat).
+// ═══════════════════════════════════════════════════════════════════════════
+
+use bytes::Bytes;
+use cerberus_proxy::decoder::decode;
+use std::sync::{Arc, Mutex};
+
+/// Raw-capturing mock upstream: reads the full request (per content-length)
+/// and stores it verbatim; responds `{"ok":true}`.
+async fn spawn_mock_upstream_capture() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>, Arc<Mutex<Vec<u8>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind capturing mock");
+    let addr = listener.local_addr().expect("addr");
+    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&captured);
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let sink = Arc::clone(&sink);
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                // Read until EOF or enough for headers + content-length.
+                let mut headers_end = None;
+                let mut content_length = 0usize;
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if headers_end.is_none() {
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            headers_end = Some(pos + 4);
+                            let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                            content_length = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                        }
+                    }
+                    if let Some(start) = headers_end {
+                        if buf.len() >= start + content_length {
+                            break;
+                        }
+                    }
+                }
+                (*sink.lock().unwrap()).clone_from(&buf);
+                let body = r#"{"ok":true}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    (addr, handle, captured)
+}
+
+/// Context builder that keeps the DEFAULT fail policy (`closed-on-critical`,
+/// R9-12) — unlike `make_ctx_opts`, which pins `FailPolicy::Closed`.
+fn make_ctx_default_fail_policy(
+    rules: &[cerberus_engine::rule::Rule],
+    operation_mode: OperationMode,
+    upstream_url: &str,
+) -> std::sync::Arc<ProxyContext> {
+    let engine = cerberus_engine::engine::EngineBuilder::new(rules).build().unwrap();
+    let mut upstreams = HashMap::new();
+    upstreams.insert(
+        "default".to_string(),
+        UpstreamConfig {
+            url: upstream_url.to_string(),
+            path_prefix: None,
+            auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
+        },
+    );
+    let config = ProxyConfig {
+        upstreams,
+        mode: operation_mode,
+        // fail_policy left at the DEFAULT (closed-on-critical, R9-12).
+        ..ProxyConfig::default()
+    };
+    let shared = std::sync::Arc::new(std::sync::RwLock::new(config));
+    let engine_arc = std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(engine)));
+    std::sync::Arc::new(ProxyContext {
+        config: shared.clone(),
+        engine: engine_arc,
+        redact_options: cerberus_engine::redact::RedactOptions::default(),
+        api: ApiContext::new(shared),
+        last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    })
+}
+
+/// Context with a mixed upstream fleet and per-upstream modes (R9-11).
+fn make_ctx_mixed_fleet(
+    rules: &[cerberus_engine::rule::Rule],
+    global_mode: OperationMode,
+    upstream_url: &str,
+    shadowed_mode: Option<OperationMode>,
+    enforced_mode: Option<OperationMode>,
+) -> std::sync::Arc<ProxyContext> {
+    let engine = cerberus_engine::engine::EngineBuilder::new(rules).build().unwrap();
+    let mut upstreams = HashMap::new();
+    upstreams.insert(
+        "shadowed".to_string(),
+        UpstreamConfig {
+            url: upstream_url.to_string(),
+            path_prefix: Some("/shadowed".to_string()),
+            auth_header: "authorization".to_string(),
+            mode: shadowed_mode,
+            expected_auth: None,
+        },
+    );
+    upstreams.insert(
+        "enforced".to_string(),
+        UpstreamConfig {
+            url: upstream_url.to_string(),
+            path_prefix: Some("/enforced".to_string()),
+            auth_header: "authorization".to_string(),
+            mode: enforced_mode,
+            expected_auth: None,
+        },
+    );
+    upstreams.insert(
+        "default".to_string(),
+        UpstreamConfig {
+            url: upstream_url.to_string(),
+            path_prefix: None,
+            auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
+        },
+    );
+    let config = ProxyConfig {
+        upstreams,
+        mode: global_mode,
+        ..ProxyConfig::default()
+    };
+    let shared = std::sync::Arc::new(std::sync::RwLock::new(config));
+    let engine_arc = std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(engine)));
+    std::sync::Arc::new(ProxyContext {
+        config: shared.clone(),
+        engine: engine_arc,
+        redact_options: cerberus_engine::redact::RedactOptions::default(),
+        api: ApiContext::new(shared),
+        last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    })
+}
+
+/// Block rule for `BLOCKSECRET1…` (critical severity).
+fn f3_block_rule() -> cerberus_engine::rule::Rule {
+    let mut r = block_rule();
+    r.patterns = vec![r"BLOCKSECRET1[A-Za-z0-9]{10,}".to_string()];
+    r
+}
+
+/// Redact rule for `REDACTSECRET2…` with a controllable severity.
+fn f3_redact_rule(severity: cerberus_engine::rule::Severity) -> cerberus_engine::rule::Rule {
+    cerberus_engine::rule::Rule {
+        flag: "test.redact".to_string(),
+        category: cerberus_engine::rule::Category::Secrets,
+        severity,
+        action: cerberus_engine::rule::Action::Redact,
+        hash_normalization: None,
+        context_keywords: Vec::new(),
+        min_length: None,
+        max_length: None,
+        allowed_examples: Vec::new(),
+        patterns: vec![r"REDACTSECRET2[A-Za-z0-9]{10,}".to_string()],
+        validators: Vec::new(),
+    }
+}
+
+/// ── R9-11: per-upstream shadow mode in a mixed fleet ──
+#[tokio::test]
+async fn per_upstream_shadow_mode_never_blocks_in_mixed_fleet() {
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    // Global enforce; the "shadowed" upstream is explicitly shadow; the
+    // "default" upstream inherits the global (enforce).
+    let ctx = make_ctx_mixed_fleet(
+        &[f3_block_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+        Some(OperationMode::Shadow),
+        None,
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("BLOCKSECRET1{}", "aaaaaaaaaa");
+
+    // Shadow upstream: never blocks, forwards intact.
+    let r = client
+        .post(format!("http://{addr}/shadowed/v1/chat"))
+        .header("content-type", "application/json")
+        .body(format!(r#"{{"content":"{secret}"}}"#))
+        .send()
+        .await
+        .expect("shadow upstream request");
+    assert_eq!(
+        r.status(),
+        200,
+        "a shadow upstream must never block (got {})",
+        r.status()
+    );
+    // Default upstream (no per-upstream mode → global enforce): blocked.
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body(format!(r#"{{"content":"{secret}"}}"#))
+        .send()
+        .await
+        .expect("default upstream request");
+    assert_eq!(r.status(), 403, "global enforce must still block");
+    mock_handle.abort();
+}
+
+/// ── R9-11: per-upstream enforce overrides a global shadow mode ──
+#[tokio::test]
+async fn per_upstream_enforce_mode_overrides_global_shadow() {
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    // Global shadow; the "enforced" upstream explicitly enforces; "shadowed"
+    // and "default" inherit the global shadow.
+    let ctx = make_ctx_mixed_fleet(
+        &[f3_block_rule()],
+        OperationMode::Shadow,
+        &format!("http://{mock_adj}"),
+        None,
+        Some(OperationMode::Enforce),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("BLOCKSECRET1{}", "bbbbbbbbbb");
+    let body = format!(r#"{{"content":"{secret}"}}"#);
+
+    // Enforced upstream: blocks even though the global mode is shadow.
+    let r = client
+        .post(format!("http://{addr}/enforced/v1/chat"))
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("enforced upstream request");
+    assert_eq!(r.status(), 403, "per-upstream enforce must override global shadow");
+
+    // Shadowed upstream (explicit shadow): passes intact.
+    let r = client
+        .post(format!("http://{addr}/shadowed/v1/chat"))
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("shadowed upstream request");
+    assert_eq!(r.status(), 200);
+
+    // Default upstream (no mode → global shadow): passes intact.
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("default upstream request");
+    assert_eq!(r.status(), 200, "global shadow fallback must pass through");
+    mock_handle.abort();
+}
+
+/// ── R9-12: critical redaction failure under the DEFAULT policy → 502 ──
+#[tokio::test]
+async fn closed_on_critical_rejects_redaction_failure_with_critical_findings() {
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let block = format!("BLOCKSECRET1{}", "cccccccccc");
+    let redactable = format!("REDACTSECRET2{}", "dddddddddd");
+    let ctx = make_ctx_default_fail_policy(
+        &[
+            f3_block_rule(),
+            f3_redact_rule(cerberus_engine::rule::Severity::Critical),
+        ],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    // Allowlist the BLOCK secret so the pipeline passes the block stage and
+    // reaches redaction, where the JSON leaf re-scan still fails on it
+    // (the same mechanism as the forward.rs redaction-failure test).
+    ctx.config.write().unwrap().policy.allowlist = vec![block.clone()];
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body(format!(r#"{{"content":"{block} {redactable}"}}"#))
+        .send()
+        .await
+        .expect("critical redaction failure request");
+    assert_eq!(
+        r.status(),
+        502,
+        "closed-on-critical must reject when the request carries critical findings"
+    );
+    let text = r.text().await.expect("body");
+    assert!(text.contains("redact failure"), "body: {text}");
+    mock_handle.abort();
+}
+
+/// ── R9-12: non-critical redaction failure under the DEFAULT policy → the
+/// ORIGINAL body is forwarded (fail-open for the rest, the behavioral delta
+/// vs the previous `Closed` default) ──
+#[tokio::test]
+async fn closed_on_critical_forwards_original_for_non_critical_redaction_failure() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let block = format!("BLOCKSECRET1{}", "eeeeeeeeee");
+    let redactable = format!("REDACTSECRET2{}", "ffffffffff");
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_block_rule(), f3_redact_rule(cerberus_engine::rule::Severity::Low)],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    ctx.config.write().unwrap().policy.allowlist = vec![block.clone()];
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let original = format!(r#"{{"content":"{block} {redactable}"}}"#);
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body(original.clone())
+        .send()
+        .await
+        .expect("non-critical redaction failure request");
+    assert_eq!(
+        r.status(),
+        200,
+        "closed-on-critical must fail OPEN when no critical findings exist (got {})",
+        r.status()
+    );
+    let forwarded = captured.lock().unwrap().clone();
+    let body_start = forwarded
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("captured headers")
+        + 4;
+    assert_eq!(
+        &forwarded[body_start..],
+        original.as_bytes(),
+        "the ORIGINAL body must be forwarded verbatim (fail-open)"
+    );
+    mock_handle.abort();
+}
+
+/// ── R9-12: undecodable JSON body under the DEFAULT policy → 502
+/// (indeterminate criticality → fail-closed posture) ──
+#[tokio::test]
+async fn closed_on_critical_rejects_undecodable_json_body() {
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let ctx = make_ctx_default_fail_policy(&[], OperationMode::Enforce, &format!("http://{mock_adj}"));
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body("not-json")
+        .send()
+        .await
+        .expect("undecodable request");
+    assert_eq!(
+        r.status(),
+        502,
+        "closed-on-critical must fail closed when criticality is indeterminate"
+    );
+    mock_handle.abort();
+}
+
+/// ── R9-13: multipart text part redacted end-to-end; binary part preserved ──
+#[tokio::test]
+async fn multipart_text_part_redacted_binary_part_byte_exact_end_to_end() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_redact_rule(cerberus_engine::rule::Severity::High)],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("REDACTSECRET2{}", "gggggggggg");
+    let binary: Vec<u8> = (0u8..=255).cycle().take(256).collect();
+
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--F3BOUNDARY\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt\"\r\n");
+    body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+    body.extend_from_slice(format!("my key is {secret}").as_bytes());
+    body.extend_from_slice(b"\r\n--F3BOUNDARY\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\n");
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(&binary);
+    body.extend_from_slice(b"\r\n--F3BOUNDARY--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/transcribe"))
+        .header("content-type", "multipart/form-data; boundary=F3BOUNDARY")
+        .body(body)
+        .send()
+        .await
+        .expect("multipart request");
+    assert_eq!(
+        r.status(),
+        200,
+        "multipart with a redactable text part must forward (got {})",
+        r.status()
+    );
+
+    let forwarded = captured.lock().unwrap().clone();
+    let body_start = forwarded
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("captured headers")
+        + 4;
+    let fwd_body = &forwarded[body_start..];
+    let fwd_text = String::from_utf8_lossy(fwd_body);
+    assert!(
+        !fwd_text.contains(&secret),
+        "the raw secret must not reach the upstream: {fwd_text}"
+    );
+    assert!(
+        fwd_text.contains("[REDACTED:test.redact]"),
+        "text part redacted: {fwd_text}"
+    );
+    assert!(fwd_text.contains("name=\"prompt\""), "part headers preserved");
+    assert!(fwd_text.contains("filename=\"clip.wav\""), "file metadata preserved");
+    // The binary payload must be byte-exact in the forwarded body.
+    let bin_pos = fwd_body
+        .windows(b"audio/wav".len())
+        .position(|w| w == b"audio/wav")
+        .expect("audio content-type preserved");
+    let bin_start = bin_pos + b"audio/wav\r\n\r\n".len();
+    assert_eq!(
+        &fwd_body[bin_start..bin_start + 256],
+        &binary[..],
+        "binary part byte-exact"
+    );
+    mock_handle.abort();
+}
+
+/// ── R9-13: a block rule matching a multipart text part cuts the request ──
+#[tokio::test]
+async fn multipart_block_rule_blocks_the_request() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_block_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("BLOCKSECRET1{}", "hhhhhhhhhh");
+
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--F3B2\r\n");
+    body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+    body.extend_from_slice(format!("note {secret}").as_bytes());
+    body.extend_from_slice(b"\r\n--F3B2--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/x"))
+        .header("content-type", "multipart/form-data; boundary=F3B2")
+        .body(body)
+        .send()
+        .await
+        .expect("multipart block request");
+    assert_eq!(r.status(), 403, "block finding in a text part must block");
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "nothing must be forwarded when blocked"
+    );
+    mock_handle.abort();
+}
+
+/// ── R9-13: multipart in shadow mode passes through intact ──
+#[tokio::test]
+async fn multipart_shadow_mode_forwards_intact() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(&[f3_block_rule()], OperationMode::Shadow, &format!("http://{mock_adj}"));
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("BLOCKSECRET1{}", "iiiiiiiiii");
+    let original = format!("--F3B3\r\nContent-Type: text/plain\r\n\r\nnote {secret}\r\n--F3B3--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/x"))
+        .header("content-type", "multipart/form-data; boundary=F3B3")
+        .body(original.clone())
+        .send()
+        .await
+        .expect("multipart shadow request");
+    assert_eq!(r.status(), 200, "shadow never blocks");
+    let forwarded = captured.lock().unwrap().clone();
+    let body_start = forwarded.windows(4).position(|w| w == b"\r\n\r\n").expect("headers") + 4;
+    assert_eq!(
+        &forwarded[body_start..],
+        original.as_bytes(),
+        "shadow forwards the body intact"
+    );
+    mock_handle.abort();
+}
+
+/// ── R9-13: multipart over `max_body_bytes` → 413 (size limit case) ──
+#[tokio::test]
+async fn multipart_over_body_limit_returns_413() {
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let ctx = make_ctx_default_fail_policy(&[], OperationMode::Enforce, &format!("http://{mock_adj}"));
+    ctx.config.write().unwrap().max_body_bytes = Some(1024);
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--F3B4\r\nContent-Type: text/plain\r\n\r\n");
+    body.extend_from_slice(&vec![b'x'; 4096]);
+    body.extend_from_slice(b"\r\n--F3B4--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/x"))
+        .header("content-type", "multipart/form-data; boundary=F3B4")
+        .body(body)
+        .send()
+        .await
+        .expect("multipart oversized request");
+    assert_eq!(r.status(), 413, "multipart over max_body_bytes must be 413");
+    mock_handle.abort();
+}
+
+/// ── R9-13: malformed multipart falls back to whole-text scanning (over-scan:
+/// a secret is still caught, never missed) ──
+#[tokio::test]
+async fn multipart_malformed_structure_still_blocks_via_text_fallback() {
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_block_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let secret = format!("BLOCKSECRET1{}", "jjjjjjjjjj");
+
+    // Multipart hint WITHOUT a boundary parameter → no structured parse.
+    let r = client
+        .post(format!("http://{addr}/v1/x"))
+        .header("content-type", "multipart/form-data")
+        .body(format!("junk {secret}"))
+        .send()
+        .await
+        .expect("malformed multipart request");
+    assert_eq!(r.status(), 403, "text fallback must still scan and block");
+    mock_handle.abort();
+}
+
+/// ── R9-20 + R9-12: the Appendix A.1 YAML parses and the proxy runs with it ──
+#[tokio::test]
+async fn a1_yaml_config_drives_the_proxy_end_to_end() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:8787\n\
+         fail_mode: closed-on-critical\n\
+         upstreams:\n\
+         \x20 default: {{ url: http://{mock_adj}, expected_auth: header }}\n"
+    );
+    let cfg = ProxyConfig::parse(&yaml).expect("the A.1-shaped YAML must parse");
+    assert_eq!(cfg.fail_policy, FailPolicy::ClosedOnCritical);
+    assert_eq!(cfg.upstreams["default"].expected_auth.as_deref(), Some("header"));
+    let engine = cerberus_engine::engine::EngineBuilder::new(&[]).build().unwrap();
+    let shared = std::sync::Arc::new(std::sync::RwLock::new(cfg));
+    let engine_arc = std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(engine)));
+    let ctx = std::sync::Arc::new(ProxyContext {
+        config: shared.clone(),
+        engine: engine_arc,
+        redact_options: cerberus_engine::redact::RedactOptions::default(),
+        api: ApiContext::new(shared),
+        last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    });
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer provider-key")
+        .body(r#"{"content":"clean prompt"}"#)
+        .send()
+        .await
+        .expect("a1 proxy request");
+    assert_eq!(r.status(), 200, "A.1 config must serve traffic");
+    let forwarded = captured.lock().unwrap().clone();
+    let head = String::from_utf8_lossy(&forwarded);
+    assert!(
+        head.contains("authorization:"),
+        "the provider credential header (default auth_header) must be forwarded"
+    );
+    mock_handle.abort();
+}
+
+/// ── R9-13 unit-level: the decoder is reachable from the pipeline path with
+/// the same `DecodedBody` contract (single parse; regions recorded) ──
+#[test]
+fn decoder_records_multipart_regions_for_single_parse_redaction() {
+    let body = Bytes::from(
+        "--B1\r\nContent-Type: text/plain\r\n\r\nalpha secret\r\n--B1\r\nContent-Type: text/plain\r\n\r\nbeta\r\n--B1--\r\n",
+    );
+    let decoded = decode(&body, Some("multipart/form-data; boundary=B1"));
+    assert_eq!(decoded.content_type, cerberus_proxy::decoder::ContentType::Multipart);
+    assert!(decoded.parsed.is_none(), "multipart bodies carry no JSON tree");
+    let regions = decoded.multipart.expect("regions recorded at decode time");
+    assert_eq!(regions.len(), 2, "both text parts recorded once for the redaction path");
 }
