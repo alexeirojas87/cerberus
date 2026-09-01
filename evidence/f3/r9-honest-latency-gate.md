@@ -236,3 +236,21 @@ stale F9 evidence marked superseded; one marginal scan-only probe relabeled to
 the file's pre-existing closed emission-class per fix-plan F3.3 ("los microbench
 scan-only quedan etiquetados como tales"). The unit is NOT closed; panel review
 (§8B) and owner sign-off at the F3 gate are required.
+
+## Owner decision — gate semantics (2026-09-01)
+
+The independent performance lens raised a P1: the strict absolute
+`proxy p99 < 5.0 ms` release assert fails loudly under extreme host contention
+(load ≥ 7.5; 2/3 lens runs), even when the measured proxy overhead stays within
+budget (4.287 ms in the worst failed run, with the direct baseline inflating
+~10× in lockstep proving environment causation). The lens suggested §5 may
+budget overhead rather than absolute latency and left the choice to the owner
+(no edit was made by the reviewer).
+
+**Owner decision: KEEP the absolute strict assert (`proxy p99 < 5.0 ms`).**
+Rationale: it is the closed §5 wording ("proxy 50 KB <5 ms p99") and the R9-2
+restore target; the gate already fails loudly, never silently, which is the
+honest behavior Review 9 demanded. Verification runs and CI must use a quiet
+host (documented requirement); the interleaved direct baseline remains the
+drift-proof contention diagnostic. Proxy overhead (currently ~0.7 ms clean,
+7× headroom) is always reported and asserted nowhere else.
