@@ -11,6 +11,8 @@
 //! - `GET  /api/events` — recent events (with optional filters)
 //! - `GET  /api/stats` — aggregated statistics
 //! - `POST /api/allowlist` — add to allowlist (FP triage)
+//! - `POST /api/break-glass` — issue a one-shot bypass token (F2.3/R9-8;
+//!   authenticated; nonce redeemed once via `X-Cerberus-Bypass`)
 //! - `GET  /api/upstreams` — list upstreams/providers `{name,url,auth_header}`
 //! - `POST /api/upstreams` — add an upstream `{name,url,auth_header?}`
 //! - `DELETE /api/upstreams/{name}` — remove a provider (not the last one)
@@ -127,6 +129,11 @@ pub struct ApiContext {
     /// pack rules. `None` (tests/dev) = the policy is validated and
     /// persisted, but there is no engine to update.
     pub engine: Option<crate::detection_policy::EngineControl>,
+
+    /// Server-side one-shot break-glass ledger (F2.3/R9-8): the control
+    /// plane issues tokens here (behind the admin-token gate) and the data
+    /// plane redeems them on `X-Cerberus-Bypass: break-glass:<nonce>`.
+    pub break_glass: std::sync::Arc<cerberus_engine::break_glass::BreakGlassLedger>,
 }
 
 impl ApiContext {
@@ -140,6 +147,7 @@ impl ApiContext {
             pack_worker: None,
             config_path: None,
             engine: None,
+            break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
         }
     }
 
@@ -153,6 +161,7 @@ impl ApiContext {
             pack_worker: None,
             config_path: None,
             engine: None,
+            break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
         }
     }
 
@@ -166,6 +175,7 @@ impl ApiContext {
             pack_worker: None,
             config_path: None,
             engine: None,
+            break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
         }
     }
 
@@ -345,6 +355,7 @@ pub async fn handle_api_request(
         ("GET", "/api/events") => handle_get_events(ctx, provider).await,
         ("GET", "/api/stats") => handle_get_stats(ctx, provider).await,
         ("POST", "/api/allowlist") => handle_post_allowlist(ctx, body).await,
+        ("POST", "/api/break-glass") => handle_post_break_glass(ctx, body).await,
         ("GET", "/api/allowlist") => handle_get_allowlist(ctx).await,
         ("DELETE", "/api/allowlist") => handle_delete_allowlist(ctx, body).await,
         ("GET", "/api/policy") => handle_get_policy(ctx).await,
@@ -580,6 +591,9 @@ impl ConfigPatch {
             // door (`PUT /api/policy`), which validates the rules and
             // recompiles the engine. Here it is always preserved.
             policy: base.policy.clone(),
+            // Reversible redaction (F2.2, opt-in §9 #4) is not hot-toggleable
+            // through this route; the YAML/startup value is preserved.
+            reversible_redaction: base.reversible_redaction,
         }
     }
 }
@@ -1144,6 +1158,83 @@ async fn handle_post_allowlist(ctx: &ApiContext, body: hyper::body::Incoming) ->
         }
     };
     Ok(apply_allowlist_add(ctx, &body_bytes))
+}
+
+/// `POST /api/break-glass` — issue a one-shot bypass token (F2.3/R9-8).
+///
+/// Authenticated by the control-plane gate (`X-Cerberus-Admin-Token` /
+/// `Authorization: Bearer` when an admin token is configured): **no valid
+/// admin token → no break-glass token**. Body:
+/// `{"reason": "...", "provider": "openai"|null, "ttl_secs": 60}`.
+/// The raw reason is NEVER stored — only its truncated+hashed form. The
+/// returned nonce is redeemed exactly once on the data plane via
+/// `X-Cerberus-Bypass: break-glass:<nonce>`.
+async fn handle_post_break_glass(
+    ctx: &ApiContext,
+    body: hyper::body::Incoming,
+) -> Result<Response<Full<Bytes>>, String> {
+    let body_bytes = match collect_api_body(body).await {
+        Ok(b) => b,
+        Err(ApiBodyError::TooLarge) => {
+            return Ok(json_response_close(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                r#"{"error":"request body too large"}"#,
+            ));
+        }
+        Err(ApiBodyError::Read(msg)) => {
+            return Ok(json_response_close(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"{msg}"}}"#),
+            ));
+        }
+    };
+    Ok(apply_break_glass_issue(ctx, &body_bytes))
+}
+
+/// Core of `POST /api/break-glass` (testable without a socket).
+fn apply_break_glass_issue(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Bytes>> {
+    #[derive(serde::Deserialize)]
+    struct BreakGlassRequest {
+        /// Reason for the bypass (required, non-empty). Stored only hashed.
+        reason: String,
+        /// Optional provider scope. Absent/null → explicit global scope.
+        provider: Option<String>,
+        /// Optional TTL override in seconds (clamped to [1, 3600]).
+        ttl_secs: Option<u64>,
+    }
+    let parsed: BreakGlassRequest = match serde_json::from_slice(body_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"invalid break-glass request","detail":"{e}"}}"#),
+            );
+        }
+    };
+    if parsed.reason.trim().is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid break-glass request","detail":"reason must be non-empty"}"#,
+        );
+    }
+    let scope = parsed.provider.map_or_else(
+        cerberus_engine::break_glass::BreakGlassScope::global,
+        cerberus_engine::break_glass::BreakGlassScope::for_provider,
+    );
+    let ttl = parsed.ttl_secs.map(std::time::Duration::from_secs);
+    let token = ctx.break_glass.issue(scope, &parsed.reason, ttl);
+    tracing::info!(
+        "break-glass token issued (scope={}, ttl={}s); raw reason is not stored",
+        token.scope,
+        token.ttl_secs
+    );
+    // The nonce is the ONLY copy of the bearer credential returned to the
+    // operator; the ledger keeps the scope + reason hash, never the reason.
+    let body = format!(
+        r#"{{"status":"ok","nonce":"{}","reason_hash":"{}","scope":"{}","ttl_secs":{},"expires_at_nanos":{}}}"#,
+        token.nonce, token.reason_hash, token.scope, token.ttl_secs, token.expires_at_nanos
+    );
+    json_response(StatusCode::OK, body)
 }
 
 /// Core of `POST /api/allowlist` (testable without a socket).

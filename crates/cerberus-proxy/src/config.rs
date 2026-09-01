@@ -63,6 +63,16 @@ pub struct ProxyConfig {
     /// live engine without restarting. See [`crate::detection_policy`].
     #[serde(default)]
     pub policy: crate::detection_policy::DetectionPolicy,
+
+    /// Reversible redaction (opt-in local vault, closed decision §9 #4).
+    ///
+    /// Default: `false` — redaction is **irreversible**. When `true`, redact
+    /// spans are replaced by `[VAULT:<random>]` tokens and a **request-scoped**
+    /// vault (capacity/TTL bounded, zeroized on consume/expiry/clear/drop)
+    /// restores the originals on the non-streaming response. Nothing from the
+    /// vault is persisted or logged (R9-8 / F2.2).
+    #[serde(default)]
+    pub reversible_redaction: bool,
 }
 
 fn default_listen() -> String {
@@ -179,6 +189,7 @@ impl Default for ProxyConfig {
             max_body_bytes: default_max_body_bytes(),
             admin_token: None,
             policy: crate::detection_policy::DetectionPolicy::default(),
+            reversible_redaction: false,
         }
     }
 }
@@ -203,6 +214,20 @@ mod tests {
         assert_eq!(cfg.listen, "0.0.0.0:8080");
         assert_eq!(cfg.mode, OperationMode::Shadow);
         assert_eq!(cfg.fail_policy, FailPolicy::Open);
+    }
+
+    #[test]
+    fn reversible_redaction_is_opt_in_and_defaults_off() {
+        // Closed decision §9 #4 (R9-8/F2.2): irreversible redaction is the
+        // DEFAULT; the reversible vault is strictly opt-in.
+        let cfg = ProxyConfig::default();
+        assert!(!cfg.reversible_redaction, "default must be irreversible");
+        let absent = ProxyConfig::parse("listen: 127.0.0.1:8787\n").unwrap();
+        assert!(!absent.reversible_redaction, "YAML without the flag stays irreversible");
+        let enabled = ProxyConfig::parse("listen: 127.0.0.1:8787\nreversible_redaction: true\n").unwrap();
+        assert!(enabled.reversible_redaction, "opt-in parses true");
+        let disabled = ProxyConfig::parse("reversible_redaction: false\n").unwrap();
+        assert!(!disabled.reversible_redaction);
     }
 
     #[test]

@@ -23,3 +23,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
+# R9-8 (F2.2): real zeroization of secret material held by the reversible
+# vault. `zeroize` overwrites owned buffers on Drop / explicit wipe.
+zeroize = "1"
+# R9-8 (F2.2/F2.3): CSPRNG for non-guessable vault token ids and one-shot
+# break-glass nonces (no predictable `v1` counters).
+getrandom = "0.2"

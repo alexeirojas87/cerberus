@@ -2060,3 +2060,319 @@ async fn dashboard_serves_an_effective_csp_header() {
     assert!(!html.contains(STRONG_ADMIN_TOKEN), "token leaked into the dashboard");
     assert!(!html.contains("onclick=\""), "inline handlers break the hash CSP");
 }
+
+// =============================================================================
+// F2.2 + F2.3 (R9-8): request-scoped reversible vault + live one-shot
+// break-glass primitive.
+// =============================================================================
+
+/// Rule that REDACTS (irreversible would emit `[REDACTED:test.redact]`).
+fn redact_rule() -> cerberus_engine::rule::Rule {
+    cerberus_engine::rule::Rule {
+        flag: "test.redact".to_string(),
+        category: cerberus_engine::rule::Category::Secrets,
+        severity: cerberus_engine::rule::Severity::High,
+        action: cerberus_engine::rule::Action::Redact,
+        hash_normalization: None,
+        context_keywords: Vec::new(),
+        min_length: None,
+        max_length: None,
+        allowed_examples: Vec::new(),
+        patterns: vec![r"sk-[A-Za-z0-9]{20,}".to_string()],
+        validators: Vec::new(),
+    }
+}
+
+/// Context for the R9-8 tests: explicit rules, mode, upstream, admin token
+/// and the `reversible_redaction` opt-in flag.
+#[allow(clippy::too_many_arguments)]
+fn make_ctx_r9(
+    rules: &[cerberus_engine::rule::Rule],
+    operation_mode: OperationMode,
+    upstream_url: &str,
+    admin_token: Option<&str>,
+    reversible_redaction: bool,
+) -> std::sync::Arc<ProxyContext> {
+    let engine = cerberus_engine::engine::EngineBuilder::new(rules).build().unwrap();
+    let mut upstreams = HashMap::new();
+    upstreams.insert(
+        "default".to_string(),
+        UpstreamConfig {
+            url: upstream_url.to_string(),
+            path_prefix: None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let config = ProxyConfig {
+        upstreams,
+        mode: operation_mode,
+        fail_policy: FailPolicy::Closed,
+        admin_token: admin_token.map(ToString::to_string),
+        reversible_redaction,
+        ..ProxyConfig::default()
+    };
+    let shared = std::sync::Arc::new(std::sync::RwLock::new(config));
+    let engine_arc = std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(engine)));
+    std::sync::Arc::new(ProxyContext {
+        config: shared.clone(),
+        engine: engine_arc,
+        redact_options: cerberus_engine::redact::RedactOptions::default(),
+        api: ApiContext::new(shared),
+        last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    })
+}
+
+#[tokio::test]
+async fn test_break_glass_one_shot_end_to_end() {
+    // F2.3 (R9-8): the one-shot primitive must be LIVE: issued through the
+    // authenticated control plane, redeemed on the data plane exactly once,
+    // and audited. Reuse/expiry/auth failures refuse the bypass.
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let admin = "r9-test-admin-token-0123456789abcdef";
+    let ctx = make_ctx_r9(
+        &[block_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+        Some(admin),
+        false,
+    );
+    let ctx_clone = std::sync::Arc::clone(&ctx);
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let admin_h = ("x-cerberus-admin-token", admin);
+
+    // 1. Issuing WITHOUT a valid admin token is rejected (401).
+    let unauth = client
+        .post(format!("{base}/api/break-glass"))
+        .header("content-type", "application/json")
+        .body(r#"{"reason":"no token"}"#)
+        .send()
+        .await
+        .expect("unauth issue");
+    assert_eq!(unauth.status(), 401, "unauthenticated issue must be 401");
+
+    // 2. Issue with the admin token → nonce (+ reason hash, never raw reason).
+    let issued = client
+        .post(format!("{base}/api/break-glass"))
+        .header("content-type", "application/json")
+        .header(admin_h.0, admin_h.1)
+        .body(r#"{"reason":"e2e emergency","provider":"default","ttl_secs":60}"#)
+        .send()
+        .await
+        .expect("issue");
+    assert_eq!(issued.status(), 200, "authenticated issue must be 200");
+    let issue_json: serde_json::Value = issued.json().await.expect("issue json");
+    let nonce = issue_json["nonce"].as_str().expect("nonce").to_string();
+    assert_eq!(nonce.len(), 64, "256-bit CSPRNG nonce");
+    assert!(issue_json["reason_hash"].as_str().unwrap_or("").starts_with("sha256:"));
+    let raw = issue_json.to_string();
+    assert!(!raw.contains("e2e emergency"), "raw reason must never be returned");
+
+    // 3. Without a bypass token the block applies (403).
+    let plain = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("plain");
+    assert_eq!(plain.status(), 403);
+
+    // 4. Data-plane redemption: `X-Cerberus-Bypass: break-glass:<nonce>` +
+    //    admin token → the block is bypassed (200 from the mock upstream).
+    let bypassed = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-bypass", format!("break-glass:{nonce}"))
+        .header(admin_h.0, admin_h.1)
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("bypassed");
+    assert_eq!(bypassed.status(), 200, "one-shot redemption must bypass the block");
+
+    // 5. ONE-SHOT: the same nonce is consumed; replay is refused → 403.
+    let replay = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-bypass", format!("break-glass:{nonce}"))
+        .header(admin_h.0, admin_h.1)
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("replay");
+    assert_eq!(replay.status(), 403, "second use must be rejected (one-shot)");
+
+    // 6. The bypass use is AUDITED: the event carries the `bypass` +
+    //    `break-glass` flags and the hashed reason, never the raw one.
+    let events = client
+        .get(format!("{base}/api/events"))
+        .header(admin_h.0, admin_h.1)
+        .send()
+        .await
+        .expect("events");
+    assert_eq!(events.status(), 200);
+    let events_json: serde_json::Value = events.json().await.expect("events json");
+    let events_str = events_json.to_string();
+    assert!(events_str.contains("\"bypass\""), "bypass flag audited: {events_str}");
+    assert!(
+        events_str.contains("break-glass"),
+        "break-glass marker audited: {events_str}"
+    );
+    assert!(
+        events_str.contains("bypass-hash:"),
+        "hashed reason audited: {events_str}"
+    );
+    assert!(
+        !events_str.contains("e2e emergency"),
+        "raw reason must never be audited"
+    );
+
+    // 7. The ledger no longer holds the consumed nonce.
+    assert!(ctx_clone.api.break_glass.is_empty(), "nonce consumed (one-shot)");
+    mock_handle.abort();
+}
+
+#[tokio::test]
+async fn test_break_glass_wrong_provider_scope_rejected() {
+    // F2.3: a token scoped to provider X is refused for provider Y; the
+    // token is NOT consumed (still valid for X) and the request is blocked.
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let admin = "r9-test-admin-token-0123456789abcdef";
+    let ctx = make_ctx_r9(
+        &[block_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+        Some(admin),
+        false,
+    );
+    let ctx_clone = std::sync::Arc::clone(&ctx);
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let issued = client
+        .post(format!("{base}/api/break-glass"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-admin-token", admin)
+        .body(r#"{"reason":"scoped emergency","provider":"openai"}"#)
+        .send()
+        .await
+        .expect("issue");
+    assert_eq!(issued.status(), 200);
+    let issue_json: serde_json::Value = issued.json().await.expect("issue json");
+    let nonce = issue_json["nonce"].as_str().expect("nonce").to_string();
+
+    // The data-plane request routes to provider `default`, not `openai`.
+    let resp = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-bypass", format!("break-glass:{nonce}"))
+        .header("x-cerberus-admin-token", admin)
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("wrong provider");
+    assert_eq!(resp.status(), 403, "scope mismatch must refuse the bypass");
+    assert_eq!(
+        ctx_clone.api.break_glass.len(),
+        1,
+        "token not consumed on scope mismatch"
+    );
+    mock_handle.abort();
+}
+
+#[tokio::test]
+async fn test_reversible_vault_round_trip_request_scoped() {
+    // F2.2 (R9-8): with `reversible_redaction` (opt-in) the upstream receives
+    // a vault token (never the raw secret) and the response restores the
+    // original (non-streaming un-redaction). Each request gets its own
+    // request-scoped vault: no cross-request secret reuse.
+    let (mock_adj, mock_handle) = spawn_mock_upstream_echo().await;
+    let ctx = make_ctx_r9(
+        &[redact_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+        None,
+        true,
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    // Request 1: secret A.
+    let body1 = r#"{"content":"sk-ROUNDTRIPaaa111222333444"}"#;
+    let r1 = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .body(body1)
+        .send()
+        .await
+        .expect("r1");
+    assert_eq!(r1.status(), 200);
+    let text1 = r1.text().await.expect("r1 body");
+    // The echo mock returns the raw request it received; un-redaction must
+    // have restored the original value on the client side.
+    assert!(
+        text1.contains("sk-ROUNDTRIPaaa111222333444"),
+        "original restored in response: {text1}"
+    );
+    assert!(!text1.contains("[VAULT:"), "token must be un-redacted: {text1}");
+
+    // Request 2: a DIFFERENT secret (request-scoped vault, new token).
+    let body2 = r#"{"content":"sk-ROUNDTRIPbbb555666777888"}"#;
+    let r2 = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .body(body2)
+        .send()
+        .await
+        .expect("r2");
+    assert_eq!(r2.status(), 200);
+    let text2 = r2.text().await.expect("r2 body");
+    assert!(
+        text2.contains("sk-ROUNDTRIPbbb555666777888"),
+        "second secret restored: {text2}"
+    );
+    assert!(
+        !text2.contains("sk-ROUNDTRIPaaa111222333444"),
+        "no cross-request secret reuse"
+    );
+    mock_handle.abort();
+}
+
+#[tokio::test]
+async fn test_reversible_redaction_is_opt_in_default_irreversible() {
+    // Closed decision §9 #4: irreversible redaction is the DEFAULT. Without
+    // the flag the same request emits `[REDACTED:test.redact]` and there is
+    // no vault round trip.
+    let (mock_adj, mock_handle) = spawn_mock_upstream_echo().await;
+    let ctx = make_ctx_r9(
+        &[redact_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+        None,
+        false, // reversible_redaction NOT enabled
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+    let r = client
+        .post(format!("http://{addr}/test"))
+        .header("content-type", "application/json")
+        .body(r#"{"content":"sk-IRREVERSIBLEaaa111222333"}"#)
+        .send()
+        .await
+        .expect("r");
+    assert_eq!(r.status(), 200);
+    let text = r.text().await.expect("body");
+    assert!(
+        text.contains("[REDACTED:test.redact]"),
+        "default is irreversible: {text}"
+    );
+    assert!(
+        !text.contains("sk-IRREVERSIBLEaaa111222333"),
+        "raw secret never restored without the opt-in"
+    );
+    mock_handle.abort();
+}

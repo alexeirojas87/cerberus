@@ -81,6 +81,48 @@ const RESPONSE_HOP_BY_HOP: &[&str] = &[
 
 /// Headers (lowercased) that must never be forwarded upstream.
 const BYPASS_HEADER: &str = "x-cerberus-bypass";
+/// Prefix of the one-shot break-glass redemption inside `X-Cerberus-Bypass`
+/// (`break-glass:<nonce>`; F2.3/R9-8). Anything else is the legacy reason.
+const BREAK_GLASS_PREFIX: &str = "break-glass:";
+/// Audit flag marking that the bypass was granted by a one-shot break-glass
+/// token (the legacy reason bypass carries only the `bypass` flag).
+pub(crate) const BREAK_GLASS_FLAG: &str = "break-glass";
+
+/// Shape of an accepted data-plane bypass.
+#[derive(Debug, Clone)]
+enum BypassKind {
+    /// Legacy `X-Cerberus-Bypass: <reason>` with valid admin auth. The raw
+    /// reason is hashed (never persisted raw) and echoed back to the SAME
+    /// caller in the feedback header.
+    Legacy(String),
+    /// One-shot redemption via `POST /api/break-glass` + `break-glass:<nonce>`
+    /// (F2.3). Only the reason HASH travels here; the nonce is consumed
+    /// atomically (exactly-once) by the ledger before this variant exists.
+    OneShot {
+        /// SHA-256 of the truncated reason (audit trail).
+        reason_hash: String,
+    },
+}
+
+impl BypassKind {
+    /// Value echoed back in the response feedback header. For one-shot
+    /// tokens it is the fixed marker `break-glass` (never the nonce, never
+    /// the raw reason).
+    fn feedback_ack(&self) -> &str {
+        match self {
+            Self::Legacy(reason) => reason,
+            Self::OneShot { .. } => BREAK_GLASS_FLAG,
+        }
+    }
+
+    /// Truncated+hashed reason for the audit event (`bypass-hash:<sha256>`).
+    fn audit_hash(&self) -> String {
+        match self {
+            Self::Legacy(reason) => cerberus_engine::engine::hash_value(truncate_bypass_reason(reason)),
+            Self::OneShot { reason_hash } => reason_hash.clone(),
+        }
+    }
+}
 const FEEDBACK_HEADER: &str = "x-cerberus-feedback";
 
 /// Built-in path-prefix routing for known providers (still overridable by an
@@ -475,9 +517,9 @@ pub(crate) async fn proxy_handler(
     }
 
     // Body limit applied DURING buffering, not after (review 2, P1 #5).
-    let (max_body, mode, fail_policy) = {
+    let (max_body, mode, fail_policy, reversible_redaction) = {
         let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
-        (cfg.max_body_bytes, cfg.mode, cfg.fail_policy)
+        (cfg.max_body_bytes, cfg.mode, cfg.fail_policy, cfg.reversible_redaction)
     };
     // Body read errors (fix P1): too large → 413; the rest of the read
     // errors → 502 (there is no body to forward).
@@ -503,22 +545,33 @@ pub(crate) async fn proxy_handler(
     // token. With a configured token and missing/invalid auth the header is
     // IGNORED (it does not block) and a warn is logged. Without a configured
     // token (dev mode) the bypass stays open (P0).
-    let bypass_reason: Option<String> = {
+    //
+    // F2.3 (R9-8): the header carries either a plain reason (legacy audited
+    // bypass, unchanged) or `break-glass:<nonce>` — the one-shot primitive
+    // issued (authenticated) via `POST /api/break-glass`. A nonce is consumed
+    // ATOMICALLY exactly once; a replay, an expired token or a provider-scope
+    // mismatch REFUSES the bypass (the request proceeds to the normal scan
+    // and is blocked if findings require it). No valid admin token → no
+    // bypass; both mechanisms share the same audit trail.
+    let provider = direct_upstream
+        .as_ref()
+        .map_or_else(|| provider_of(path.as_str(), ctx), |direct| direct.provider.clone());
+    let bypass: Option<BypassKind> = {
         let present = parts
             .headers
             .get(BYPASS_HEADER)
             .and_then(|v| v.to_str().ok())
             .map(ToString::to_string);
-        present.filter(|_| {
+        present.and_then(|raw| {
             let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
             match api::expected_admin_token(&cfg) {
                 // Dev mode: no token configured, bypass open.
-                None => true,
+                None => {}
                 // Token config: the data-plane bypass is honored ONLY by the
                 // `X-Cerberus-Admin-Token` header (not by `Authorization`).
                 Some(expected) => {
                     if api::admin_token_header_is_present(&parts.headers, expected) {
-                        true
+                        // authenticated
                     } else {
                         if api::authorized(&parts.headers, expected) {
                             tracing::warn!(
@@ -527,10 +580,28 @@ pub(crate) async fn proxy_handler(
                                 ADMIN_TOKEN_HEADER
                             );
                         }
-                        false
+                        return None;
                     }
                 }
             }
+            drop(cfg);
+            // Owned intermediate: the nonce is trimmed/copied so the legacy
+            // arm can take `raw` by value (map_or_else over if-let-else).
+            raw.strip_prefix(BREAK_GLASS_PREFIX)
+                .map(str::trim)
+                .map(ToString::to_string)
+                .map_or_else(
+                    || Some(BypassKind::Legacy(raw)),
+                    |nonce| match ctx.api.break_glass.redeem(&nonce, Some(provider.as_str())) {
+                        Ok(grant) => Some(BypassKind::OneShot {
+                            reason_hash: grant.reason_hash,
+                        }),
+                        Err(e) => {
+                            tracing::warn!("break-glass redemption refused: {e}");
+                            None
+                        }
+                    },
+                )
         })
     };
 
@@ -570,7 +641,7 @@ pub(crate) async fn proxy_handler(
     let has_findings = !scan_result.findings.is_empty();
 
     // Block (Enforce + critical) — unless bypass.
-    let blocked = bypass_reason.is_none() && !mode_result.should_forward();
+    let blocked = bypass.is_none() && !mode_result.should_forward();
     if blocked {
         let flag = scan_result.findings.first().map_or("unknown", |f| f.flag.as_str());
         log_security_event(
@@ -578,16 +649,14 @@ pub(crate) async fn proxy_handler(
             &scan_result.findings,
             scan_result.action_overall,
         );
-        // Record event in the store.
-        let provider = direct_upstream
-            .as_ref()
-            .map_or_else(|| provider_of(path.as_str(), ctx), |direct| direct.provider.clone());
+        // Record event in the store (`provider` computed before the bypass
+        // block; F2.3 needs it early for the one-shot scope check).
         record_only_with_findings(ctx, &scan_result, provider.as_str()).await;
         let mut r = json_status(
             StatusCode::FORBIDDEN,
             &format!(r#"{{"error":"blocked","flag":"{flag}"}}"#),
         )?;
-        add_feedback_headers(&mut r, &scan_result, bypass_reason.as_deref());
+        add_feedback_headers(&mut r, &scan_result, bypass.as_ref().map(BypassKind::feedback_ack));
         return Ok(r);
     }
 
@@ -596,6 +665,14 @@ pub(crate) async fn proxy_handler(
     // forward the original body (real fail-open); Closed → 502 (fix review v4
     // #5: before the `apply_redaction` error was swallowed in json_redact and
     // the raw secret passed through even though the JSON failed).
+    //
+    // F2.2 (R9-8): with `reversible_redaction` (opt-in, closed decision §9 #4)
+    // a REQUEST-SCOPED vault is created here — it lives exactly for this
+    // request/response cycle (capacity/TTL bounded, zeroized on
+    // consume/expiry/clear/drop) and is used to store the originals that
+    // restore the response below. Nothing is shared across requests.
+    let request_vault: Option<cerberus_engine::vault::Vault> =
+        reversible_redaction.then(cerberus_engine::vault::Vault::new);
     let final_bytes = if matches!(mode_result, shadow::ModeResult::Enforce { .. })
         && mode_result.action() == cerberus_engine::rule::Action::Redact
     {
@@ -605,6 +682,7 @@ pub(crate) async fn proxy_handler(
             &decoded,
             &ctx.redact_options,
             &scan_result.findings,
+            request_vault.as_ref(),
         );
         match decide_redact_result(redaction, fail_policy, &body_bytes) {
             RedactDecision::Forward(b) => b,
@@ -627,14 +705,14 @@ pub(crate) async fn proxy_handler(
     log_security_event(sec_event, &scan_result.findings, scan_result.action_overall);
 
     // Record event in the store if there are findings (clean ones do not count — P1-12).
-    let provider = direct_upstream
-        .as_ref()
-        .map_or_else(|| provider_of(path.as_str(), ctx), |direct| direct.provider.clone());
+    // (`provider` was computed before the bypass block for the one-shot scope check.)
     if has_findings {
-        let is_bypass = bypass_reason.is_some();
+        let is_bypass = bypass.is_some();
         if is_bypass {
             // Audited break-glass (review 2, P1 #6): the authorized leak is
             // persisted as "bypass" with its reason — not as a fake block.
+            // Both the legacy reason header and the F2.3 one-shot primitive
+            // share this same audit trail.
             log_security_event(
                 SecurityEvent::Bypassed,
                 &scan_result.findings,
@@ -651,12 +729,16 @@ pub(crate) async fn proxy_handler(
         if is_bypass {
             event.action_taken = "bypass".to_string();
             // The reason is NEVER persisted raw (secret leak, fix P1):
-            // `flags` only carries the "bypass" marker; the reason (truncated
-            // to 200 bytes) is stored hashed in `hashed_values` as
-            // `bypass-hash:<sha256hex>`.
+            // `flags` only carries the "bypass" marker (plus "break-glass"
+            // when the bypass came from the F2.3 one-shot primitive); the
+            // reason (truncated to 200 bytes) is stored hashed in
+            // `hashed_values` as `bypass-hash:<sha256hex>`.
             event.flags.push("bypass".to_string());
-            if let Some(reason) = &bypass_reason {
-                let digest = cerberus_engine::engine::hash_value(truncate_bypass_reason(reason));
+            if let Some(BypassKind::OneShot { .. }) = &bypass {
+                event.flags.push(BREAK_GLASS_FLAG.to_string());
+            }
+            if let Some(kind) = &bypass {
+                let digest = kind.audit_hash();
                 event
                     .hashed_values
                     .push(format!("bypass-hash:{}", digest.trim_start_matches("sha256:")));
@@ -749,12 +831,34 @@ pub(crate) async fn proxy_handler(
         }
     };
 
-    let mut response = Response::new(Full::new(resp_bytes));
+    // F2.2 (R9-8): non-streaming un-redaction. The response is fully
+    // buffered (streaming is out of MVP), so the request-scoped vault can
+    // restore the original values of the `[VAULT:<id>]` tokens present in
+    // the response and consume+zeroize the used entries. `request_vault` is
+    // dropped right after — end of the request lifecycle, memory wiped.
+    let resp_bytes: Bytes = match &request_vault {
+        Some(vault) => Bytes::from(vault.unredact(&resp_bytes)),
+        None => resp_bytes,
+    };
+
+    let mut response = Response::new(Full::new(resp_bytes.clone()));
     *response.status_mut() = resp_parts.status;
     // Filter hop-by-hop headers from the response (fix P1 #6): tokens from
     // `Connection` + fixed list (te, trailer, proxy-authenticate, ...).
     *response.headers_mut() = filter_response_headers(&resp_parts.headers);
-    add_feedback_headers(&mut response, &scan_result, bypass_reason.as_deref());
+    // F2.2 (R9-8): un-redaction rewrote the body, so the upstream's
+    // `content-length` no longer describes it — recompute it (a stale
+    // header breaks the HTTP framing).
+    if request_vault.is_some() {
+        if let Ok(hv) = resp_bytes.len().to_string().parse() {
+            response.headers_mut().insert("content-length", hv);
+        }
+    }
+    add_feedback_headers(
+        &mut response,
+        &scan_result,
+        bypass.as_ref().map(BypassKind::feedback_ack),
+    );
     Ok(response)
 }
 

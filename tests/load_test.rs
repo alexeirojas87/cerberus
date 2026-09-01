@@ -492,7 +492,7 @@ fn load_test_json_many_leaf_context_reuse() {
         let body = Bytes::from(serde_json::to_vec(&leaves).expect("serialize benchmark JSON"));
         assert!((45 * 1024..=50 * 1024).contains(&body.len()));
         let decoded = decode(&body, Some("application/json"));
-        let run = || redact_body(&engine, &body, &decoded, &opts, &findings).expect("JSON redaction");
+        let run = || redact_body(&engine, &body, &decoded, &opts, &findings, None).expect("JSON redaction");
         let output = run();
         assert_eq!(
             serde_json::from_slice::<Vec<String>>(&output).expect("valid output JSON"),

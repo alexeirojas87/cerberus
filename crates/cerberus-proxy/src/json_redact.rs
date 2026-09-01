@@ -11,6 +11,7 @@ use bytes::Bytes;
 use cerberus_engine::constraints::ContextAnalyzer;
 use cerberus_engine::engine::{CompiledEngine, Finding};
 use cerberus_engine::redact::{apply_redaction, RedactOptions};
+use cerberus_engine::vault::{apply_redaction_reversible, Vault};
 
 use crate::decoder::{ContentType, DecodedBody};
 
@@ -19,6 +20,11 @@ use crate::decoder::{ContentType, DecodedBody};
 /// Returns the transformed bytes. For JSON bodies the structure is preserved
 /// (only matching string leaves are replaced); for text bodies the whole text
 /// is redacted in place using the already-produced findings.
+///
+/// `vault` is the **request-scoped** reversible vault (F2.2/R9-8): `Some` →
+/// spans are replaced by `[VAULT:<random>]` tokens and the originals are
+/// stored zeroized for the response un-redaction; `None` (the default) →
+/// standard irreversible `[REDACTED:flag]` tokens.
 ///
 /// # Errors
 ///
@@ -30,18 +36,29 @@ pub fn redact_body(
     decoded: &DecodedBody,
     opts: &RedactOptions,
     findings: &[Finding],
+    vault: Option<&Vault>,
 ) -> Result<Vec<u8>, String> {
     // JSON path first; if the body is not valid JSON it falls back to the text fallback.
     if decoded.content_type == ContentType::Json {
-        if let Some(redacted) = redact_json(engine, body, decoded.parsed.as_ref(), opts)? {
+        if let Some(redacted) = redact_json(engine, body, decoded.parsed.as_ref(), opts, vault)? {
             return Ok(redacted);
         }
     }
-    fallback_text(decoded, findings, opts)
+    fallback_text(decoded, findings, opts, vault)
 }
 
 /// Fallback: plain-text redaction of the decoded text.
-fn fallback_text(decoded: &DecodedBody, findings: &[Finding], opts: &RedactOptions) -> Result<Vec<u8>, String> {
+fn fallback_text(
+    decoded: &DecodedBody,
+    findings: &[Finding],
+    opts: &RedactOptions,
+    vault: Option<&Vault>,
+) -> Result<Vec<u8>, String> {
+    if let Some(vault) = vault {
+        return apply_redaction_reversible(&decoded.text, findings, vault)
+            .map(String::into_bytes)
+            .map_err(|e| format!("redaction failed: {e}"));
+    }
     apply_redaction(&decoded.text, findings, opts)
         .map(String::into_bytes)
         .map_err(|e| format!("redaction failed: {e}"))
@@ -61,6 +78,7 @@ fn redact_json(
     body: &Bytes,
     parsed: Option<&serde_json::Value>,
     opts: &RedactOptions,
+    vault: Option<&Vault>,
 ) -> Result<Option<Vec<u8>>, String> {
     let mut value: serde_json::Value = match parsed {
         // The decoded tree is borrowed by the caller; clone is an exact copy
@@ -74,7 +92,7 @@ fn redact_json(
     // The full body as context for keyword constraints.
     let body_text = String::from_utf8_lossy(body).to_string();
     let analyzer = ContextAnalyzer::new(&body_text);
-    redact_value(engine, &mut value, opts, &analyzer)?;
+    redact_value(engine, &mut value, opts, &analyzer, vault)?;
     serde_json::to_vec(&value)
         .map(Some)
         .map_err(|e| format!("json reserialize failed: {e}"))
@@ -85,6 +103,7 @@ fn redact_value(
     value: &mut serde_json::Value,
     opts: &RedactOptions,
     analyzer: &ContextAnalyzer<'_>,
+    vault: Option<&Vault>,
 ) -> Result<(), String> {
     match value {
         serde_json::Value::String(s) => {
@@ -93,19 +112,27 @@ fn redact_value(
             // scanned with the full body as context.
             let found = engine.scan_with_context_analyzer(s, analyzer);
             if !found.findings.is_empty() {
-                let redacted =
-                    apply_redaction(s, &found.findings, opts).map_err(|e| format!("leaf redaction failed: {e}"))?;
+                let redacted = match vault {
+                    // Reversible (opt-in): unique vault token per span, the
+                    // original value goes into the request-scoped vault.
+                    Some(vault) => apply_redaction_reversible(s, &found.findings, vault)
+                        .map_err(|e| format!("leaf redaction failed: {e}"))?,
+                    // Irreversible (default, closed decision §9 #4).
+                    None => {
+                        apply_redaction(s, &found.findings, opts).map_err(|e| format!("leaf redaction failed: {e}"))?
+                    }
+                };
                 *s = redacted;
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                redact_value(engine, item, opts, analyzer)?;
+                redact_value(engine, item, opts, analyzer, vault)?;
             }
         }
         serde_json::Value::Object(map) => {
             for (_k, v) in map {
-                redact_value(engine, v, opts, analyzer)?;
+                redact_value(engine, v, opts, analyzer, vault)?;
             }
         }
         _ => {}
@@ -142,7 +169,7 @@ mod tests {
         let body = Bytes::from(raw);
         let decoded = decode(&body, Some("application/json"));
         let findings: Vec<Finding> = Vec::new(); // unused in JSON path
-        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &findings).expect("redact");
+        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &findings, None).expect("redact");
         let text = String::from_utf8(out).expect("utf8");
         // JSON removed? it must still be valid JSON with the structure.
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid JSON after redaction");
@@ -161,7 +188,7 @@ mod tests {
             r#"{"data":{"items":[{"tag":"secret","note":"auth: Bearer xyzwvutsrqponmlkjihgfedcbaA987654"}]}}"#;
         let body = Bytes::from(payload);
         let decoded = decode(&body, Some("application/json"));
-        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[]).expect("redact");
+        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[], None).expect("redact");
         let parsed: serde_json::Value = serde_json::from_slice(&out[..]).expect("valid JSON");
         let inner = parsed["data"]["items"][0]["note"].as_str().unwrap();
         assert!(inner.contains("[REDACTED"));
@@ -177,7 +204,7 @@ mod tests {
         let payload = format!(r#"{{"context":"google api_key","secret":"{key}"}}"#);
         let body = Bytes::from(payload);
         let decoded = decode(&body, Some("application/json"));
-        let out = redact_body(&engine(), &body, &decoded, &RedactOptions::default(), &[]).expect("redact");
+        let out = redact_body(&engine(), &body, &decoded, &RedactOptions::default(), &[], None).expect("redact");
         let text = String::from_utf8(out).expect("utf8");
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
         let redacted = parsed["secret"].as_str().expect("secret field");
@@ -206,7 +233,7 @@ mod tests {
         let raw = r#"{"prompt":"BlockMeSuperSecretDoNotLeak1234567890 fin"}"#;
         let body = Bytes::from(raw);
         let decoded = decode(&body, Some("application/json"));
-        let err = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[])
+        let err = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[], None)
             .expect_err("redaction must fail (block finding) and NOT return the raw JSON");
         assert!(
             err.contains("redaction") || err.contains("Blocked"),
@@ -230,7 +257,15 @@ mod tests {
             end: 100,
             hashed_value: "unused".to_string(),
         };
-        let err = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[bad_finding]).err();
+        let err = redact_body(
+            &engine,
+            &body,
+            &decoded,
+            &RedactOptions::default(),
+            &[bad_finding],
+            None,
+        )
+        .err();
         assert!(err.is_some(), "invalid span must propagate as Err");
     }
 
@@ -250,7 +285,7 @@ mod tests {
         // Pipeline path: decode() parses once, redact reuses the tree.
         let decoded = decode(&body, Some("application/json"));
         assert!(decoded.parsed.is_some(), "JSON decode must retain the parsed tree");
-        let reused = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[]).expect("reuse path");
+        let reused = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &[], None).expect("reuse path");
 
         // Fallback path: same body, no pre-parsed tree.
         let manual = crate::decoder::DecodedBody {
@@ -258,7 +293,8 @@ mod tests {
             content_type: crate::decoder::ContentType::Json,
             parsed: None,
         };
-        let fallback = redact_body(&engine, &body, &manual, &RedactOptions::default(), &[]).expect("fallback path");
+        let fallback =
+            redact_body(&engine, &body, &manual, &RedactOptions::default(), &[], None).expect("fallback path");
 
         assert_eq!(reused, fallback, "reuse and fallback redaction must be byte-identical");
 
@@ -278,8 +314,15 @@ mod tests {
         assert!(decoded.parsed.is_none());
         let scanned = engine.scan(&decoded.text);
         assert!(!scanned.findings.is_empty(), "bearer token must be found by the scan");
-        let out = redact_body(&engine, &body, &decoded, &RedactOptions::default(), &scanned.findings)
-            .expect("text redaction");
+        let out = redact_body(
+            &engine,
+            &body,
+            &decoded,
+            &RedactOptions::default(),
+            &scanned.findings,
+            None,
+        )
+        .expect("text redaction");
         let text = String::from_utf8(out).expect("utf8");
         assert!(text.contains("[REDACTED"), "got {text:?}");
         assert!(!text.contains("abcdefghijklmnopqrstuvwxyz012345"));
