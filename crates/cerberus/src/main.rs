@@ -15,6 +15,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod audit_key;
 mod cli_pack;
 mod daemon;
 mod feedback_ux;
@@ -120,10 +121,12 @@ enum MitmCmd {
 #[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .with_target(false)
-        .init();
+    // R9-10 (F5.1): non-blocking logging — events go through a bounded,
+    // lossy, off-thread writer; a slow/blocked console can never stall the
+    // request hot path. The guard is held for the whole process lifetime and
+    // dropped at exit → bounded drain + final flush (no log loss on
+    // graceful shutdown).
+    let _log_guard = cerberus_proxy::log::init_logging("info");
 
     match cli.command {
         Command::Init { config_dir } => {

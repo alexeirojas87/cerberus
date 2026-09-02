@@ -134,6 +134,13 @@ pub struct ApiContext {
     /// plane issues tokens here (behind the admin-token gate) and the data
     /// plane redeems them on `X-Cerberus-Bypass: break-glass:<nonce>`.
     pub break_glass: std::sync::Arc<cerberus_engine::break_glass::BreakGlassLedger>,
+
+    /// Per-installation HMAC key for audit hashes (R9-16, F5.2). When set
+    /// (product wiring), break-glass reason hashes AND the legacy bypass
+    /// audit hash are keyed + domain-separated. `None` only in test
+    /// contexts that never construct this builder — the daemon always keys.
+    /// Not `Debug`-printed (`ApiContext` has no `Debug` derive) and never logged.
+    pub audit_hash_key: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 impl ApiContext {
@@ -148,6 +155,7 @@ impl ApiContext {
             config_path: None,
             engine: None,
             break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
+            audit_hash_key: None,
         }
     }
 
@@ -162,6 +170,7 @@ impl ApiContext {
             config_path: None,
             engine: None,
             break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
+            audit_hash_key: None,
         }
     }
 
@@ -176,6 +185,7 @@ impl ApiContext {
             config_path: None,
             engine: None,
             break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
+            audit_hash_key: None,
         }
     }
 
@@ -205,6 +215,26 @@ impl ApiContext {
     #[must_use]
     pub fn without_store(config: Arc<RwLock<ProxyConfig>>) -> Self {
         Self::new(config)
+    }
+
+    /// Key ALL audit hashes with the per-installation HMAC key (R9-16/F5.2):
+    /// break-glass reason hashes issued by the ledger AND the legacy bypass
+    /// audit hash computed on the data path become keyed, domain-separated
+    /// HMAC-SHA256. Product wiring (daemon) MUST call this before the
+    /// context is shared; test contexts that skip it keep the unkeyed
+    /// library fallback.
+    #[must_use]
+    pub fn with_audit_hash_key(mut self, key: Vec<u8>) -> Self {
+        self.break_glass =
+            std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new().with_hash_key(key.clone()));
+        self.audit_hash_key = Some(std::sync::Arc::new(key));
+        self
+    }
+
+    /// The installation audit-hash key, if wired (`None` only in tests).
+    #[must_use]
+    pub fn audit_hash_key(&self) -> Option<&[u8]> {
+        self.audit_hash_key.as_ref().map(|v| v.as_slice())
     }
 }
 

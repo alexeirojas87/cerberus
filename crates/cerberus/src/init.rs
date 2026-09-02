@@ -190,7 +190,12 @@ pub(crate) fn scan_text(text: &str) -> String {
         Ok(r) => r,
         Err(e) => return format!("error loading rules: {e}"),
     };
-    let engine = match EngineBuilder::new(&rules).build() {
+    // R9-16 (F5.2): dry-run hashes are keyed too — env/file key when present
+    // (consistent with the daemon's audit hashes), else an ephemeral
+    // per-process CSPRNG key. NEVER unkeyed; the read-only resolution never
+    // writes the key file from a diagnostic command.
+    let (audit_key, _) = crate::audit_key::resolve_existing_or_ephemeral_key(&crate::audit_key::default_config_dir());
+    let engine = match EngineBuilder::new(&rules).with_payload_secret(audit_key).build() {
         Ok(e) => e,
         Err(e) => return format!("engine build error: {e}"),
     };

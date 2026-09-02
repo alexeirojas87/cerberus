@@ -16,11 +16,16 @@ use crate::rule::{Action, Category, Severity};
 /// Hash a value: HMAC-SHA256 if a secret is present, otherwise plain SHA-256.
 /// (Review 2, P2 #11: entropy no longer emits deterministic SHA-256 when the
 /// proxy has `CERBERUS_HMAC_SECRET`.)
+///
+/// R9-16 (F5.2): the keyed branch is domain-separated exactly like the
+/// engine's `payload_hash` (same `AUDIT_EVENT_HASH_DOMAIN`), so entropy and
+/// pattern hashes of the same value agree — and both differ from every other
+/// hash domain (break-glass, allowlist).
 #[must_use]
 fn hash_with_secret(value: &str, secret: Option<&[u8]>) -> String {
     secret.map_or_else(
         || hash_value(value),
-        |key| crate::engine::hmac_sha256_hex(key, value.as_bytes()),
+        |key| crate::engine::domain_hash(key, crate::engine::AUDIT_EVENT_HASH_DOMAIN, value.as_bytes()),
     )
 }
 

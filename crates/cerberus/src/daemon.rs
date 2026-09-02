@@ -144,12 +144,14 @@ fn load_proxy_config_from(path: &std::path::Path) -> Option<ProxyConfig> {
     }
 }
 
-/// Payload-hash secret (HMAC-SHA256, P1-12) from `CERBERUS_HMAC_SECRET`.
-fn payload_secret_from_env() -> Option<Vec<u8>> {
-    std::env::var("CERBERUS_HMAC_SECRET")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(String::into_bytes)
+/// Resolve the per-installation audit-hash key (R9-16, F5.2).
+///
+/// Precedence: `CERBERUS_HMAC_SECRET` env override → persisted key file →
+/// generate + persist (0600, atomic). There is NO unkeyed fallback: every
+/// hash of secret material in the product is keyed HMAC-SHA256. See
+/// `audit_key.rs` for the full key-management design.
+pub(crate) fn resolve_audit_key() -> (Vec<u8>, crate::audit_key::KeySource) {
+    crate::audit_key::resolve_or_create_key(&crate::audit_key::default_config_dir())
 }
 
 /// Non-empty env value as `Option<String>`.
@@ -166,7 +168,8 @@ fn retention_days_from_env() -> u64 {
         .unwrap_or(90)
 }
 
-/// Compile the base engine (default rules + optional payload secret).
+/// Compile the base engine (default rules + the installation payload-hash
+/// key — ALWAYS keyed, R9-16/F5.2).
 /// This is the ONLY source of rules for the daemon and the CLI: from here
 /// derives both the `PackManager` (which merges it with the packs, finding 7)
 /// and the snapshot the proxy receives — without a second independent
@@ -175,14 +178,13 @@ fn retention_days_from_env() -> u64 {
 /// # Errors
 ///
 /// Returns the error from loading/compiling the rules.
-fn build_base_engine() -> Result<cerberus_engine::engine::CompiledEngine, String> {
+fn build_base_engine(audit_key: &[u8]) -> Result<cerberus_engine::engine::CompiledEngine, String> {
     let rules_json = default_rules_json();
     let rules = load_rules_from_str(&rules_json).map_err(|e| format!("error loading rules: {e}"))?;
-    let mut builder = EngineBuilder::new(&rules);
-    if let Some(secret) = payload_secret_from_env() {
-        builder = builder.with_payload_secret(secret);
-    }
-    builder.build().map_err(|e| format!("engine build error: {e}"))
+    EngineBuilder::new(&rules)
+        .with_payload_secret(audit_key.to_vec())
+        .build()
+        .map_err(|e| format!("engine build error: {e}"))
 }
 
 /// Open a `PackManager` over `packs_dir()` with the base engine — the SAME
@@ -191,8 +193,8 @@ fn build_base_engine() -> Result<cerberus_engine::engine::CompiledEngine, String
 /// # Errors
 ///
 /// Returns an error if the packs directory cannot be created or compilation fails.
-fn open_packs_manager() -> Result<PackManager, String> {
-    let engine = build_base_engine()?;
+fn open_packs_manager(audit_key: &[u8]) -> Result<PackManager, String> {
+    let engine = build_base_engine(audit_key)?;
     let license = load_license(Some(&license_path()));
     let trust_root =
         PackTrustRoot::from_optional_key(env_nonempty("CERBERUS_PACK_TRUST_ROOT")).gated_by_pro(license.is_pro());
@@ -305,9 +307,16 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
         return Err("Cerberus is already running. Use 'cerberus stop' first.".to_string());
     }
 
+    // R9-16 (F5.2): resolve the per-installation audit-hash key ONCE per
+    // boot and thread it through EVERY engine construction + the API context,
+    // so all secret-material hashes (event hashes, entropy, break-glass
+    // reasons) share one keyed, domain-separated scheme.
+    let (audit_key, key_source) = resolve_audit_key();
+    println!("audit hashing: keyed HMAC-SHA256 (key source: {})", key_source.label());
+
     // UNIQUE base engine (finding 7): used by PackManager and, after the
     // initial pack load, by the snapshot the proxy receives.
-    let base_engine = build_base_engine()?;
+    let base_engine = build_base_engine(&audit_key)?;
 
     // A) Real config: base = config.yaml (without losing fields) + overrides.
     let file_cfg = load_proxy_config();
@@ -384,9 +393,7 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     if !trust_root.is_enabled() {
         tracing::warn!("packs: no effective trust root (Free tier or root missing) — base engine, zero packs");
     }
-    let engine_for_proxy = packs_manager
-        .snapshot_engine(payload_secret_from_env().as_deref())
-        .await?;
+    let engine_for_proxy = packs_manager.snapshot_engine(Some(&audit_key)).await?;
     let installed = packs_manager.list_packs().await.len();
     println!(
         "packs: manager ready at {} ({} packs installed; snapshot passes to the proxy)",
@@ -406,12 +413,8 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
         .policy
         .validate()
         .map_err(|e| format!("invalid policy in {}: {e}", config_file().display()))?;
-    let boot_engine = cerberus_proxy::detection_policy::build_engine(
-        &base_rules,
-        &config.policy,
-        payload_secret_from_env().as_deref(),
-    )
-    .map_err(|e| format!("policy engine build error: {e}"))?;
+    let boot_engine = cerberus_proxy::detection_policy::build_engine(&base_rules, &config.policy, Some(&audit_key))
+        .map_err(|e| format!("policy engine build error: {e}"))?;
     println!(
         "policy: {} categories, {} overrides, {} custom rules, {} allowlist entries → engine with {} rules ({} base)",
         config.policy.categories.len(),
@@ -426,11 +429,8 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     // worker writes the snapshot after install/rollback and the control plane
     // republishes after each policy change.
     let live_engine: Arc<RwLock<Arc<CompiledEngine>>> = Arc::new(std::sync::RwLock::new(Arc::new(boot_engine)));
-    let engine_control = cerberus_proxy::detection_policy::EngineControl::new(
-        live_engine.clone(),
-        base_rules,
-        payload_secret_from_env(),
-    );
+    let engine_control =
+        cerberus_proxy::detection_policy::EngineControl::new(live_engine.clone(), base_rules, Some(audit_key.clone()));
 
     // Rule packs worker (async) — runs install/rollback/list against the
     // PackManager and, after each mutation, replaces the BASE rules and
@@ -441,9 +441,12 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     let packs_worker_manager = pack_worker_manager.clone();
     let engine_control_worker = engine_control.clone();
     let policy_source = shared_config.clone();
+    let audit_key_for_worker = audit_key.clone();
     tokio::spawn(async move {
         use cerberus_proxy::api::PackCommand;
-        let payload_secret = payload_secret_from_env();
+        // The SAME installation key follows hot-reloads (R9-16/F5.2): pack
+        // snapshots are compiled keyed exactly like the boot engine.
+        let payload_secret = Some(audit_key_for_worker.clone());
         while let Some(cmd) = pack_rx.recv().await {
             // Each arm produces (reply, Result) and the send happens once.
             let outcome: (
@@ -526,7 +529,8 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
         api: ApiContext::with_store_opt(shared_config, store_opt.clone())
             .with_config_path(config_file())
             .with_pack_worker(pack_tx)
-            .with_engine(engine_control),
+            .with_engine(engine_control)
+            .with_audit_hash_key(audit_key.clone()),
         last_upstream: Arc::new(std::sync::Mutex::new(None)),
     });
 
@@ -669,7 +673,8 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
 pub(crate) async fn pack_install(pack_file: &str) -> Result<String, String> {
     let license = load_license(Some(&license_path()));
     require_pro_for_pack_ops(&license).map_err(|e| format!("pack install aborted: {e}"))?;
-    let packs = open_packs_manager()?;
+    let (audit_key, _) = resolve_audit_key();
+    let packs = open_packs_manager(&audit_key)?;
     if let Some(root) = env_nonempty("CERBERUS_PACK_TRUST_ROOT") {
         // Rehydrate what is installed (engine history) before adding the new one.
         packs.load_installed_from_dir(&root).await?;
@@ -689,7 +694,8 @@ pub(crate) async fn pack_install(pack_file: &str) -> Result<String, String> {
 ///
 /// Returns an error only if the directory cannot be read.
 pub(crate) fn pack_list() -> Result<String, String> {
-    let _ = open_packs_manager()?; // ensures the packs layout (or fails fast).
+    let (audit_key, _) = resolve_audit_key();
+    let _ = open_packs_manager(&audit_key)?; // ensures the packs layout (or fails fast).
     let dir = packs_dir();
     let mut entries = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|e| format!("cannot read packs dir {}: {e}", dir.display()))? {
@@ -780,7 +786,8 @@ pub(crate) async fn pack_rollback() -> Result<String, String> {
     // benefit also in local mode without daemon (open-core).
     let license = load_license(Some(&license_path()));
     require_pro_for_pack_ops(&license).map_err(|e| format!("pack rollback aborted: {e}"))?;
-    let packs = open_packs_manager()?;
+    let (audit_key, _) = resolve_audit_key();
+    let packs = open_packs_manager(&audit_key)?;
     if let Some(root) = env_nonempty("CERBERUS_PACK_TRUST_ROOT") {
         packs.load_installed_from_dir(&root).await?;
     }
@@ -985,6 +992,34 @@ mod tests {
     #[test]
     fn process_alive_for_current_process() {
         assert!(process_alive(std::process::id()));
+    }
+
+    // ─── R9-16 (F5.2): the product engine is ALWAYS keyed ──────────────────
+
+    #[test]
+    fn product_engine_wiring_hashes_every_finding_with_hmac() {
+        // The daemon's single engine-construction path must never emit an
+        // unsalted hash: build_base_engine takes the installation key and
+        // wires it unconditionally.
+        let engine = build_base_engine(b"wiring-test-key").expect("build base engine");
+        let out = engine.scan("my openai api key is sk-abcDEFghijklmnopqrstuvwxyz1234");
+        assert!(!out.findings.is_empty(), "the probe text must produce findings");
+        for finding in &out.findings {
+            assert!(
+                finding.hashed_value.starts_with("hmac:"),
+                "product wiring must key EVERY hash, got {}",
+                finding.hashed_value
+            );
+        }
+        // Deterministic under the same key, divergent under another.
+        let other = build_base_engine(b"other-key").expect("build other engine");
+        let a = out.findings[0].hashed_value.clone();
+        let b = other
+            .scan("my openai api key is sk-abcDEFghijklmnopqrstuvwxyz1234")
+            .findings[0]
+            .hashed_value
+            .clone();
+        assert_ne!(a, b, "different installation keys must diverge");
     }
 
     #[test]

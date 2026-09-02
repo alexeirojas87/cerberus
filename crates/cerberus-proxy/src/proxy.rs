@@ -115,13 +115,38 @@ impl BypassKind {
         }
     }
 
-    /// Truncated+hashed reason for the audit event (`bypass-hash:<sha256>`).
-    fn audit_hash(&self) -> String {
+    /// Truncated+hashed reason for the audit event (`bypass-hash:<hex>`).
+    ///
+    /// R9-16 (F5.2): when the installation audit key is wired (product
+    /// default), the hash is keyed HMAC-SHA256 over the break-glass domain;
+    /// the unkeyed SHA-256 branch is the test-context fallback only.
+    fn audit_hash(&self, audit_key: Option<&[u8]>) -> String {
         match self {
-            Self::Legacy(reason) => cerberus_engine::engine::hash_value(truncate_bypass_reason(reason)),
+            Self::Legacy(reason) => {
+                let truncated = truncate_bypass_reason(reason);
+                audit_key.map_or_else(
+                    || cerberus_engine::engine::hash_value(truncated),
+                    |key| {
+                        cerberus_engine::engine::domain_hash(
+                            key,
+                            cerberus_engine::engine::BREAK_GLASS_HASH_DOMAIN,
+                            truncated.as_bytes(),
+                        )
+                    },
+                )
+            }
             Self::OneShot { reason_hash } => reason_hash.clone(),
         }
     }
+}
+
+/// Strip a well-known hash-format prefix (`hmac:`, `sha256:`), returning the
+/// bare hex for the `bypass-hash:<hex>` audit artifact.
+fn strip_hash_prefix(digest: &str) -> &str {
+    digest
+        .strip_prefix("hmac:")
+        .or_else(|| digest.strip_prefix("sha256:"))
+        .unwrap_or(digest)
 }
 const FEEDBACK_HEADER: &str = "x-cerberus-feedback";
 
@@ -870,16 +895,17 @@ pub(crate) async fn proxy_handler(
             // `flags` only carries the "bypass" marker (plus "break-glass"
             // when the bypass came from the F2.3 one-shot primitive); the
             // reason (truncated to 200 bytes) is stored hashed in
-            // `hashed_values` as `bypass-hash:<sha256hex>`.
+            // `hashed_values` as `bypass-hash:<hex>` — keyed HMAC-SHA256
+            // (R9-16/F5.2) when the installation key is wired.
             event.flags.push("bypass".to_string());
             if let Some(BypassKind::OneShot { .. }) = &bypass {
                 event.flags.push(BREAK_GLASS_FLAG.to_string());
             }
             if let Some(kind) = &bypass {
-                let digest = kind.audit_hash();
+                let digest = kind.audit_hash(ctx.api.audit_hash_key());
                 event
                     .hashed_values
-                    .push(format!("bypass-hash:{}", digest.trim_start_matches("sha256:")));
+                    .push(format!("bypass-hash:{}", strip_hash_prefix(&digest)));
             }
         }
         // Outcome honesty (fix P2-2): a fail-open forward is never recorded
@@ -1246,6 +1272,32 @@ async fn record_outcome_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── R9-16 (F5.2): the bypass audit hash is keyed by product default ───
+
+    #[test]
+    fn legacy_bypass_audit_hash_is_keyed_when_the_installation_key_is_wired() {
+        let kind = BypassKind::Legacy("operator reason".to_string());
+        let keyed = kind.audit_hash(Some(b"installation-key"));
+        assert!(keyed.starts_with("hmac:"), "keyed digest format: {keyed:?}");
+        let unkeyed = kind.audit_hash(None);
+        assert!(unkeyed.starts_with("sha256:"), "test fallback format: {unkeyed:?}");
+        assert_ne!(keyed, unkeyed, "keying must change the digest");
+        // The audit artifact carries the bare hex under `bypass-hash:`.
+        assert_eq!(strip_hash_prefix(&keyed), keyed.trim_start_matches("hmac:"));
+        assert!(
+            !strip_hash_prefix(&keyed).contains(':'),
+            "bare hex, got {}",
+            strip_hash_prefix(&keyed)
+        );
+    }
+
+    #[test]
+    fn strip_hash_prefix_handles_both_schemes() {
+        assert_eq!(strip_hash_prefix("hmac:abc123"), "abc123");
+        assert_eq!(strip_hash_prefix("sha256:abc123"), "abc123");
+        assert_eq!(strip_hash_prefix("abc123"), "abc123");
+    }
 
     #[test]
     fn https_connector_is_wired() {

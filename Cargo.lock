@@ -359,6 +359,7 @@ dependencies = [
  "clap",
  "dirs",
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "hex",
  "notify-rust",
  "reqwest",
@@ -368,7 +369,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

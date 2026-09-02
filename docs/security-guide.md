@@ -23,7 +23,7 @@ to the provider.
 
 ### 1. Zero Leak of Secrets
 - **Never persisted:** Raw secret values are never written to disk or logs
-- **Hashed only:** All stored values are SHA-256 hashed
+- **Hashed only:** All stored values are keyed HMAC-SHA256 hashed (per-installation key; R9-16 remediation — unsalted SHA-256 was recoverable offline for low-entropy values)
 - **Not logged:** Secret values excluded from all log output
 - **Not in telemetry:** Telemetry payload (if enabled) contains only anonymous
   metrics — never secrets, PII, findings, flags, or hashes

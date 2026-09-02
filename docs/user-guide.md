@@ -56,7 +56,7 @@ export CODEX_BASE_URL=http://127.0.0.1:8787
 ### 4. Test it works
 ```bash
 cerberus test "my api key is sk-abcDEFghijklmnopqrstuvwxyz1234"
-# → Detects the secret and reports it (flag + SHA-256 hash, never the raw value)
+# → Detects the secret and reports it (flag + keyed HMAC-SHA256 hash, never the raw value)
 ```
 
 ### 5. (Optional) Enable MITM interception

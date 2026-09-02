@@ -723,11 +723,21 @@ impl CompiledEngine {
     }
 
     /// Hash a payload value, using HMAC-SHA256 when a secret is configured.
+    ///
+    /// R9-16 (F5.2): every PRODUCT wiring passes a per-installation key, so
+    /// the keyed branch is the product default. The unkeyed branch remains a
+    /// library affordance for unit-test determinism only; the daemon, CLI and
+    /// all engine snapshots are always built keyed (see `cerberus/src/audit_key.rs`).
+    ///
+    /// The HMAC input is domain-separated (`AUDIT_EVENT_HASH_DOMAIN`) so the
+    /// same value hashed for events can never be correlated with a hash
+    /// produced under another domain (break-glass, allowlist).
     #[must_use]
     fn payload_hash(&self, value: &str) -> String {
-        self.payload_secret
-            .as_ref()
-            .map_or_else(|| hash_value(value), |secret| hmac_sha256_hex(secret, value.as_bytes()))
+        self.payload_secret.as_ref().map_or_else(
+            || hash_value(value),
+            |secret| domain_hash(secret, AUDIT_EVENT_HASH_DOMAIN, value.as_bytes()),
+        )
     }
 
     /// Number of rules loaded.
@@ -1208,6 +1218,32 @@ pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 #[must_use]
 pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
     format!("hmac:{}", hex::encode(&hmac_sha256(key, message)))
+}
+
+/// Domain separation prefix for audit EVENT hashes (findings' `hashed_values`).
+///
+/// R9-16 (F5.2): the versioned domain string is prepended (NUL-delimited) to
+/// every HMAC input, so hashes from different subsystems can never be
+/// correlated or transplanted between domains even under the same
+/// installation key. The `v1` suffix is the hash-format version.
+pub const AUDIT_EVENT_HASH_DOMAIN: &str = "cerberus:audit-event:v1";
+
+/// Domain separation prefix for break-glass reason hashes (`bypass-hash:`).
+/// Deliberately distinct from [`AUDIT_EVENT_HASH_DOMAIN`] and from the
+/// allowlist fingerprint domain that F6.3 will introduce.
+pub const BREAK_GLASS_HASH_DOMAIN: &str = "cerberus:break-glass:v1";
+
+/// Domain-separated keyed hash for audit material (R9-16, F5.2).
+///
+/// Computes `HMAC-SHA256(key, domain || 0x00 || message)` and returns it with
+/// the `hmac:` prefix. The NUL delimiter prevents concatenation ambiguities.
+#[must_use]
+pub fn domain_hash(key: &[u8], domain: &str, message: &[u8]) -> String {
+    let mut input = Vec::with_capacity(domain.len() + 1 + message.len());
+    input.extend_from_slice(domain.as_bytes());
+    input.push(0);
+    input.extend_from_slice(message);
+    hmac_sha256_hex(key, &input)
 }
 
 #[cfg(test)]
@@ -1844,10 +1880,104 @@ mod tests {
 
     #[test]
     fn payload_hash_plain_sha256_default() {
+        // LIBRARY affordance only: the engine permits an unkeyed builder so
+        // unit harnesses get deterministic digests. Every PRODUCT wiring
+        // (daemon, CLI, snapshots) always passes the installation key —
+        // see `cerberus/src/audit_key.rs` and the daemon wiring test.
         let rules = vec![make_rule("t", &["secret"], Action::Warn)];
         let engine = EngineBuilder::new(&rules).build().unwrap();
         let out = engine.scan("the secret value here");
         assert!(out.findings[0].hashed_value.starts_with("sha256:"));
+    }
+
+    // ─── R9-16 (F5.2): keyed default semantics ─────────────────────────────
+
+    #[test]
+    fn keyed_hash_is_deterministic_for_the_same_key() {
+        let rules = vec![make_rule("t", &["secret"], Action::Warn)];
+        let engine = EngineBuilder::new(&rules)
+            .with_payload_secret(b"installation-key".to_vec())
+            .build()
+            .unwrap();
+        let a = engine.scan("the secret value here").findings[0].hashed_value.clone();
+        let b = EngineBuilder::new(&rules)
+            .with_payload_secret(b"installation-key".to_vec())
+            .build()
+            .unwrap()
+            .scan("the secret value here")
+            .findings[0]
+            .hashed_value
+            .clone();
+        assert_eq!(a, b, "same key + same value → identical hash");
+        assert!(a.starts_with("hmac:"), "keyed hash format: {a:?}");
+    }
+
+    #[test]
+    fn keyed_hash_differs_across_installation_keys() {
+        let rules = vec![make_rule("t", &["secret"], Action::Warn)];
+        let value = "the secret value here";
+        let a = EngineBuilder::new(&rules)
+            .with_payload_secret(b"key-a".to_vec())
+            .build()
+            .unwrap()
+            .scan(value)
+            .findings[0]
+            .hashed_value
+            .clone();
+        let b = EngineBuilder::new(&rules)
+            .with_payload_secret(b"key-b".to_vec())
+            .build()
+            .unwrap()
+            .scan(value)
+            .findings[0]
+            .hashed_value
+            .clone();
+        assert_ne!(a, b, "a different installation key must yield a different hash");
+        // And the keyed digest must not equal the plain SHA-256 (the R9-16
+        // offline-recovery vector).
+        assert_ne!(a, hash_value(value));
+    }
+
+    #[test]
+    fn domain_hash_separates_event_and_break_glass_domains() {
+        let key = b"installation-key".to_vec();
+        let message = b"same-value";
+        let event = domain_hash(&key, AUDIT_EVENT_HASH_DOMAIN, message);
+        let bypass = domain_hash(&key, BREAK_GLASS_HASH_DOMAIN, message);
+        let raw_hmac = hmac_sha256_hex(&key, message);
+        assert_ne!(event, bypass, "distinct domains must produce distinct digests");
+        assert_ne!(event, raw_hmac, "domain prefixes must change the digest");
+        assert!(event.starts_with("hmac:"));
+        assert!(bypass.starts_with("hmac:"));
+        // Determinism of the domain construction itself.
+        assert_eq!(event, domain_hash(&key, AUDIT_EVENT_HASH_DOMAIN, message));
+        // NUL delimiter prevents concatenation ambiguity: ("ab", "c") and
+        // ("a", "bc") must differ.
+        assert_ne!(
+            domain_hash(&key, "ab", b"c"),
+            domain_hash(&key, "a", b"bc"),
+            "domain/message boundary must be unambiguous"
+        );
+    }
+
+    #[test]
+    fn entropy_and_pattern_hashes_agree_under_one_key() {
+        // The SAME secret value found by a pattern rule and by the entropy
+        // analyzer must produce the SAME domain-separated hash (one scheme
+        // across the whole engine; F5.2 "normalización estable").
+        let rules = vec![make_rule("t", &["password"], Action::Warn)];
+        let engine = EngineBuilder::new(&rules)
+            .with_payload_secret(b"installation-key".to_vec())
+            .build()
+            .unwrap();
+        let text = "the password is hunter2hunter2";
+        for finding in engine.scan(text).findings {
+            assert!(
+                finding.hashed_value.starts_with("hmac:"),
+                "every finding hash is keyed, got {}",
+                finding.hashed_value
+            );
+        }
     }
 
     /// The optimized single-pass matcher must agree with the original

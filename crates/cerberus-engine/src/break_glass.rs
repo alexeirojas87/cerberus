@@ -18,10 +18,12 @@
 //!   token stays valid for its intended scope.
 //! - **Audited**: the data-plane redemption flows into the existing bypass
 //!   audit path (`action_taken = "bypass"`, flags `["bypass", "break-glass"]`,
-//!   `bypass-hash:<sha256>`); the header bypass and the (future) CLI share
+//!   `bypass-hash:<hmac>`); the header bypass and the (future) CLI share
 //!   the same audit trail.
-//! - **Never stores the raw reason**: only `sha256` of the truncated reason
-//!   is kept (the reason may itself contain secrets).
+//! - **Never stores the raw reason**: only a keyed HMAC-SHA256 (R9-16/F5.2,
+//!   domain `cerberus:break-glass:v1`) of the truncated reason is kept —
+//!   unkeyed `sha256:` only in unkeyed test ledgers (the reason may itself
+//!   contain secrets).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -98,7 +100,8 @@ pub struct BreakGlassToken {
     pub nonce: String,
     /// Explicit scope.
     pub scope: BreakGlassScope,
-    /// SHA-256 of the truncated reason — the raw reason is NEVER stored.
+    /// Keyed HMAC-SHA256 (`hmac:<hex>`, R9-16/F5.2) of the truncated reason
+    /// — the raw reason is NEVER stored. Unkeyed `sha256:` in test ledgers.
     pub reason_hash: String,
     /// TTL in seconds (informational; redemption uses the absolute deadline).
     pub ttl_secs: u64,
@@ -110,7 +113,7 @@ pub struct BreakGlassToken {
 /// and write the audit event. Contains no raw secret and no raw reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BreakGlassGrant {
-    /// SHA-256 of the truncated reason (audit trail).
+    /// Keyed HMAC-SHA256 of the truncated reason (audit trail; R9-16/F5.2).
     pub reason_hash: String,
     /// Scope the token was issued for.
     pub scope: BreakGlassScope,
@@ -157,6 +160,11 @@ struct PendingToken {
 pub struct BreakGlassLedger {
     inner: Mutex<HashMap<String, PendingToken>>,
     default_ttl: Duration,
+    /// Installation HMAC key (R9-16, F5.2). When set, issued reason hashes
+    /// are keyed + domain-separated (`BREAK_GLASS_HASH_DOMAIN`); the unkeyed
+    /// `sha256:` fallback is a library affordance for unit tests only — every
+    /// product wiring keys the ledger (`ApiContext::with_audit_hash_key`).
+    hash_key: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for BreakGlassLedger {
@@ -189,18 +197,35 @@ impl BreakGlassLedger {
         Self {
             inner: Mutex::new(HashMap::new()),
             default_ttl,
+            hash_key: None,
         }
+    }
+
+    /// Key the reason hashes with the per-installation HMAC key (R9-16/F5.2).
+    ///
+    /// Product wiring MUST call this before issuing tokens; issued reason
+    /// hashes become `hmac:<hex>` over `BREAK_GLASS_HASH_DOMAIN || reason`.
+    #[must_use]
+    pub fn with_hash_key(mut self, key: Vec<u8>) -> Self {
+        self.hash_key = Some(key);
+        self
     }
 
     /// Issue a one-shot token.
     ///
-    /// `reason` is truncated to 200 bytes and stored ONLY as its SHA-256.
-    /// `ttl` is clamped to `MAX_TTL` at most (short-lived by design); tests
-    /// may use sub-second TTLs.
+    /// `reason` is truncated to 200 bytes and stored ONLY as its hash: keyed
+    /// HMAC-SHA256 (domain-separated) when the ledger is keyed — the product
+    /// default — or plain SHA-256 in unkeyed test ledgers. The raw reason is
+    /// NEVER stored. `ttl` is clamped to `MAX_TTL` at most (short-lived by
+    /// design); tests may use sub-second TTLs.
     #[must_use]
     pub fn issue(&self, scope: BreakGlassScope, reason: &str, ttl: Option<Duration>) -> BreakGlassToken {
         let ttl = ttl.unwrap_or(self.default_ttl).min(MAX_TTL);
-        let reason_hash = hash_value(truncate_reason(reason));
+        let truncated = truncate_reason(reason);
+        let reason_hash = self.hash_key.as_ref().map_or_else(
+            || hash_value(truncated),
+            |key| crate::engine::domain_hash(key, crate::engine::BREAK_GLASS_HASH_DOMAIN, truncated.as_bytes()),
+        );
         let expires_at = Instant::now() + ttl;
         let expires_at_nanos =
             SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos()) + ttl.as_nanos();
@@ -412,5 +437,53 @@ mod tests {
         let ledger = BreakGlassLedger::new();
         let token = ledger.issue(BreakGlassScope::global(), "long", Some(Duration::from_secs(999_999)));
         assert_eq!(token.ttl_secs, MAX_TTL.as_secs(), "TTL clamped (short-lived)");
+    }
+
+    // ─── R9-16 (F5.2): keyed reason hashes by product default ───────────────
+
+    #[test]
+    fn keyed_ledger_issues_domain_separated_hmac_reason_hashes() {
+        let ledger = BreakGlassLedger::new().with_hash_key(b"installation-key".to_vec());
+        let token = ledger.issue(BreakGlassScope::global(), "emergency send", None);
+        let hash = token.reason_hash.clone();
+        assert!(
+            hash.starts_with("hmac:"),
+            "keyed ledger must emit hmac: reason hashes, got {hash:?}"
+        );
+
+        // Determinism: same key + same reason → identical hash.
+        let again = ledger.issue(BreakGlassScope::for_provider("openai"), "emergency send", None);
+        assert_eq!(token.reason_hash, again.reason_hash, "same key + reason → same hash");
+
+        // Keyed ≠ unkeyed: the keyed digest must NOT equal the plain SHA-256
+        // (offline dictionary recovery of low-entropy reasons is the R9-16 bug).
+        assert_ne!(token.reason_hash, hash_value("emergency send"));
+    }
+
+    #[test]
+    fn different_installation_keys_yield_different_hashes() {
+        let reason = "emergency send";
+        let a = BreakGlassLedger::new()
+            .with_hash_key(b"key-a".to_vec())
+            .issue(BreakGlassScope::global(), reason, None);
+        let b = BreakGlassLedger::new()
+            .with_hash_key(b"key-b".to_vec())
+            .issue(BreakGlassScope::global(), reason, None);
+        assert_ne!(a.reason_hash, b.reason_hash, "hash must diverge across keys");
+    }
+
+    #[test]
+    fn keyed_reason_hash_domain_differs_from_event_hash_domain() {
+        // F5.2: break-glass hashes use their own domain — the SAME value
+        // under the SAME key must produce different digests than an audit
+        // event hash (no cross-domain correlation).
+        let key = b"installation-key".to_vec();
+        let ledger = BreakGlassLedger::new().with_hash_key(key.clone());
+        let token = ledger.issue(BreakGlassScope::global(), "same-value", None);
+        let event_hash = crate::engine::domain_hash(&key, crate::engine::AUDIT_EVENT_HASH_DOMAIN, b"same-value");
+        assert_ne!(
+            token.reason_hash, event_hash,
+            "break-glass and event domains must differ"
+        );
     }
 }

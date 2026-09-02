@@ -890,6 +890,66 @@ mod tests {
         .expect("insert row");
     }
 
+    /// R9-16 (F5.2) migration semantics: legacy events hashed with the old
+    /// unsalted `sha256:` scheme and new events hashed with the keyed
+    /// `hmac:` scheme COEXIST in one store. Legacy rows are kept (audit
+    /// history is never destroyed) but are NOT re-hashed — the raw values
+    /// were discarded by design, so re-keying is impossible; the documented
+    /// consequence is that cross-scheme dedup correlation is broken at the
+    /// migration boundary while the store remains readable and appendable.
+    #[test]
+    fn legacy_unsalted_rows_coexist_with_keyed_rows() {
+        let tmp = temp_db();
+        let path = tmp.path().join("cerberus.db");
+        let store = AuditStore::open(&path).expect("open store");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // A legacy event (pre-F5.2, unsalted sha256 scheme) and a new event
+        // (post-F5.2, keyed HMAC scheme) recorded through the normal writer.
+        let mut legacy = make_event("evt-legacy-1", "redact", 1_700_000_000);
+        legacy.hashed_values = vec!["sha256:5f2b3a9clegacy".to_string()];
+        let mut keyed = make_event("evt-keyed-1", "redact", 1_700_000_001);
+        keyed.hashed_values = vec!["hmac:9d1c4e77keyed".to_string()];
+        rt.block_on(store.write_event_async(legacy));
+        rt.block_on(store.write_event_async(keyed));
+        rt.block_on(store.flush()).expect("durable flush");
+
+        let events = rt.block_on(store.recent_events(10));
+        let legacy_row = events
+            .iter()
+            .find(|e| e.id == "evt-legacy-1")
+            .expect("legacy row survives");
+        let keyed_row = events
+            .iter()
+            .find(|e| e.id == "evt-keyed-1")
+            .expect("keyed row present");
+        assert!(
+            legacy_row.hashed_values.iter().all(|h| h.starts_with("sha256:")),
+            "legacy row keeps its original scheme: {:?}",
+            legacy_row.hashed_values
+        );
+        assert!(
+            keyed_row.hashed_values.iter().all(|h| h.starts_with("hmac:")),
+            "new row carries the keyed scheme: {:?}",
+            keyed_row.hashed_values
+        );
+
+        // Both schemes persist on disk and remain queryable after reopen.
+        drop(store);
+        let conn = Connection::open(&path).expect("reopen db");
+        let raw_legacy: String = conn
+            .query_row(
+                "SELECT hashed_values FROM audit_events WHERE id = 'evt-legacy-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("legacy row on disk");
+        assert!(
+            raw_legacy.contains("sha256:"),
+            "legacy scheme intact on disk: {raw_legacy}"
+        );
+    }
+
     #[test]
     fn store_round_trip() {
         let tmp = temp_db();
