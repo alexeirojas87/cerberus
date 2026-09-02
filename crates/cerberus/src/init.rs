@@ -64,9 +64,25 @@ pub(crate) fn run_init(config_dir: &str) -> Result<String, String> {
 
     writeln!(report, "\nSummary: {configured}/{} agents configured", agents.len()).ok();
 
-    let yaml = init_config_yaml();
+    // R9-5 (F6): the DEFAULT install must not boot a closed control plane —
+    // `init` generates a strong random admin token and persists it in
+    // config.yaml (file written 0600) so the default init → start flow is
+    // authenticated AND usable. The token is NOT printed to stdout/logs
+    // (bootstrap channel = the 0600 config file; paste it into the
+    // dashboard login card from there).
+    let admin_token = generate_admin_token();
+    let yaml = init_config_yaml(&admin_token);
     let config_path = cfg_path.join("config.yaml");
-    std::fs::write(&config_path, yaml).map_err(|e| format!("cannot write config: {e}"))?;
+    write_config_0600(&config_path, &yaml).map_err(|e| format!("cannot write config: {e}"))?;
+    writeln!(
+        report,
+        "\n🔐 Control plane: a random admin token was generated and written to {} (mode 0600, R9-5). \
+         View it with `grep admin_token {}` and paste it into the dashboard login card; it is never \
+         served by the API or printed here. Without it every data /api/* route responds 401.",
+        config_path.display(),
+        config_path.display()
+    )
+    .ok();
 
     if !agents.iter().any(|a| a.configured) {
         report.push_str("\n💡 Tip: manually set your agent's environment variable:\n");
@@ -92,9 +108,51 @@ pub(crate) fn run_init(config_dir: &str) -> Result<String, String> {
 /// openai/anthropic → `cerberus start` boots without `CERBERUS_UPSTREAM_URL`.
 /// The operator can edit `URLs`/`path_prefix` in `config.yaml` without
 /// touching code.
-#[must_use]
-const fn init_config_yaml() -> &'static str {
-    "listen: 127.0.0.1:8787\nmode: enforce\nfail_policy: closed\nupstreams:\n  anthropic:\n    url: https://api.anthropic.com\n  openai:\n    url: https://api.openai.com\n"
+///
+/// R9-5 (F6): `admin_token` is included — a fresh install boots with an
+/// AUTHENTICATED control plane instead of the R9-5 open-by-default state.
+fn init_config_yaml(admin_token: &str) -> String {
+    format!(
+        "listen: 127.0.0.1:8787\nmode: enforce\nfail_policy: closed\nadmin_token: {admin_token}\nupstreams:\n  anthropic:\n    url: https://api.anthropic.com\n  openai:\n    url: https://api.openai.com\n"
+    )
+}
+
+/// Generate a strong random admin token: 32 CSPRNG bytes, 64 lowercase hex
+/// (≥ [`cerberus_proxy::api::ADMIN_TOKEN_MIN_BYTES`], comfortably above the
+/// non-loopback strong-token requirement).
+fn generate_admin_token() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("CSPRNG unavailable");
+    let mut out = String::with_capacity(64);
+    for b in bytes {
+        out.push(HEX[usize::from(b >> 4)] as char);
+        out.push(HEX[usize::from(b & 0x0f)] as char);
+    }
+    out
+}
+
+/// Write config.yaml with restrictive permissions (it carries the admin
+/// token): 0600 on unix at creation (no umask window — same pattern as the
+/// F5 F-1 audit-key fix). Every error is handled (init fails loudly instead
+/// of leaving a world-readable credential file).
+fn write_config_0600(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(content.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content)
+    }
 }
 
 /// Detect installed agents on the system.
@@ -194,7 +252,8 @@ pub(crate) fn scan_text(text: &str) -> String {
     // (consistent with the daemon's audit hashes), else an ephemeral
     // per-process CSPRNG key. NEVER unkeyed; the read-only resolution never
     // writes the key file from a diagnostic command.
-    let (audit_key, _) = crate::audit_key::resolve_existing_or_ephemeral_key(&crate::audit_key::default_config_dir());
+    let (audit_key, key_source) =
+        crate::audit_key::resolve_existing_or_ephemeral_key(&crate::audit_key::default_config_dir());
     let engine = match EngineBuilder::new(&rules).with_payload_secret(audit_key).build() {
         Ok(e) => e,
         Err(e) => return format!("engine build error: {e}"),
@@ -213,6 +272,17 @@ pub(crate) fn scan_text(text: &str) -> String {
             report,
             "  [{:>8}] {} (pos {}..{}) hash={}",
             f.action, f.flag, f.start, f.end, f.hashed_value
+        )
+        .ok();
+    }
+    // F5 F-3: an EPHEMERAL dry-run key makes the hashes per-process and NOT
+    // comparable across runs — the output must disclose that (loudness, not
+    // silence). A normal boot (key file present) never reaches this state.
+    if matches!(key_source, crate::audit_key::KeySource::Ephemeral) {
+        writeln!(
+            report,
+            "\n⚠ note: no persisted audit key found — these hashes use an EPHEMERAL per-process \
+             key and are not comparable across runs (dry-run display only)"
         )
         .ok();
     }
@@ -342,8 +412,15 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos())
         ));
-        let yaml = init_config_yaml();
-        let parsed = cerberus_proxy::config::ProxyConfig::parse(yaml).expect("default yaml parses");
+        // R9-5 (F6): the init YAML carries a strong admin token.
+        let token = generate_admin_token();
+        assert!(
+            token.len() >= cerberus_proxy::api::ADMIN_TOKEN_MIN_BYTES,
+            "strong token"
+        );
+        assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+        let yaml = init_config_yaml(&token);
+        let parsed = cerberus_proxy::config::ProxyConfig::parse(&yaml).expect("default yaml parses");
         assert!(parsed.upstreams.contains_key("openai"), "openai default required");
         assert!(parsed.upstreams.contains_key("anthropic"), "anthropic default required");
         assert_eq!(

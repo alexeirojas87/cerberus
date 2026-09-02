@@ -259,6 +259,12 @@ pub async fn spawn_proxy(
     // non-loopback interface; we require a strong admin token (≥24 bytes) there.
     // The validation happens BEFORE the bind, so startup fails cleanly.
     check_listen_security(&listen, &ctx)?;
+    // R9-5/F6.1: install the anti-rebinding Host/Origin policy (fail-closed
+    // defaults) when the product wiring has not built an explicit one.
+    {
+        let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        ctx.api.ensure_host_origin(&listen, &cfg);
+    }
     let listener = TcpListener::bind(listen).await?;
     let actual = listener.local_addr()?;
     let handle = tokio::spawn(serve_proxy(listener, ctx));
@@ -305,6 +311,11 @@ pub async fn spawn_managed_proxy(
     ctx: Arc<ProxyContext>,
 ) -> Result<(SocketAddr, ManagedProxyHandle), Box<dyn std::error::Error + Send + Sync>> {
     check_listen_security(&listen, &ctx)?;
+    // R9-5/F6.1: same default policy install as `spawn_proxy`.
+    {
+        let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        ctx.api.ensure_host_origin(&listen, &cfg);
+    }
     let listener = TcpListener::bind(listen).await?;
     let actual = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -601,15 +612,21 @@ pub(crate) async fn proxy_handler(
         }
     };
 
-    // Audited break-glass: the `X-Cerberus-Bypass` header is only honored when
-    // the control plane is protected AND the request carries the valid admin
-    // token **via `X-Cerberus-Admin-Token`** (fix review v4 #2). Auth via
+    // Audited break-glass: the `X-Cerberus-Bypass` header is ONLY honored when
+    // the request carries the valid admin token **via `X-Cerberus-Admin-Token`**
+    // (fix review v4 #2, extended to ALL modes by R9-5/F6.2). Auth via
     // `Authorization: Bearer` is valid for `/api/*`, but on the DATA PLANE
     // we require exclusively the own header, to avoid risking substituting
     // the provider key (which travels in `Authorization`) with the admin
-    // token. With a configured token and missing/invalid auth the header is
-    // IGNORED (it does not block) and a warn is logged. Without a configured
-    // token (dev mode) the bypass stays open (P0).
+    // token.
+    //
+    // R9-5/F6.2 — FAIL-CLOSED EVERYWHERE: with a configured token and
+    // missing/invalid auth the header is IGNORED (it does not block) and a
+    // warn is logged. WITHOUT a configured token (dev mode) the bypass is
+    // now REFUSED too — the old "dev mode: bypass open" was the F4-verified
+    // injection vector (an unauthenticated `X-Cerberus-Bypass` smuggled a
+    // secret past the scanner); there is no valid credential to check, so
+    // there is no bypass, and the request proceeds to the normal scan.
     //
     // F2.3 (R9-8): the header carries either a plain reason (legacy audited
     // bypass, unchanged) or `break-glass:<nonce>` — the one-shot primitive
@@ -641,8 +658,17 @@ pub(crate) async fn proxy_handler(
         present.and_then(|raw| {
             let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
             match api::expected_admin_token(&cfg) {
-                // Dev mode: no token configured, bypass open.
-                None => {}
+                // R9-5/F6.2: NO token configured (dev mode) → the bypass is
+                // REFUSED. There is no valid credential to authenticate it,
+                // and an unauthenticated bypass is the F4 injection vector.
+                None => {
+                    tracing::warn!(
+                        "X-Cerberus-Bypass refused: no admin token is configured, so the \
+                         data-plane bypass cannot be authenticated (fail-closed, R9-5/F6.2)"
+                    );
+                    drop(cfg);
+                    return None;
+                }
                 // Token config: the data-plane bypass is honored ONLY by the
                 // `X-Cerberus-Admin-Token` header (not by `Authorization`).
                 Some(expected) => {
@@ -732,6 +758,7 @@ pub(crate) async fn proxy_handler(
         let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
         cfg.policy.allowlist.clone()
     };
+    let audit_key_for_allowlist = ctx.api.audit_hash_key().map(std::vec::Vec::from);
     let (scan_result, multipart_scan) = if decode_failed {
         (
             ScanOutput {
@@ -746,12 +773,13 @@ pub(crate) async fn proxy_handler(
             &body_bytes,
             decoded.multipart.as_deref().unwrap_or(&[]),
             &allowlist,
+            audit_key_for_allowlist.as_deref(),
         );
         (multipart_scan_output(&scan), Some(scan))
     } else {
         let mut s = engine_snap.scan(&decoded.text);
         // Allowlist (false-positive triage) — applied in the real path (P0-5).
-        filter_with_allowlist(&allowlist, &decoded.text, &mut s);
+        filter_with_allowlist(&allowlist, audit_key_for_allowlist.as_deref(), &decoded.text, &mut s);
         (s, None)
     };
 
@@ -1060,14 +1088,31 @@ pub(crate) async fn proxy_handler(
 /// semantics on every scan view — whole-text offsets on JSON/text, and the
 /// region-relative raw value on the multipart authoritative scan (the raw
 /// value sliced from the region text, trimmed, exact match).
-fn filter_with_allowlist(allow: &[String], text: &str, scan: &mut ScanOutput) {
+///
+/// R9-7/F6.3: entries are **HMAC fingerprints** (`hmac:<hex>`, domain
+/// `cerberus:allowlist:v1`). A finding is allowed when the fingerprint of the
+/// raw candidate (sliced from the text and trimmed — the same normalization
+/// the fingerprinting applies) is present in the set. The fingerprints are
+/// resolved into a `HashSet` lazily (only when findings exist) so the hot
+/// path pays at most one HMAC per finding plus the set lookup.
+///
+/// Unkeyed context (`None` — direct library tests only; the daemon always
+/// keys via `ApiContext::with_audit_hash_key`): fingerprints cannot be
+/// evaluated, so NOTHING is filtered — fail-closed for detection (the
+/// allowlist can never silently widen what passes).
+fn filter_with_allowlist(allow: &[String], key: Option<&[u8]>, text: &str, scan: &mut ScanOutput) {
     if allow.is_empty() {
         return;
     }
+    let Some(key) = key else {
+        return; // unkeyed test context: cannot evaluate fingerprints (documented)
+    };
+    let fingerprints: std::collections::HashSet<&str> = allow.iter().map(String::as_str).collect();
     scan.findings.retain(|f| {
         if f.end <= text.len() {
             let raw = text[f.start..f.end].trim();
-            !allow.iter().any(|a| a.as_str() == raw)
+            let candidate = crate::allowlist::fingerprint(key, raw);
+            !fingerprints.contains(candidate.as_str())
         } else {
             true
         }

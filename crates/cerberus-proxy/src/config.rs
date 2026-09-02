@@ -44,15 +44,48 @@ pub struct ProxyConfig {
 
     /// Admin token for the control plane (P0). If it is a non-empty `Some`,
     /// ALL `/api/*` routes require `Authorization: Bearer <token>` or
-    /// `X-Cerberus-Admin-Token: <token>`. When it is `None` (dev mode/tests)
-    /// the control plane is left open.
+    /// `X-Cerberus-Admin-Token: <token>`.
     ///
-    /// **Security (review v4 #1):** if the proxy listens on a NON-loopback
-    /// interface (e.g. `0.0.0.0` in docker), startup FAILS if the token is
-    /// `None` or shorter than [`crate::api::ADMIN_TOKEN_MIN_BYTES`] (24) bytes.
-    /// On loopback (`127.0.0.1` / `::1`) open dev-mode is allowed.
+    /// **Dev-mode semantics (R9-5, F6 — explicit decision):** when it is
+    /// `None` or empty the control plane is **CLOSED, not open**. There is no
+    /// valid credential, so every data `/api/*` route answers **401** —
+    /// loopback included (fix-plan F6.1: "si falta token, mutation/data API
+    /// responde 401 aun en loopback"). Only the static dashboard HTML and
+    /// `/health` stay public (neither serves data). The old behavior ("When
+    /// it is `None` (dev mode/tests) the control plane is left open") was the
+    /// R9-5 vulnerability and is gone: dev usability is provided by
+    /// `cerberus init` generating a strong token into `config.yaml` and by
+    /// the `CERBERUS_ADMIN_TOKEN` env override.
+    ///
+    /// **Security (review v4 #1, unchanged):** if the proxy listens on a
+    /// NON-loopback interface (e.g. `0.0.0.0` in docker), startup FAILS if
+    /// the token is `None` or shorter than
+    /// [`crate::api::ADMIN_TOKEN_MIN_BYTES`] (24) bytes.
     #[serde(default)]
     pub admin_token: Option<String>,
+
+    /// Exact Host allowlist for the control plane (R9-5 anti-DNS-rebinding,
+    /// F6.1, config-driven per Appendix A.1). Entries are **exact**
+    /// hostnames — no wildcards, no paths (a wildcard/blank entry fails the
+    /// policy build at startup, fail-closed).
+    ///
+    /// When empty, the DEFAULT policy applies (fail-closed):
+    /// - loopback bind (default `127.0.0.1:8787`): `localhost`, `127.0.0.1`
+    ///   and `[::1]` are allowed, with or without the real port;
+    /// - non-loopback bind: **nothing** is allowed except explicitly
+    ///   configured entries — a public deployment must name its hostnames.
+    ///
+    /// Disallowed `Host` headers on `/api/*` are rejected with 403 BEFORE
+    /// authentication (a rebinding page can never reach the auth layer).
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+
+    /// Extra `Origin` allowlist for browser requests (R9-5/F6.1). Requests
+    /// that carry an `Origin` header must be same-origin with an allowed
+    /// Host (see [`Self::allowed_hosts`]) or appear here, exactly. CLI/curl
+    /// without `Origin` are unaffected (the admin token still gates them).
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 
     /// Operator detection policy (fix review v6.1): action per category,
     /// override per rule, custom rules with the MVP `Rule` shape and a
@@ -234,6 +267,8 @@ impl Default for ProxyConfig {
             health_path: default_health_path(),
             max_body_bytes: default_max_body_bytes(),
             admin_token: None,
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
             policy: crate::detection_policy::DetectionPolicy::default(),
             reversible_redaction: false,
         }
@@ -324,7 +359,13 @@ upstreams:
     fn policy_round_trips_through_the_config_yaml() {
         // Real custom rules (pattern/flag/category/severity/action/constraints)
         // + categories + overrides + allowlist, persisted in the YAML.
-        let yaml = r#"
+        // R9-7 (F6.3): the allowlist carries the HMAC FINGERPRINT of the
+        // value (`hmac:` + 64 hex, domain cerberus:allowlist:v1) — a raw
+        // value no longer parses through validate() (see the raw-rejection
+        // test below); the daemon migrates legacy raw YAML entries at boot.
+        let fp = format!("hmac:{}", "c5a2".repeat(16));
+        let yaml = format!(
+            r#"
 listen: 127.0.0.1:8787
 upstreams:
   default:
@@ -339,16 +380,17 @@ policy:
       category: internal_code
       severity: critical
       action: block
-      patterns: ['BADGE-[0-9]{4}']
+      patterns: ['BADGE-[0-9]{{4}}']
       minLength: 10
       maxLength: 32
       contextKeywords: ["badge"]
       allowedExamples: ["BADGE-0000"]
       validators: ["shannon-entropy>1.0"]
   allowlist:
-    - sk-EXAMPLE-do-not-flag
-"#;
-        let cfg = ProxyConfig::parse(yaml).unwrap();
+    - {fp}
+"#
+        );
+        let cfg = ProxyConfig::parse(&yaml).unwrap();
         assert_eq!(
             cfg.policy.categories.get(&cerberus_engine::rule::Category::Secrets),
             Some(&cerberus_engine::rule::Action::Block)
@@ -369,13 +411,25 @@ policy:
         assert_eq!(rule.context_keywords, vec!["badge".to_string()]);
         assert_eq!(rule.allowed_examples, vec!["BADGE-0000".to_string()]);
         assert_eq!(rule.validators, vec!["shannon-entropy>1.0".to_string()]);
-        assert_eq!(cfg.policy.allowlist, vec!["sk-EXAMPLE-do-not-flag".to_string()]);
+        assert_eq!(cfg.policy.allowlist, vec![fp]);
         cfg.policy.validate().expect("the policy from the YAML is valid");
 
         // …and it survives a serialization round trip (what the API persists).
         let dumped = serde_yaml::to_string(&cfg).expect("serialize config");
         let reloaded = ProxyConfig::parse(&dumped).expect("reparse");
         assert_eq!(reloaded.policy, cfg.policy);
+    }
+
+    #[test]
+    fn raw_allowlist_entry_is_rejected_by_the_store_write_gate() {
+        // R9-7: the config store (DetectionPolicy) rejects RAW values — the
+        // raw secret must never land in config.yaml / the API. Legacy raw
+        // YAMLs are migrated at daemon boot (see daemon.rs) before this
+        // validation runs.
+        let mut policy = crate::detection_policy::DetectionPolicy::empty();
+        policy.allowlist.push("sk-EXAMPLE-do-not-flag".to_string());
+        let err = policy.validate().unwrap_err();
+        assert!(err.contains("HMAC fingerprints"), "got: {err}");
     }
 
     #[test]
@@ -426,6 +480,33 @@ policy:
     fn admin_token_defaults_none() {
         let cfg = ProxyConfig::default();
         assert!(cfg.admin_token.is_none());
+        // R9-5 (F6): None means the control plane is CLOSED (401), not open.
+        // The doc contract is enforced by the api.rs auth-gate tests; here we
+        // pin the config shape itself.
+        assert!(cfg.allowed_hosts.is_empty());
+        assert!(cfg.allowed_origins.is_empty());
+    }
+
+    #[test]
+    fn host_origin_allowlist_parses_and_round_trips() {
+        // R9-5/F6.1: config-driven (A.1) exact allowlist entries.
+        let yaml = r"
+listen: 0.0.0.0:8787
+allowed_hosts:
+  - cerberus.corp.example
+allowed_origins:
+  - https://ops.corp.example
+";
+        let cfg = ProxyConfig::parse(yaml).unwrap();
+        assert_eq!(cfg.allowed_hosts, vec!["cerberus.corp.example".to_string()]);
+        assert_eq!(cfg.allowed_origins, vec!["https://ops.corp.example".to_string()]);
+
+        // …and they survive a serialization round trip (the YAML is the
+        // serialized state of the Config API).
+        let dumped = serde_yaml::to_string(&cfg).expect("dump");
+        let reloaded = ProxyConfig::parse(&dumped).expect("reparse");
+        assert_eq!(reloaded.allowed_hosts, cfg.allowed_hosts);
+        assert_eq!(reloaded.allowed_origins, cfg.allowed_origins);
     }
 
     #[test]

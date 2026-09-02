@@ -46,6 +46,11 @@ pub(crate) enum KeySource {
     File,
     /// Freshly generated (and persisted when possible) this boot.
     Generated,
+    /// Freshly generated this boot because the persisted file was CORRUPT —
+    /// repair succeeded (F5 F-2: this must be loud, it is NOT a first boot:
+    /// dedup correlation with events hashed under the previous key is lost
+    /// at this boundary).
+    Regenerated,
     /// Per-process ephemeral CSPRNG key (no filesystem available/wanted).
     Ephemeral,
 }
@@ -57,30 +62,49 @@ impl KeySource {
             Self::Env => "env override (CERBERUS_HMAC_SECRET)",
             Self::File => "persisted key file",
             Self::Generated => "generated + persisted this boot",
+            Self::Regenerated => "regenerated this boot (key file was corrupt — correlation with prior hashes lost)",
             Self::Ephemeral => "ephemeral (per-process, not persisted)",
         }
+    }
+
+    /// F5 F-3: which sources need the loud WARN in addition to the boot
+    /// label? A fresh generation, a corruption-repair regeneration and the
+    /// ephemeral fallback all change how the hashes must be interpreted
+    /// (correlation breakage / non-comparability) and must never pass as a
+    /// routine boot.
+    pub(crate) const fn requires_loud_warning(self) -> bool {
+        matches!(self, Self::Generated | Self::Regenerated | Self::Ephemeral)
     }
 }
 
 /// Resolve (or create) the installation audit key for the daemon.
 ///
 /// Precedence: env override → persisted key file → generate + persist.
-/// Only fails to persist when the filesystem refuses; even then a valid
-/// CSPRNG key is returned (with [`KeySource::Generated`] downgraded to
-/// ephemeral semantics for that boot).
+/// A CORRUPT key file (F5 F-2) is distinguished from an absent one: the
+/// regeneration is reported as [`KeySource::Regenerated`] so the boot can
+/// announce the dedup-correlation breakage loudly instead of looking like a
+/// first boot. Only fails to persist when the filesystem refuses; even then
+/// a valid CSPRNG key is returned (with [`KeySource::Generated`] downgraded
+/// to ephemeral semantics for that boot).
 pub(crate) fn resolve_or_create_key(config_dir: &Path) -> (Vec<u8>, KeySource) {
     if let Some(key) = key_from_env() {
         return (key, KeySource::Env);
     }
-    key_from_file(config_dir).map_or_else(
-        || {
-            generate_and_persist(config_dir).map_or_else(
-                || (ephemeral_key(), KeySource::Ephemeral),
-                |key| (key, KeySource::Generated),
-            )
-        },
-        |key| (key, KeySource::File),
-    )
+    match key_file_status(config_dir) {
+        KeyFileStatus::Valid(key) => (key, KeySource::File),
+        // Absent → first boot: generate + persist.
+        KeyFileStatus::Missing => generate_and_persist(config_dir).map_or_else(
+            || (ephemeral_key(), KeySource::Ephemeral),
+            |key| (key, KeySource::Generated),
+        ),
+        // Corrupt → repair by regeneration; LOUD (F5 F-2), never silent: the
+        // source label explicitly names the corruption and the correlation
+        // loss, and `requires_loud_warning` makes the daemon WARN.
+        KeyFileStatus::Corrupt => generate_and_persist(config_dir).map_or_else(
+            || (ephemeral_key(), KeySource::Ephemeral),
+            |key| (key, KeySource::Regenerated),
+        ),
+    }
 }
 
 /// Resolve the key WITHOUT side effects (CLI dry-run: `cerberus scan/test`).
@@ -111,17 +135,44 @@ fn key_from_env() -> Option<Vec<u8>> {
 
 /// Read + validate the persisted key file; `None` when absent or malformed.
 fn key_from_file(config_dir: &Path) -> Option<Vec<u8>> {
-    let raw = fs::read_to_string(config_dir.join(KEY_FILE_NAME)).ok()?;
-    let hex_str = raw.trim();
-    if hex_str.len() != KEY_BYTES * 2 || !hex_str.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
+    match key_file_status(config_dir) {
+        KeyFileStatus::Valid(key) => Some(key),
+        KeyFileStatus::Missing | KeyFileStatus::Corrupt => None,
     }
-    decode_hex(hex_str)
+}
+
+/// Status of the persisted key file: distinguishes ABSENT (first boot) from
+/// CORRUPT (F5 F-2 — the repair must be loud, the correlation with previous
+/// hashes is lost) from VALID.
+enum KeyFileStatus {
+    Valid(Vec<u8>),
+    Missing,
+    Corrupt,
+}
+
+/// Read + validate the persisted key file with the corrupt/absent split.
+fn key_file_status(config_dir: &Path) -> KeyFileStatus {
+    fs::read_to_string(config_dir.join(KEY_FILE_NAME)).map_or(KeyFileStatus::Missing, |raw| {
+        let hex_str = raw.trim();
+        if hex_str.len() == KEY_BYTES * 2 && hex_str.bytes().all(|b| b.is_ascii_hexdigit()) {
+            decode_hex(hex_str).map_or(KeyFileStatus::Corrupt, KeyFileStatus::Valid)
+        } else {
+            KeyFileStatus::Corrupt
+        }
+    })
 }
 
 /// Generate a 256-bit CSPRNG key and persist it (hex, `0600` on unix,
 /// atomic tmp+rename). Returns `None` when persistence failed — the caller
 /// falls back to an ephemeral key (never to an unkeyed hash).
+///
+/// F5 F-1 (creation-time umask race): the tmp file is created with
+/// `OpenOptions::create_new(true).mode(0o600)` — the restrictive mode is
+/// applied AT CREATION, so there is no window where the key hex sits at a
+/// umask-derived 0644/0666 before the chmod, and a failed chmod cannot leave
+/// a world-readable key behind (creation itself fails instead). Every
+/// `Result` is handled: a persistence failure degrades to the ephemeral
+/// fallback (loud), never to an insecure file.
 fn generate_and_persist(config_dir: &Path) -> Option<Vec<u8>> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let key = ephemeral_key();
@@ -133,14 +184,44 @@ fn generate_and_persist(config_dir: &Path) -> Option<Vec<u8>> {
     fs::create_dir_all(config_dir).ok()?;
     let target = config_dir.join(KEY_FILE_NAME);
     let tmp = config_dir.join(format!("{KEY_FILE_NAME}.tmp-{}", std::process::id()));
-    fs::write(&tmp, format!("{hex_str}\n")).ok()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    // Remove a stale tmp from a previous crashed boot BEFORE create_new:
+    // `create_new` fails if the path exists, and reusing a stale tmp (whose
+    // content we would overwrite anyway) must never fail the boot.
+    let _ = fs::remove_file(&tmp);
+    let write = open_key_tmp_0600(&tmp).and_then(|mut f| {
+        use std::io::Write;
+        f.write_all(format!("{hex_str}\n").as_bytes())
+    });
+    if write.is_err() {
+        let _ = fs::remove_file(&tmp);
+        return None;
     }
-    fs::rename(&tmp, &target).ok()?;
+    fs::rename(&tmp, &target)
+        .map_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })
+        .ok()?;
     Some(key)
+}
+
+/// Create the tmp key file EXCLUSIVELY (`create_new`) with `0600` applied at
+/// creation on unix — the umask can only clear bits the mode already clears,
+/// so there is no window where the key hex is group/world-readable (F5 F-1).
+#[cfg(unix)]
+fn open_key_tmp_0600(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Non-unix fallback: exclusive creation; the file lives inside the user
+/// profile, which carries the default ACL protection (documented).
+#[cfg(not(unix))]
+fn open_key_tmp_0600(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 /// 256-bit CSPRNG key (`getrandom`, the same source the vault and
@@ -250,13 +331,93 @@ mod tests {
         let dir = temp_dir("malformed");
         fs::write(dir.join(KEY_FILE_NAME), "not-a-valid-hex-key!!").expect("write garbage");
         let (key, source) = resolve_or_create_key(&dir);
-        assert_eq!(source, KeySource::Generated, "corrupt file → fresh key");
+        // F5 F-2: a CORRUPT file is NOT a first boot — the source says
+        // "regenerated" so the boot line can announce the correlation loss.
+        assert_eq!(
+            source,
+            KeySource::Regenerated,
+            "corrupt file → fresh key, labeled as repair"
+        );
+        assert!(
+            source.requires_loud_warning(),
+            "corruption repair must be loud (F5 F-2/F-3)"
+        );
         assert_eq!(key.len(), KEY_BYTES);
         // The file is repaired for the next boot.
         let (key2, source2) = resolve_or_create_key(&dir);
         assert_eq!(source2, KeySource::File);
         assert_eq!(key2, key);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F5 F-1: the key tmp file is created with `0600` AT CREATION
+    /// (`create_new` + mode), so there is no umask-dependent window where
+    /// the key hex is group/world-readable — the pre-fix `fs::write` +
+    /// post-chmod sequence had a 0644/0666 window (empirically reproduced by
+    /// the F5 security panel, umask probe cmd 28). Here we verify the final
+    /// mode AND the exclusive-creation semantics (a pre-existing path fails
+    /// creation instead of being truncated at a wrong mode).
+    #[test]
+    fn key_tmp_is_created_exclusively_with_0600() {
+        let dir = temp_dir("create_new_mode");
+        let path = dir.join("probe-key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let f = open_key_tmp_0600(&path).expect("create_new at 0600");
+            drop(f);
+            let mode = fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "created mode must be 0600, got {mode:o}");
+            // create_new semantics: a second open on the same path fails.
+            assert!(
+                open_key_tmp_0600(&path).is_err(),
+                "create_new must not truncate an existing file"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let f = open_key_tmp_0600(&path).expect("exclusive create");
+            drop(f);
+            assert!(
+                open_key_tmp_0600(&path).is_err(),
+                "create_new must not truncate an existing file"
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F5 F-1: a STALE tmp file from a crashed previous boot does not break
+    /// the boot (it is removed before the exclusive creation).
+    #[test]
+    fn stale_tmp_file_does_not_block_key_generation() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_env();
+        let dir = temp_dir("stale-tmp");
+        // A crashed boot left a world-readable tmp behind.
+        fs::write(dir.join(format!("{KEY_FILE_NAME}.tmp-{}", std::process::id())), "stale").expect("stale tmp");
+        let (key, source) = resolve_or_create_key(&dir);
+        assert_eq!(key.len(), KEY_BYTES);
+        assert!(matches!(source, KeySource::Generated | KeySource::Regenerated));
+        let path = dir.join(KEY_FILE_NAME);
+        assert!(path.exists(), "key persisted despite the stale tmp");
+        // The stale tmp is gone (removed before create_new, or renamed over).
+        assert!(
+            !dir.join(format!("{KEY_FILE_NAME}.tmp-{}", std::process::id())).exists(),
+            "no tmp residue"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn loud_warning_matrix() {
+        // F5 F-3: which sources WARN. Env and a normal File boot are routine;
+        // Generated/Regenerated/Ephemeral change the hash semantics and are
+        // loud.
+        assert!(!KeySource::Env.requires_loud_warning());
+        assert!(!KeySource::File.requires_loud_warning());
+        assert!(KeySource::Generated.requires_loud_warning());
+        assert!(KeySource::Regenerated.requires_loud_warning());
+        assert!(KeySource::Ephemeral.requires_loud_warning());
     }
 
     #[test]

@@ -1229,9 +1229,21 @@ pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
 pub const AUDIT_EVENT_HASH_DOMAIN: &str = "cerberus:audit-event:v1";
 
 /// Domain separation prefix for break-glass reason hashes (`bypass-hash:`).
+///
 /// Deliberately distinct from [`AUDIT_EVENT_HASH_DOMAIN`] and from the
-/// allowlist fingerprint domain that F6.3 will introduce.
+/// allowlist fingerprint domain ([`ALLOWLIST_HASH_DOMAIN`], F6.3).
 pub const BREAK_GLASS_HASH_DOMAIN: &str = "cerberus:break-glass:v1";
+
+/// Domain separation prefix for FALSE-POSITIVE ALLOWLIST fingerprints
+/// (R9-7/F6.3).
+///
+/// Reserved by F5 (`cerberus:allowlist:v1`) and introduced here by F6.3:
+/// allowlist entries persisted by the control plane are
+/// `HMAC-SHA256(installation_key, "cerberus:allowlist:v1" || 0x00 || value)`,
+/// NEVER the raw secret value. Deliberately distinct at byte 10 from
+/// [`AUDIT_EVENT_HASH_DOMAIN`] and [`BREAK_GLASS_HASH_DOMAIN`], so allowlist
+/// digests can never be transplanted into (or out of) the other domains.
+pub const ALLOWLIST_HASH_DOMAIN: &str = "cerberus:allowlist:v1";
 
 /// Domain-separated keyed hash for audit material (R9-16, F5.2).
 ///

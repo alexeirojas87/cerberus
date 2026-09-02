@@ -845,7 +845,7 @@ mod tests {
     use tokio_rustls::TlsConnector;
 
     use crate::config::{FailPolicy, OperationMode};
-    use crate::test_utils::{build_test_context, make_test_rule};
+    use crate::test_utils::{build_test_context, build_test_context_keyed, make_test_rule};
 
     fn ca_paths(dir: &Path) -> CaPaths {
         CaPaths {
@@ -1454,11 +1454,17 @@ mod tests {
             let block_rule = make_test_rule("secret.block", &["BLOCK-SECRET-[0-9]{8}"]);
             let mut redact_rule = make_test_rule("secret.redact", &["REDACT-SECRET-[0-9]{8}"]);
             redact_rule.action = Action::Redact;
-            let ctx = build_test_context(&[block_rule, redact_rule], HashMap::new(), OperationMode::Enforce);
+            let ctx = build_test_context_keyed(&[block_rule, redact_rule], HashMap::new(), OperationMode::Enforce);
             {
                 let mut config = ctx.config.write().unwrap();
                 config.fail_policy = fail_policy;
-                config.policy.allowlist = vec![block_secret.to_string()];
+                // R9-7: the allowlist carries the HMAC FINGERPRINT of the
+                // allowed value (the context is wired with the test
+                // installation key); the raw value is never persisted.
+                config.policy.allowlist = vec![crate::allowlist::fingerprint(
+                    crate::test_utils::TEST_INSTALLATION_KEY,
+                    block_secret,
+                )];
             }
             let audit = ctx.api.events.clone();
             let mut cfg =

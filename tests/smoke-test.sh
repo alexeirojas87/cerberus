@@ -174,6 +174,19 @@ else
     fail_check "Config directory ~/.cerberus NOT created"
 fi
 
+# ── R9-5 (F6): the control plane is now AUTHENTICATED BY DEFAULT ───────
+# `cerberus init` generates a random admin token into config.yaml (0600).
+# DELTA vs the pre-F6 dev-mode script: every /api/* call below must carry
+# the token; without it the control plane is FAIL-CLOSED (401, loopback
+# included) — that is the R9-5 fix, asserted explicitly at TEST POINT 5a.
+ADMIN_TOKEN=$(sed -n 's/^admin_token: *//p' "$TEST_HOME/.cerberus/config.yaml" | tr -d '"[:space:]')
+if [ -n "$ADMIN_TOKEN" ]; then
+    pass_check "init generated an admin token (R9-5: authenticated control plane by default)"
+else
+    fail_check "init did NOT generate an admin token (control plane would be closed)"
+fi
+AUTH=(-H "X-Cerberus-Admin-Token: $ADMIN_TOKEN")
+
 # ── STEP 3: Start proxy daemon ─────────────────────────────────────────
 log_section "STEP 3: Start proxy daemon on port $PORT"
 
@@ -323,7 +336,9 @@ fi
 # ── TEST POINT 5: Events persisted with provider (P0-6) ────────────────
 log_section "STEP 7: TEST POINT 5 — Events persisted with provider (P0-6)"
 
-EVENTS=$(curl -s -m 3 "http://127.0.0.1:${PORT}/api/events" 2>/dev/null || echo "[]")
+# R9-5 (F6) DELTA: the API calls authenticate with the admin token that
+# `cerberus init` generated (dev-mode-open /api/* is gone).
+EVENTS=$(curl -s -m 3 "${AUTH[@]}" "http://127.0.0.1:${PORT}/api/events" 2>/dev/null || echo "[]")
 echo "  /api/events: $EVENTS" | tee -a "$TEST_LOG"
 
 if [ "$EVENTS" = "[]" ] || [ -z "$EVENTS" ]; then
@@ -332,7 +347,7 @@ else
     pass_check "P0-6: /api/events returned events (non-empty)"
 fi
 
-STATS=$(curl -s -m 3 "http://127.0.0.1:${PORT}/api/stats" 2>/dev/null || echo '{}')
+STATS=$(curl -s -m 3 "${AUTH[@]}" "http://127.0.0.1:${PORT}/api/stats" 2>/dev/null || echo '{}')
 echo "  /api/stats: $STATS" | tee -a "$TEST_LOG"
 
 if echo "$STATS" | grep -q '"by_provider":\[\]'; then
@@ -341,6 +356,47 @@ elif echo "$STATS" | grep -q '"total":0'; then
     fail_check "P0-6: /api/stats total is 0 (no events recorded)"
 else
     pass_check "P0-6: /api/stats returned non-trivial data"
+fi
+
+# ── TEST POINT 5a: R9-5 fail-closed control plane (F6) ─────────────────
+log_section "STEP 7a: TEST POINT 5a — R9-5 fail-closed control plane (F6)"
+
+# Without the token: 401 on every data route, loopback included.
+NOAUTH=$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/api/events" 2>/dev/null || echo "000")
+if [ "$NOAUTH" = "401" ]; then
+    pass_check "R9-5: /api/events WITHOUT token → 401 (fail-closed, loopback included)"
+else
+    fail_check "R9-5: /api/events WITHOUT token returned $NOAUTH (must be 401)"
+fi
+
+WRONGTOK=$(curl -s -m 3 -o /dev/null -w '%{http_code}' -H "X-Cerberus-Admin-Token: wrong-token-wrong-token-12345" "http://127.0.0.1:${PORT}/api/events" 2>/dev/null || echo "000")
+if [ "$WRONGTOK" = "401" ]; then
+    pass_check "R9-5: /api/events with a WRONG token → 401"
+else
+    fail_check "R9-5: /api/events with a WRONG token returned $WRONGTOK (must be 401)"
+fi
+
+# DNS-rebinding Host header → 403 BEFORE authentication.
+REBIND=$(curl -s -m 3 -o /dev/null -w '%{http_code}' -H "Host: attacker.com:${PORT}" "${AUTH[@]}" "http://127.0.0.1:${PORT}/api/events" 2>/dev/null || echo "000")
+if [ "$REBIND" = "403" ]; then
+    pass_check "R9-5: rebound Host (attacker.com) → 403 (anti-rebinding allowlist)"
+else
+    fail_check "R9-5: rebound Host (attacker.com) returned $REBIND (must be 403)"
+fi
+
+# R9-5/F6.2 (adapted F4 negative vector): an UNAUTHENTICATED data-plane
+# bypass must be REFUSED — the secret payload must NOT reach the mock.
+# The F4 evidence proved this vector leaked in dev mode; the fix closes it.
+curl -s -m 3 -o /dev/null \
+    -X POST "http://127.0.0.1:${PORT}/openai/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "X-Cerberus-Bypass: smoke-negative-leak-injection" \
+    -d "$SECRET_PAYLOAD" 2>/dev/null >/dev/null
+sleep 0.3
+if [ -f "$MOCK_LOG" ] && grep -q "$SECRET_PAYLOAD" "$MOCK_LOG" 2>/dev/null; then
+    fail_check "R9-5/F6.2: UNAUTHENTICATED bypass LEAKED the payload into the mock (must be refused)"
+else
+    pass_check "R9-5/F6.2: unauthenticated X-Cerberus-Bypass refused (payload did not reach the mock)"
 fi
 
 if [ -f "$TEST_HOME/.cerberus/cerberus.db" ] || [ -f "cerberus.db" ]; then

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -152,6 +152,78 @@ fn load_proxy_config_from(path: &std::path::Path) -> Option<ProxyConfig> {
 /// `audit_key.rs` for the full key-management design.
 pub(crate) fn resolve_audit_key() -> (Vec<u8>, crate::audit_key::KeySource) {
     crate::audit_key::resolve_or_create_key(&crate::audit_key::default_config_dir())
+}
+
+/// Migrate legacy RAW allowlist entries to HMAC fingerprints (R9-7/F6.3).
+///
+/// Runs at boot BEFORE the policy validation (the store write gate rejects
+/// raw entries) and BEFORE the shared config exists, so the hot path never
+/// sees a raw entry. The migrated config is persisted back to `config.yaml`
+/// atomically (tmp+rename) when the YAML is the config source — the raw
+/// value then no longer exists anywhere on disk. In-memory only (no
+/// persistence) when the config came from env/test wiring. The conversion is
+/// loud: every migrated entry is announced; NO raw backup file is kept (a
+/// raw backup would itself violate the R9-7 invariant).
+fn migrate_allowlist_to_fingerprints(config: &mut ProxyConfig, audit_key: &[u8]) {
+    let persist = {
+        let path = config_file();
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    };
+    if let Err(e) = migrate_allowlist_to_fingerprints_persisting_to(config, audit_key, persist) {
+        eprintln!("warning: {e}");
+    }
+}
+
+/// The testable core of the allowlist migration: converts raw entries with
+/// `audit_key`, logs the conversion loudly, and (when `persist_to` is set)
+/// rewrites the YAML atomically at 0600 so the raw value no longer exists on
+/// disk. Returns the number of migrated entries, or the persist error (the
+/// in-memory migration has already happened — the raw entries are gone from
+/// the running config either way; only the disk rewrite can fail).
+fn migrate_allowlist_to_fingerprints_persisting_to(
+    config: &mut ProxyConfig,
+    audit_key: &[u8],
+    persist_to: Option<PathBuf>,
+) -> Result<usize, String> {
+    let migrated = cerberus_proxy::allowlist::migrate_entries(&mut config.policy.allowlist, Some(audit_key));
+    if migrated == 0 {
+        return Ok(0);
+    }
+    println!(
+        "allowlist migration (R9-7): {migrated} raw entr{} converted to HMAC fingerprints \
+         (domain cerberus:allowlist:v1); raw values are no longer persisted anywhere",
+        if migrated == 1 { "y" } else { "ies" }
+    );
+    // Persist only when the YAML on disk is the config source (the daemon's
+    // normal path); env-driven configs have nothing to rewrite.
+    if let Some(path) = persist_to {
+        let yaml = serde_yaml::to_string(config).map_err(|e| format!("allowlist-migrated YAML dump failed: {e}"))?;
+        atomic_write_config(&path, &yaml).map_err(|e| format!("allowlist migration persist: {e}"))?;
+    }
+    Ok(migrated)
+}
+
+/// Atomic config write (tmp + rename, 0600 — the YAML carries the admin
+/// token and now only fingerprinted allowlist entries).
+fn atomic_write_config(path: &Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension("yaml.tmp");
+    fs::write(&tmp, content).map_err(|e| format!("tmp write: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("chmod: {e}"));
+        }
+    }
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("rename: {e}")
+    })
 }
 
 /// Non-empty env value as `Option<String>`.
@@ -313,6 +385,15 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     // reasons) share one keyed, domain-separated scheme.
     let (audit_key, key_source) = resolve_audit_key();
     println!("audit hashing: keyed HMAC-SHA256 (key source: {})", key_source.label());
+    // F5 F-3 (loudness): a GENERATED or EPHEMERAL key is a security-relevant
+    // boot condition, not a routine line — a regenerated key breaks dedup
+    // correlation with all events hashed under the previous key, and an
+    // ephemeral key makes every hash per-process and non-comparable. WARN in
+    // addition to the boot label (F5 security panel follow-up).
+    if key_source.requires_loud_warning() {
+        eprintln!("warning: audit hash key: {}", key_source.label());
+        tracing::warn!("audit hash key: {}", key_source.label());
+    }
 
     // UNIQUE base engine (finding 7): used by PackManager and, after the
     // initial pack load, by the snapshot the proxy receives.
@@ -321,6 +402,24 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     // A) Real config: base = config.yaml (without losing fields) + overrides.
     let file_cfg = load_proxy_config();
     let mut config = resolve_config(port, file_cfg)?;
+
+    // R9-7 (F6.3): migrate legacy RAW allowlist entries to HMAC fingerprints
+    // BEFORE the policy is validated (the store write gate rejects raw).
+    // Idempotent; the conversion is loud and the config is persisted
+    // atomically so the raw value never survives on disk.
+    migrate_allowlist_to_fingerprints(&mut config, &audit_key);
+
+    // R9-5 (F6): the control plane must never boot silently open. With no
+    // admin token configured every data /api/* route answers 401 (the API is
+    // CLOSED in dev mode, not open) — make that unmistakable at boot.
+    if cerberus_proxy::api::expected_admin_token(&config).is_none() {
+        eprintln!(
+            "warning: NO admin token configured — the control plane is CLOSED (every data /api/* \
+             route responds 401, loopback included; R9-5). Set admin_token in {} or export \
+             CERBERUS_ADMIN_TOKEN to operate the dashboard/API",
+            config_file().display()
+        );
+    }
 
     // --chain: rewrite all upstreams to forward to another local proxy
     // (e.g. headroom) instead of the provider directly. This lets you
@@ -522,6 +621,15 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
         }
     });
 
+    // R9-5 (F6): the control-plane Host/Origin allowlist (anti
+    // DNS-rebinding) is built ONCE per boot from the listen address + the
+    // `allowed_hosts`/`allowed_origins` config and enforced on every /api/*
+    // request BEFORE authentication. Wildcard/blank entries fail the boot
+    // (fail-closed config).
+    let listen_addr: std::net::SocketAddr = config.listen.parse().map_err(|e| format!("invalid address: {e}"))?;
+    let host_origin = cerberus_proxy::host_origin::HostOriginPolicy::build(&listen_addr, &config)
+        .map_err(|e| format!("invalid host/origin allowlist: {e}"))?;
+
     let ctx = Arc::new(ProxyContext {
         config: shared_config.clone(),
         engine: live_engine.clone(),
@@ -530,7 +638,8 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
             .with_config_path(config_file())
             .with_pack_worker(pack_tx)
             .with_engine(engine_control)
-            .with_audit_hash_key(audit_key.clone()),
+            .with_audit_hash_key(audit_key.clone())
+            .with_host_origin(host_origin),
         last_upstream: Arc::new(std::sync::Mutex::new(None)),
     });
 
@@ -541,8 +650,7 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     let api_events = ctx.api.events.clone();
     let mut interventions = crate::feedback_ux::InterventionWatcher::new();
 
-    let addr: std::net::SocketAddr = config.listen.parse().map_err(|e| format!("invalid address: {e}"))?;
-    let (actual, proxy_handle) = spawn_managed_proxy(addr, ctx.clone())
+    let (actual, proxy_handle) = spawn_managed_proxy(listen_addr, ctx.clone())
         .await
         .map_err(|e| format!("proxy error: {e}"))?;
     let mut forward_handle = if let Some(mitm_config) = mitm_config {
@@ -880,6 +988,79 @@ mod tests {
 
     /// Guard to serialize tests that mutate `std::env` (process-global).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // ── R9-7 (F6.3): legacy raw allowlist migration at boot ──
+
+    /// The smallest safe migration design, tested: a legacy config.yaml whose
+    /// `policy.allowlist` carries RAW secret values is converted IN PLACE to
+    /// HMAC fingerprints under the installation key, the YAML is rewritten
+    /// atomically (0600), and the raw values are gone from disk. Idempotent:
+    /// a second run migrates nothing. After migration the policy passes the
+    /// store write gate (`DetectionPolicy::validate`).
+    #[test]
+    fn allowlist_migration_converts_raw_entries_and_persists_fingerprints() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerb_f6_migration_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        let raw_value = "sk-MIGRATION-legacy-raw-value-0001";
+        let already_fp = "hmac:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        std::fs::write(
+            &path,
+            format!("listen: 127.0.0.1:8787\npolicy:\n  allowlist:\n    - {raw_value}\n    - {already_fp}\n"),
+        )
+        .unwrap();
+        let mut config = ProxyConfig::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        let key: Vec<u8> = (0u8..32).collect();
+        let migrated = migrate_allowlist_to_fingerprints_persisting_to(&mut config, &key, Some(path.clone()))
+            .expect("migration persists");
+        assert_eq!(migrated, 1, "only the raw entry migrated");
+
+        // Stored bytes: the YAML now carries ONLY fingerprints.
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !yaml.contains(raw_value),
+            "the raw value must NOT survive anywhere on disk: {yaml}"
+        );
+        let expected = cerberus_proxy::allowlist::fingerprint(&key, raw_value);
+        assert!(yaml.contains(expected.as_str()), "fingerprint persisted: {yaml}");
+        assert!(yaml.contains(already_fp), "pre-existing fingerprint untouched");
+
+        // The migrated policy passes the store write gate now.
+        config.policy.validate().expect("migrated policy is gate-clean");
+
+        // The persisted YAML re-parses to the migrated policy (restart-safe).
+        let reloaded = ProxyConfig::parse(&yaml).unwrap();
+        assert_eq!(reloaded.policy, config.policy);
+
+        // Idempotent: a second migration over the migrated state is a no-op.
+        let mut again = ProxyConfig::parse(&yaml).unwrap();
+        assert_eq!(
+            migrate_allowlist_to_fingerprints_persisting_to(&mut again, &key, Some(path)).unwrap(),
+            0,
+            "second run migrates nothing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `migrate_entries` without a key is a no-op (test contexts only); the
+    /// product daemon always resolves the installation key BEFORE migrating.
+    #[test]
+    fn allowlist_migration_without_key_is_inert() {
+        let mut config = ProxyConfig::default();
+        config.policy.allowlist.push("sk-raw".to_string());
+        assert_eq!(
+            cerberus_proxy::allowlist::migrate_entries(&mut config.policy.allowlist, None),
+            0,
+            "no key → no conversion (the write gate would reject raw at validate)"
+        );
+    }
 
     #[test]
     fn require_pro_gate_for_pack_ops() {

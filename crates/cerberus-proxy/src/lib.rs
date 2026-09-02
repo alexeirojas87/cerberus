@@ -6,12 +6,14 @@
 #![allow(unknown_lints)]
 
 pub mod adapters;
+pub mod allowlist;
 pub mod api;
 pub mod config;
 pub mod decoder;
 pub mod detection_policy;
 pub mod forward;
 pub mod health;
+pub mod host_origin;
 pub mod json_redact;
 pub mod log;
 pub mod policy;

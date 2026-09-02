@@ -123,20 +123,25 @@ pub struct MultipartScan {
 
 /// Build the authoritative multipart scan for one request.
 ///
-/// `allowlist` is the operator allowlist (exact-value match, same semantics
-/// as the pipeline's [`crate::proxy`] allowlist filter).
+/// `allowlist` is the operator allowlist as HMAC FINGERPRINTS (R9-7/F6.3):
+/// a region-relative raw value is allowlisted when the fingerprint of its
+/// trimmed text is in the set — the same semantics as the pipeline's
+/// [`crate::proxy`] allowlist filter. `key` is the installation audit-hash
+/// key (`None` = unkeyed test context: nothing is allowlisted, fail-closed).
 #[must_use]
 pub fn scan_multipart_regions(
     engine: &CompiledEngine,
     body: &Bytes,
     regions: &[TextRegion],
     allowlist: &[String],
+    key: Option<&[u8]>,
 ) -> MultipartScan {
     // ONE analyzer over the full lossy body: the shared keyword context for
     // every region (keyword_anywhere semantics, cached per keyword set —
     // identical to the JSON leaf path).
     let body_text = String::from_utf8_lossy(body).into_owned();
     let analyzer = ContextAnalyzer::new(&body_text);
+    let fingerprints: std::collections::HashSet<&str> = allowlist.iter().map(String::as_str).collect();
     let mut per_region: Vec<Vec<Finding>> = Vec::with_capacity(regions.len());
     // Dedup key includes the region index: offsets are region-relative, so
     // identical (flag, start, end) in two regions are two real matches.
@@ -146,14 +151,17 @@ pub fn scan_multipart_regions(
         let found = engine.scan_with_context_analyzer(&slice, &analyzer);
         let mut kept = Vec::new();
         for f in found.findings {
-            // Allowlist on the region-relative raw value (same trim/exact
-            // semantics as the pipeline's text-path filter).
+            // Allowlist on the region-relative raw value (same trim
+            // semantics as the pipeline's text-path filter; R9-7: the
+            // comparison is fingerprint-vs-fingerprint).
             let allowlisted = f
                 .end
                 .le(&slice.len())
                 .then(|| slice.get(f.start..f.end).map(str::trim))
                 .flatten()
-                .is_some_and(|raw| allowlist.iter().any(|a| a.as_str() == raw));
+                .is_some_and(|raw| {
+                    key.is_some_and(|k| fingerprints.contains(crate::allowlist::fingerprint(k, raw).as_str()))
+                });
             if !allowlisted && seen.insert((f.flag.clone(), index, f.start, f.end)) {
                 kept.push(f);
             }
@@ -214,7 +222,7 @@ fn redact_multipart(
     let per_region: &[Vec<Finding>] = if authoritative {
         scan.map(|s| &s.findings[..]).expect("checked above")
     } else {
-        owned = scan_multipart_regions(engine, body, regions, &[]).findings;
+        owned = scan_multipart_regions(engine, body, regions, &[], None).findings;
         &owned
     };
     let mut out = body.to_vec();
@@ -622,7 +630,7 @@ mod tests {
 
         // Without the allowlist: the decision view carries the finding and
         // the redaction redacts it.
-        let scan = scan_multipart_regions(&engine, &body, regions, &[]);
+        let scan = scan_multipart_regions(&engine, &body, regions, &[], None);
         let view = multipart_scan_output(&scan);
         assert_eq!(view.findings.len(), 1, "one cross-part-context finding");
         assert_eq!(view.action_overall, cerberus_engine::rule::Action::Redact);
@@ -640,8 +648,11 @@ mod tests {
 
         // With the value allowlisted: the SAME pass drops it from the
         // decision view and the redaction leaves it alone — no disagreement
-        // between what the policy saw and what redaction did.
-        let scan_allow = scan_multipart_regions(&engine, &body, regions, std::slice::from_ref(&key));
+        // between what the policy saw and what redaction did. (R9-7: the
+        // allowlist carries the HMAC FINGERPRINT of the value, not the raw.)
+        let fp_key = b"test-installation-key-0123456789ab";
+        let fp = crate::allowlist::fingerprint(fp_key, &key);
+        let scan_allow = scan_multipart_regions(&engine, &body, regions, std::slice::from_ref(&fp), Some(fp_key));
         let view_allow = multipart_scan_output(&scan_allow);
         assert!(view_allow.findings.is_empty(), "allowlisted value must not be flagged");
         let out_allow = redact_body_with_multipart_scan(

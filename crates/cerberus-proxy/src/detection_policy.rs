@@ -207,6 +207,18 @@ impl DetectionPolicy {
                     entry.len()
                 ));
             }
+            // R9-7/F6.3 STORE-LEVEL WRITE GATE: the config store only ever
+            // persists allowlist FINGERPRINTS (`hmac:` + 64 hex, domain
+            // `cerberus:allowlist:v1`). A raw value here is the R9-7
+            // vulnerability (the secret lands in config.yaml and the API):
+            // rejected — add it via `POST /api/allowlist` (converts raw →
+            // fingerprint) or let the daemon migrate the legacy YAML at boot.
+            if !crate::allowlist::is_fingerprint(entry) {
+                return Err("allowlist entries must be HMAC fingerprints (hmac:<64 hex>, domain \
+                     cerberus:allowlist:v1) — raw secret values are never persisted (R9-7); \
+                     add the value via POST /api/allowlist, which converts it to a fingerprint"
+                    .to_string());
+            }
         }
         // Patterns are validated by compiling them: it is the SAME compiler
         // the engine uses, so a regex that passes here cannot break the
@@ -217,10 +229,13 @@ impl DetectionPolicy {
             .map_err(|e| format!("custom rules do not compile: {e}"))
     }
 
-    /// Is the exact `value` in the allowlist?
+    /// Is the exact `entry` present in the allowlist? (R9-7: entries are
+    /// HMAC fingerprints; the HOT-PATH matcher computes the candidate's
+    /// fingerprint in `proxy::filter_with_allowlist` — this exact-match
+    /// helper is for fingerprint-shaped entries only.)
     #[must_use]
-    pub fn allows(&self, value: &str) -> bool {
-        self.allowlist.iter().any(|a| a == value)
+    pub fn allows(&self, entry: &str) -> bool {
+        self.allowlist.iter().any(|a| a == entry)
     }
 }
 

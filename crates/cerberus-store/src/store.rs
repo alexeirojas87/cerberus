@@ -118,6 +118,12 @@ pub enum WriteOutcome {
     DroppedBackpressure,
     /// Rejected because the store no longer accepts events (shutdown started).
     RejectedClosed,
+    /// Rejected by the **scheme write gate** (R9-7 / F5 security panel F-4):
+    /// the event carried `hashed_values` in a scheme the store refuses to
+    /// persist (unkeyed `sha256:` by default, or any other non-keyed
+    /// prefix). The store never becomes the path by which a regressed or
+    /// hostile producer reintroduces R9-16 raw-recoverable rows.
+    RejectedUnkeyed,
 }
 
 /// `SQLite` store for audit events with non-blocking async writes.
@@ -373,9 +379,40 @@ impl AuditStore {
     /// [`Self::dropped_events`] — a slow disk cannot grow memory unbounded
     /// (fix review v5 #4). To guarantee durability (e.g. before shutdown),
     /// call [`Self::flush`] afterwards.
+    ///
+    /// **Scheme write gate (R9-7 / F5 F-4):** every `hashed_values` entry must
+    /// be a KEYED scheme (`hmac:` digest, or the keyed `bypass-hash:` wrapper).
+    /// Unkeyed `sha256:` entries are REJECTED before enqueue — the store never
+    /// persists raw-recoverable hashes (R9-16). Migration tooling that must
+    /// ingest legacy rows uses [`Self::write_event_async_legacy`].
     #[allow(unknown_lints)]
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn write_event_async(&self, event: AuditEvent) -> WriteOutcome {
+        self.write_event_checked(event, false).await
+    }
+
+    /// Legacy-tolerant variant (migration tooling ONLY): identical to
+    /// [`Self::write_event_async`] but with `allow_legacy = true`, so
+    /// pre-F5.2 `sha256:` rows can be ingested deliberately (R9-16
+    /// coexistence). Every use is an explicit decision in code — the
+    /// ordinary product writer is always strict.
+    #[allow(unknown_lints)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub async fn write_event_async_legacy(&self, event: AuditEvent) -> WriteOutcome {
+        self.write_event_checked(event, true).await
+    }
+
+    /// Shared enqueue path with the scheme write gate applied.
+    #[allow(unknown_lints)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    async fn write_event_checked(&self, event: AuditEvent, allow_legacy: bool) -> WriteOutcome {
+        if let Err(bad) = check_hashed_values(&event, allow_legacy) {
+            tracing::warn!(
+                "audit store rejected event {bad}: non-keyed hashed_values scheme \
+                 (write gate, R9-7/F5 F-4; allow_legacy={allow_legacy})"
+            );
+            return WriteOutcome::RejectedUnkeyed;
+        }
         // Register an in-flight write BEFORE looking at the state, with
         // `SeqCst` ordering on both sides: either this writer sees that the
         // store no longer accepts (and rejects), or `close()` sees
@@ -703,6 +740,41 @@ impl AuditStore {
     }
 }
 
+/// Keyed-hash schemes the audit store accepts. `hmac:` is the R9-16/F5.2
+/// keyed HMAC-SHA256 digest; `bypass-hash:` is the keyed break-glass wrapper
+/// (the digest under it is itself an HMAC, see proxy.rs `BypassKind::audit_hash`).
+const KEYED_HASH_PREFIXES: [&str; 2] = ["hmac:", "bypass-hash:"];
+/// Unkeyed legacy scheme (pre-F5.2): accepted only through the explicit
+/// `allow_legacy` writer, never through the ordinary product writer.
+const LEGACY_HASH_PREFIX: &str = "sha256:";
+
+/// Scheme write gate (R9-7 / F5 security panel F-4): validate every
+/// `hashed_values` entry of `event` BEFORE it can reach the database.
+///
+/// The F5 panel verified that all *producers* are keyed, but the store itself
+/// accepted any scheme — a regressed or future writer could silently
+/// reintroduce R9-16 raw-recoverable rows. This gate makes the store the
+/// enforcement point: entries must be `hmac:` / `bypass-hash:` (keyed);
+/// `sha256:` is legacy and only passes with `allow_legacy` (migration
+/// tooling); anything else is refused outright.
+///
+/// # Errors
+///
+/// Returns the offending entry (for the rejection warn) when the event
+/// carries a non-keyed scheme it may not persist.
+fn check_hashed_values(event: &AuditEvent, allow_legacy: bool) -> Result<(), String> {
+    for entry in &event.hashed_values {
+        if KEYED_HASH_PREFIXES.iter().any(|p| entry.starts_with(p)) {
+            continue;
+        }
+        if entry.starts_with(LEGACY_HASH_PREFIX) && allow_legacy {
+            continue;
+        }
+        return Err(entry.clone());
+    }
+    Ok(())
+}
+
 /// Persists an event. Returns the `SQLite` error message if the `INSERT`
 /// fails (the writer retains it to propagate it in the next durability
 /// barrier).
@@ -868,7 +940,10 @@ mod tests {
             flags: vec!["secret.openai_api_key".to_string()],
             counts: std::collections::HashMap::new(),
             action_taken: action.to_string(),
-            hashed_values: vec!["sha256:deadbeef".to_string()],
+            // R9-7/F6.3: the fixture carries the KEYED scheme — the ordinary
+            // writer (and therefore these tests) rejects unkeyed `sha256:`
+            // rows (see write_gate_rejects_unkeyed_rows_*).
+            hashed_values: vec!["hmac:deadbeef".to_string()],
             severity: "critical".to_string(),
             ts_unix,
         }
@@ -897,6 +972,11 @@ mod tests {
     /// were discarded by design, so re-keying is impossible; the documented
     /// consequence is that cross-scheme dedup correlation is broken at the
     /// migration boundary while the store remains readable and appendable.
+    ///
+    /// R9-7 (F6.3): the legacy row enters through the EXPLICIT legacy writer
+    /// (`write_event_async_legacy`, migration tooling only). The ordinary
+    /// writer now enforces the scheme write gate and would reject it — that
+    /// gate is tested separately below.
     #[test]
     fn legacy_unsalted_rows_coexist_with_keyed_rows() {
         let tmp = temp_db();
@@ -904,13 +984,14 @@ mod tests {
         let store = AuditStore::open(&path).expect("open store");
         let rt = tokio::runtime::Runtime::new().unwrap();
 
-        // A legacy event (pre-F5.2, unsalted sha256 scheme) and a new event
+        // A legacy event (pre-F5.2, unsalted sha256 scheme) ingested by
+        // migration tooling (explicit legacy writer) and a new event
         // (post-F5.2, keyed HMAC scheme) recorded through the normal writer.
         let mut legacy = make_event("evt-legacy-1", "redact", 1_700_000_000);
         legacy.hashed_values = vec!["sha256:5f2b3a9clegacy".to_string()];
         let mut keyed = make_event("evt-keyed-1", "redact", 1_700_000_001);
         keyed.hashed_values = vec!["hmac:9d1c4e77keyed".to_string()];
-        rt.block_on(store.write_event_async(legacy));
+        rt.block_on(store.write_event_async_legacy(legacy));
         rt.block_on(store.write_event_async(keyed));
         rt.block_on(store.flush()).expect("durable flush");
 
@@ -947,6 +1028,124 @@ mod tests {
         assert!(
             raw_legacy.contains("sha256:"),
             "legacy scheme intact on disk: {raw_legacy}"
+        );
+    }
+
+    // ── R9-7 / F5 F-4: the store-level scheme write gate ──
+
+    /// The ordinary writer REJECTS unkeyed `sha256:` rows before they can
+    /// reach the database (the F5 security panel flagged the missing
+    /// store-level gate). The rejection is visible as `WriteOutcome::
+    /// RejectedUnkeyed` and NOTHING is persisted.
+    #[test]
+    fn write_gate_rejects_unkeyed_rows_through_the_ordinary_writer() {
+        let tmp = temp_db();
+        let store = AuditStore::open(tmp.path().join("cerberus.db")).expect("open store");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut legacy = make_event("evt-gate-1", "redact", 1_700_000_010);
+        legacy.hashed_values = vec!["sha256:5f2b3a9clegacy".to_string()];
+        let outcome = rt.block_on(store.write_event_async(legacy));
+        assert_eq!(outcome, WriteOutcome::RejectedUnkeyed, "unkeyed row rejected");
+
+        rt.block_on(store.flush()).expect("flush");
+        let events = rt.block_on(store.recent_events(10));
+        assert!(
+            !events.iter().any(|e| e.id == "evt-gate-1"),
+            "the rejected row must NOT be persisted: {events:?}"
+        );
+        // Direct on-disk check: zero rows, not even an empty-hashes row.
+        let conn = Connection::open(tmp.path().join("cerberus.db")).expect("reopen");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_events WHERE id = 'evt-gate-1'", [], |r| {
+                r.get(0)
+            })
+            .expect("count");
+        assert_eq!(count, 0, "no row ever reached the database");
+    }
+
+    /// Keyed producers are untouched: `hmac:` and the keyed `bypass-hash:`
+    /// wrapper both pass the gate (these are the only schemes the product
+    /// writes — F5 proved 24k live rows 100% `hmac:`).
+    #[test]
+    fn write_gate_accepts_keyed_schemes_and_rejects_unknown_ones() {
+        let tmp = temp_db();
+        let store = AuditStore::open(tmp.path().join("cerberus.db")).expect("open store");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut keyed = make_event("evt-gate-2", "redact", 1_700_000_020);
+        keyed.hashed_values = vec!["hmac:aa".to_string(), "bypass-hash:bb".to_string()];
+        assert_eq!(rt.block_on(store.write_event_async(keyed)), WriteOutcome::Queued);
+
+        let mut unknown = make_event("evt-gate-3", "redact", 1_700_000_021);
+        unknown.hashed_values = vec!["crc32:cc".to_string()];
+        assert_eq!(
+            rt.block_on(store.write_event_async(unknown)),
+            WriteOutcome::RejectedUnkeyed,
+            "unknown schemes are refused, not silently stored"
+        );
+
+        // Empty hashed_values is fine (outcome-only events carry none).
+        let bare = make_event("evt-gate-4", "allow", 1_700_000_022);
+        assert_eq!(rt.block_on(store.write_event_async(bare)), WriteOutcome::Queued);
+
+        rt.block_on(store.flush()).expect("flush");
+        let events = rt.block_on(store.recent_events(10));
+        assert!(events.iter().any(|e| e.id == "evt-gate-2"));
+        assert!(events.iter().any(|e| e.id == "evt-gate-4"));
+        assert!(!events.iter().any(|e| e.id == "evt-gate-3"));
+    }
+
+    /// The explicit legacy writer (`allow_legacy`) accepts `sha256:` — the
+    /// migration-tooling escape hatch — while it still refuses other
+    /// non-keyed schemes.
+    #[test]
+    fn legacy_writer_accepts_sha256_only() {
+        let tmp = temp_db();
+        let store = AuditStore::open(tmp.path().join("cerberus.db")).expect("open store");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut legacy = make_event("evt-legacy-mig", "redact", 1_700_000_030);
+        legacy.hashed_values = vec!["sha256:legacy".to_string()];
+        assert_eq!(
+            rt.block_on(store.write_event_async_legacy(legacy)),
+            WriteOutcome::Queued
+        );
+
+        let mut unknown = make_event("evt-legacy-mig-bad", "redact", 1_700_000_031);
+        unknown.hashed_values = vec!["md5:zz".to_string()];
+        assert_eq!(
+            rt.block_on(store.write_event_async_legacy(unknown)),
+            WriteOutcome::RejectedUnkeyed,
+            "allow_legacy does NOT open the door to arbitrary schemes"
+        );
+    }
+
+    /// Unit check of the gate function itself (mixed entries: one bad entry
+    /// poisons the whole event — no partial persistence ambiguity).
+    #[test]
+    fn check_hashed_values_gate_matrix() {
+        let mut ev = make_event("gate-matrix", "redact", 0);
+        ev.hashed_values = vec![];
+        assert!(check_hashed_values(&ev, false).is_ok());
+        ev.hashed_values = vec!["hmac:a".into(), "bypass-hash:b".into()];
+        assert!(check_hashed_values(&ev, false).is_ok());
+        ev.hashed_values = vec!["hmac:a".into(), "sha256:b".into()];
+        assert!(check_hashed_values(&ev, false).is_err(), "mixed → rejected");
+        assert!(
+            check_hashed_values(&ev, true).is_ok(),
+            "mixed + allow_legacy → accepted"
+        );
+        ev.hashed_values = vec!["sha256:b".into()];
+        assert_eq!(
+            check_hashed_values(&ev, false).unwrap_err(),
+            "sha256:b",
+            "the offending entry is returned for the warn"
+        );
+        ev.hashed_values = vec!["randomprefix:c".into()];
+        assert!(
+            check_hashed_values(&ev, true).is_err(),
+            "allow_legacy does not cover unknown schemes"
         );
     }
 
@@ -1185,7 +1384,9 @@ mod tests {
                         match outcome {
                             WriteOutcome::Queued => queued.fetch_add(1, SeqCst),
                             WriteOutcome::DroppedBackpressure => dropped.fetch_add(1, SeqCst),
-                            WriteOutcome::RejectedClosed => rejected.fetch_add(1, SeqCst),
+                            WriteOutcome::RejectedClosed | WriteOutcome::RejectedUnkeyed => {
+                                rejected.fetch_add(1, SeqCst)
+                            }
                         };
                         i += 1;
                         tokio::task::yield_now().await;

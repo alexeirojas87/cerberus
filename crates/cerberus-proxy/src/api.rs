@@ -141,6 +141,14 @@ pub struct ApiContext {
     /// contexts that never construct this builder — the daemon always keys.
     /// Not `Debug`-printed (`ApiContext` has no `Debug` derive) and never logged.
     pub audit_hash_key: Option<std::sync::Arc<Vec<u8>>>,
+
+    /// Control-plane Host/Origin allowlist (R9-5 anti-DNS-rebinding, F6.1).
+    /// Installed once per boot: the product wiring (daemon) builds it from
+    /// the listen address + config BEFORE sharing the context; every other
+    /// producer ([`crate::proxy::spawn_proxy`]) installs the fail-closed
+    /// default from the bound address at spawn time. Enforced on every
+    /// `/api/*` request BEFORE authentication.
+    pub host_origin: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::host_origin::HostOriginPolicy>>>,
 }
 
 impl ApiContext {
@@ -156,6 +164,7 @@ impl ApiContext {
             engine: None,
             break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
             audit_hash_key: None,
+            host_origin: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -171,6 +180,7 @@ impl ApiContext {
             engine: None,
             break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
             audit_hash_key: None,
+            host_origin: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -186,6 +196,7 @@ impl ApiContext {
             engine: None,
             break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
             audit_hash_key: None,
+            host_origin: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -236,6 +247,36 @@ impl ApiContext {
     pub fn audit_hash_key(&self) -> Option<&[u8]> {
         self.audit_hash_key.as_ref().map(|v| v.as_slice())
     }
+
+    /// Install the control-plane Host/Origin allowlist (R9-5/F6.1). Product
+    /// wiring (daemon) calls this with the policy built from the real listen
+    /// address + config so wildcard/blank entries FAIL the boot; every other
+    /// producer gets the fail-closed default installed by
+    /// [`Self::ensure_host_origin`].
+    #[must_use]
+    pub fn with_host_origin(self, policy: crate::host_origin::HostOriginPolicy) -> Self {
+        let _ = self.host_origin.set(std::sync::Arc::new(policy));
+        self
+    }
+
+    /// The installed policy, if any.
+    #[must_use]
+    pub fn host_origin_policy(&self) -> Option<&crate::host_origin::HostOriginPolicy> {
+        self.host_origin.get().map(std::sync::Arc::as_ref)
+    }
+
+    /// Install the DEFAULT (fail-closed) policy for a bound address when the
+    /// product wiring has not installed one. Called by `spawn_proxy` with the
+    /// requested listen address: loopback binds get the loopback names,
+    /// non-loopback binds get ONLY the explicitly configured entries
+    /// (config-driven, A.1).
+    pub fn ensure_host_origin(&self, listen: &std::net::SocketAddr, cfg: &ProxyConfig) {
+        if self.host_origin.get().is_none() {
+            if let Ok(policy) = crate::host_origin::HostOriginPolicy::build(listen, cfg) {
+                let _ = self.host_origin.set(std::sync::Arc::new(policy));
+            }
+        }
+    }
 }
 
 /// Determine if a path belongs to the API.
@@ -259,9 +300,12 @@ pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// Admin token expected by the control plane: a non-empty `Some` means
-/// authentication is active (`None` or empty = dev mode, open API).
+/// authentication is active.
+///
+/// **R9-5/F6 dev-mode semantics: `None`/empty = the control plane is CLOSED
+/// (every data route 401s) — never open.**
 #[must_use]
-pub(crate) fn expected_admin_token(cfg: &ProxyConfig) -> Option<&str> {
+pub fn expected_admin_token(cfg: &ProxyConfig) -> Option<&str> {
     cfg.admin_token.as_deref().filter(|t| !t.is_empty())
 }
 
@@ -304,17 +348,86 @@ fn route_serves_data(path: &str) -> bool {
     path != "/api/dashboard"
 }
 
-/// Control-plane authentication gate (review v5 F6).
+/// Control-plane authentication gate — **FAIL-CLOSED** (R9-5 / F6.1).
 ///
-/// `None` = allow (valid token, exempt route, or dev mode without token).
-/// `Some(resp)` = reject with that response (401 when the token is missing).
+/// Every data `/api/*` route requires a valid admin token; the dashboard
+/// (public HTML without data) is exempt. **Dev mode is CLOSED, not open:**
+/// when no token is configured there is no valid credential, so every data
+/// route answers 401 — loopback included (the old "None = open control
+/// plane" was the R9-5 vulnerability: a DNS-rebinding page could drive the
+/// API from a browser). `None` only for an allowed request.
 #[must_use]
 fn auth_gate(cfg: &ProxyConfig, path: &str, headers: &hyper::HeaderMap) -> Option<Response<Full<Bytes>>> {
-    if let Some(expected) = expected_admin_token(cfg) {
-        if route_serves_data(path) && !authorized(headers, expected) {
-            return Some(json_response(StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#));
+    if !route_serves_data(path) {
+        return None;
+    }
+    let authenticated = expected_admin_token(cfg).is_some_and(|expected| authorized(headers, expected));
+    if !authenticated {
+        return Some(json_response(StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#));
+    }
+    None
+}
+
+/// Control-plane Host/Origin gate — anti-DNS-rebinding (R9-5 / F6.1).
+///
+/// Enforced on EVERY `/api/*` request (dashboard included) BEFORE the auth
+/// gate: a rebound/evil Host or Origin is rejected 403 without ever reaching
+/// the token check (defense-in-depth works even for an operator who happens
+/// to hold a valid token in the attacked browser).
+///
+/// - `Host` must be in the exact allowlist ([`crate::host_origin`]); a
+///   loopback bind defaults to `localhost`/`127.0.0.1`/`[::1]`, a public
+///   bind is fail-closed (only configured entries).
+/// - A present `Origin` must be same-origin or explicitly allowlisted
+///   (`Origin: null` — sandboxed iframe — is always rejected).
+/// - A browser mutation (Origin present) must not carry a form-submittable
+///   "simple" content type (`text/plain`, urlencoded, multipart).
+///
+/// `None` = allowed (no policy installed: direct-handler tests only) or the
+/// request passed all three checks.
+#[must_use]
+fn anti_rebinding_gate(
+    ctx: &ApiContext,
+    method: &str,
+    path: &str,
+    headers: &hyper::HeaderMap,
+) -> Option<Response<Full<Bytes>>> {
+    let policy = ctx.host_origin_policy()?;
+    let forbidden = |msg: &str| {
+        Some(json_response(
+            StatusCode::FORBIDDEN,
+            &format!(r#"{{"error":"forbidden","detail":"{msg}"}}"#),
+        ))
+    };
+
+    let host_header = headers
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // A missing Host is itself malformed for a browser client (HTTP/1.1
+    // requires it) and cannot be allowlisted → reject.
+    if !policy.host_allowed(host_header) {
+        return forbidden("host not allowed (anti-rebinding allowlist)");
+    }
+
+    let origin = headers
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !policy.origin_allowed(origin, host_header) {
+        return forbidden("origin not allowed (same-origin/allowlist check)");
+    }
+
+    // Browser mutations must not use the form-submittable simple types.
+    let is_mutation = matches!(method, "POST" | "PUT" | "PATCH" | "DELETE");
+    if !origin.is_empty() && is_mutation {
+        let ct = headers.get(hyper::header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
+        if !crate::host_origin::HostOriginPolicy::mutation_content_type_allowed(ct) {
+            return forbidden("form-submittable content type not allowed for mutations");
         }
     }
+
+    let _ = path; // path is not part of the allowlist decision; kept for signature clarity
     None
 }
 
@@ -354,10 +467,21 @@ pub async fn handle_api_request(
     let path = parts.uri.path().to_string();
     let method = parts.method.clone();
 
-    // -- Control plane auth (P0, review v5 F6) ------------------------------
-    // If an admin token is configured, all DATA routes `/api/*` require
-    // authentication; the dashboard (public HTML without data) is exempt.
-    // Without a configured token (dev mode / tests) the control plane is open.
+    // -- Control plane anti-rebinding gate (P0, R9-5/F6.1) -------------------
+    // FIRST gate: a rebound/evil Host or Origin is 403'd before anything
+    // else (including before the token check), so a DNS-rebinding page can
+    // never reach the auth layer at all.
+    {
+        if let Some(denied) = anti_rebinding_gate(ctx, method.as_str(), &path, &parts.headers) {
+            return Ok(denied);
+        }
+    }
+
+    // -- Control plane auth (P0, R9-5/F6.1) ----------------------------------
+    // FAIL-CLOSED: if an admin token is configured, all DATA routes `/api/*`
+    // require authentication; the dashboard (public HTML without data) is
+    // exempt. With NO configured token the control plane is CLOSED (401) —
+    // loopback included; the old dev-mode "open API" was the R9-5 finding.
     {
         let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
         if let Some(denied) = auth_gate(&cfg, &path, &parts.headers) {
@@ -617,6 +741,12 @@ impl ConfigPatch {
             health_path: self.health_path.unwrap_or_else(|| base.health_path.clone()),
             max_body_bytes: self.max_body_bytes.resolve(base.max_body_bytes),
             admin_token: self.admin_token.resolve(base.admin_token.clone()),
+            // Host/Origin allowlists (R9-5/F6.1) are not hot-toggleable via
+            // this route: they are boot-time security config (the policy is
+            // built once per boot from the listen address), so the YAML/
+            // startup values are always preserved here.
+            allowed_hosts: base.allowed_hosts.clone(),
+            allowed_origins: base.allowed_origins.clone(),
             // The detection policy is NOT touched via this route: it has its own
             // door (`PUT /api/policy`), which validates the rules and
             // recompiles the engine. Here it is always preserved.
@@ -1278,26 +1408,42 @@ fn apply_break_glass_issue(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full
 }
 
 /// Core of `POST /api/allowlist` (testable without a socket).
+///
+/// R9-7/F6.3: the body carries the RAW value (`{"value": "sk-..."}`); only
+/// its **HMAC fingerprint** (`cerberus:allowlist:v1` domain, installation
+/// key) is persisted — the raw value is NEVER stored, echoed back in the
+/// response, or logged. Requires the installation audit key (product wiring
+/// always keys).
 fn apply_allowlist_add(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Bytes>> {
     let value = match allowlist_value(body_bytes) {
         Ok(v) => v,
         Err(resp) => return *resp,
     };
+    let Some(key) = ctx.audit_hash_key() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"installation key not wired: the allowlist persists HMAC fingerprints (R9-7) and cannot run unkeyed"}"#,
+        );
+    };
+    let fingerprint = crate::allowlist::fingerprint(key, &value);
 
     let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    if live.policy.allows(&value) {
+    if live.policy.allowlist.contains(&fingerprint) {
         // Idempotent: it was already there, we do not rewrite the YAML.
         return json_response(
             StatusCode::OK,
-            &format!(r#"{{"status":"ok","added":{value:?},"already_present":true}}"#),
+            &format!(r#"{{"status":"ok","fingerprint":"{fingerprint}","already_present":true}}"#),
         );
     }
     let mut candidate = live.policy.clone();
-    candidate.allowlist.push(value.clone());
+    candidate.allowlist.push(fingerprint.clone());
     if let Err(resp) = commit_policy(ctx, &mut live, candidate) {
         return *resp;
     }
-    json_response(StatusCode::OK, &format!(r#"{{"status":"ok","added":{value:?}}}"#))
+    json_response(
+        StatusCode::OK,
+        &format!(r#"{{"status":"ok","fingerprint":"{fingerprint}"}}"#),
+    )
 }
 
 /// Extract `{"value": "…"}` from the body of the allowlist routes.
@@ -1342,25 +1488,45 @@ async fn handle_delete_allowlist(
 }
 
 /// Core of `DELETE /api/allowlist` (testable without a socket).
+///
+/// R9-7/F6.3: the body value may be the RAW value (its fingerprint is
+/// computed and removed) or an already-persisted fingerprint. Error and ok
+/// responses carry the FINGERPRINT only — never the raw value.
 fn apply_allowlist_remove(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Bytes>> {
     let value = match allowlist_value(body_bytes) {
         Ok(v) => v,
         Err(resp) => return *resp,
     };
+    // Either the caller passes the fingerprint itself (the dashboard lists
+    // fingerprints) or the raw value (compute its fingerprint here).
+    let fingerprint = if crate::allowlist::is_fingerprint(&value) {
+        value
+    } else {
+        let Some(key) = ctx.audit_hash_key() else {
+            return json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":"installation key not wired: the allowlist persists HMAC fingerprints (R9-7) and cannot run unkeyed"}"#,
+            );
+        };
+        crate::allowlist::fingerprint(key, &value)
+    };
 
     let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    if !live.policy.allows(&value) {
+    if !live.policy.allowlist.contains(&fingerprint) {
         return json_response(
             StatusCode::NOT_FOUND,
-            &format!(r#"{{"error":"not in allowlist","value":{value:?}}}"#),
+            &format!(r#"{{"error":"not in allowlist","fingerprint":"{fingerprint}"}}"#),
         );
     }
     let mut candidate = live.policy.clone();
-    candidate.allowlist.retain(|v| *v != value);
+    candidate.allowlist.retain(|v| *v != fingerprint);
     if let Err(resp) = commit_policy(ctx, &mut live, candidate) {
         return *resp;
     }
-    json_response(StatusCode::OK, &format!(r#"{{"status":"ok","removed":{value:?}}}"#))
+    json_response(
+        StatusCode::OK,
+        &format!(r#"{{"status":"ok","removed":"{fingerprint}"}}"#),
+    )
 }
 
 // ─── Effective CSP of the dashboard (review v6.1) ───────────────────────
@@ -2056,7 +2222,8 @@ mod tests {
     }
 
     /// Context with YAML persistence and a connected live engine (what the real
-    /// daemon has).
+    /// daemon has). R9-7: the installation audit-hash key is wired (like the
+    /// daemon) — the allowlist fingerprints require it.
     fn policy_ctx(dir: &std::path::Path) -> (ApiContext, crate::detection_policy::EngineControl) {
         let base = vec![crate::detection_policy::tests_support::base_rule("pack.token")];
         let engine =
@@ -2065,8 +2232,18 @@ mod tests {
         let control = crate::detection_policy::EngineControl::new(live, base, None);
         let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default())))
             .with_config_path(dir.join("config.yaml"))
-            .with_engine(control.clone());
+            .with_engine(control.clone())
+            .with_audit_hash_key(TEST_INSTALLATION_KEY.to_vec());
         (ctx, control)
+    }
+
+    /// Deterministic test installation key (R9-7 fingerprints).
+    const TEST_INSTALLATION_KEY: &[u8] = b"cerberus-test-installation-key-0123456789ab";
+
+    /// The fingerprint `apply_allowlist_add` persists for `raw` under
+    /// [`TEST_INSTALLATION_KEY`].
+    fn test_fingerprint(raw: &str) -> String {
+        crate::allowlist::fingerprint(TEST_INSTALLATION_KEY, raw)
     }
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -2171,13 +2348,14 @@ mod tests {
         let (ctx, control) = policy_ctx(&dir);
         assert_eq!(control.live_rules(), 1, "starts with the pack rule");
 
+        let fp = test_fingerprint("sk-EXAMPLE");
         let (status, doc) = put_policy(
             &ctx,
             &serde_json::json!({
                 "categories": {"secrets": "block"},
                 "rules": {"pack.token": "warn"},
                 "custom_rules": [custom_rule("custom.badge", "internal_code", "block", r"BADGE-\d{4}")],
-                "allowlist": ["sk-EXAMPLE"],
+                "allowlist": [fp],
             }),
         );
         assert_eq!(status, StatusCode::OK, "{doc}");
@@ -2185,7 +2363,10 @@ mod tests {
         assert_eq!(doc["categories"]["secrets"].as_str(), Some("block"));
         assert_eq!(doc["rules"]["pack.token"].as_str(), Some("warn"));
         assert_eq!(doc["custom_rules"][0]["flag"].as_str(), Some("custom.badge"));
-        assert_eq!(doc["allowlist"][0].as_str(), Some("sk-EXAMPLE"));
+        assert_eq!(
+            doc["allowlist"][0].as_str(),
+            Some(test_fingerprint("sk-EXAMPLE")).as_deref()
+        );
 
         // Live engine: the pack rule is STILL there and the custom one was added.
         assert_eq!(control.live_rules(), 2, "packs + custom, without losing any");
@@ -2196,7 +2377,11 @@ mod tests {
         let reloaded = ProxyConfig::parse(&yaml).expect("reparse");
         assert_eq!(reloaded.policy, ctx.config.read().unwrap().policy);
         assert_eq!(reloaded.policy.custom_rules.len(), 1);
-        assert_eq!(reloaded.policy.allowlist, vec!["sk-EXAMPLE".to_string()]);
+        assert_eq!(reloaded.policy.allowlist, vec![test_fingerprint("sk-EXAMPLE")]);
+        assert!(
+            !yaml.contains("sk-EXAMPLE\""),
+            "raw value never lands in the YAML: {yaml}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2246,8 +2431,12 @@ mod tests {
     async fn policy_and_allowlist_are_exposed_together() {
         let dir = tmpdir("together");
         let (ctx, _control) = policy_ctx(&dir);
-        let (status, _) = decode(apply_allowlist_add(&ctx, br#"{"value":"sk-EXAMPLE-do-not-flag"}"#));
-        assert_eq!(status, StatusCode::OK);
+        let raw = "sk-EXAMPLE-do-not-flag";
+        let (status, doc) = decode(apply_allowlist_add(&ctx, br#"{"value":"sk-EXAMPLE-do-not-flag"}"#));
+        assert_eq!(status, StatusCode::OK, "{doc}");
+        // R9-7: the response carries the FINGERPRINT, never the raw value.
+        assert_eq!(doc["fingerprint"].as_str(), Some(test_fingerprint(raw)).as_deref());
+        assert!(!doc.to_string().contains(raw), "raw value must not be echoed: {doc}");
 
         let body = handle_get_policy(&ctx)
             .await
@@ -2262,14 +2451,16 @@ mod tests {
             Some(0),
             "without an explicit override, the API exposes inherited categories as absent"
         );
-        assert_eq!(json["allowlist"][0].as_str(), Some("sk-EXAMPLE-do-not-flag"));
+        assert_eq!(json["allowlist"][0].as_str(), Some(test_fingerprint(raw)).as_deref());
         assert_eq!(json["valid_actions"].as_array().map(Vec::len), Some(4));
         assert_eq!(json["valid_categories"].as_array().map(Vec::len), Some(3));
         assert_eq!(json["persisted"].as_bool(), Some(true), "the policy is in the YAML");
 
-        // The allowlist ended up in the YAML (survives restart).
+        // The allowlist FINGERPRINT ended up in the YAML (survives restart);
+        // the raw value does not exist anywhere on disk (R9-7).
         let yaml = std::fs::read_to_string(dir.join("config.yaml")).expect("yaml");
-        assert!(yaml.contains("sk-EXAMPLE-do-not-flag"), "{yaml}");
+        assert!(yaml.contains(test_fingerprint(raw).as_str()), "{yaml}");
+        assert!(!yaml.contains(raw), "raw value never persisted: {yaml}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2283,12 +2474,22 @@ mod tests {
         }
         assert_eq!(
             ctx.config.read().unwrap().policy.allowlist,
-            vec!["dup".to_string()],
+            vec![test_fingerprint("dup")],
             "it is not duplicated"
         );
 
         let (status, doc) = decode(apply_allowlist_remove(&ctx, br#"{"value":"ghost"}"#));
         assert_eq!(status, StatusCode::NOT_FOUND, "{doc}");
+        // R9-7: the 404 echoes the computed FINGERPRINT, never the raw value.
+        assert!(
+            !doc.to_string().contains("ghost"),
+            "the raw value must not be echoed back: {doc}"
+        );
+        assert_eq!(
+            doc["fingerprint"].as_str(),
+            Some(test_fingerprint("ghost")).as_deref(),
+            "the fingerprint identifies the entry"
+        );
 
         let (status, _) = decode(apply_allowlist_remove(&ctx, br#"{"value":"dup"}"#));
         assert_eq!(status, StatusCode::OK);

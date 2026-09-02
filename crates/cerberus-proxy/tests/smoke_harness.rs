@@ -14,6 +14,36 @@ use cerberus_proxy::api::ApiContext;
 use cerberus_proxy::config::{FailPolicy, OperationMode, ProxyConfig, UpstreamConfig};
 use cerberus_proxy::proxy::{spawn_proxy, ProxyContext};
 
+/// R9-5/F6: the harness contexts authenticate the control plane exactly like
+/// the product does — the daemon always has a token, and dev-mode `None` now
+/// means the control plane is CLOSED (401), so every context carries one.
+const HARNESS_ADMIN_TOKEN: &str = "harness-admin-token-0123456789abcdef";
+
+/// Deterministic test installation key (R9-7 allowlist fingerprints).
+const HARNESS_INSTALLATION_KEY: &[u8] = b"harness-installation-key-0123456789abcdef";
+
+/// The HMAC fingerprint the control plane persists for `raw` under
+/// [`HARNESS_INSTALLATION_KEY`] — the same conversion `POST /api/allowlist`
+/// performs.
+fn harness_fingerprint(raw: &str) -> String {
+    cerberus_proxy::allowlist::fingerprint(HARNESS_INSTALLATION_KEY, raw)
+}
+
+/// HTTP client carrying the harness admin token on every request. Safe for
+/// data-plane calls too: the proxy never forwards `x-cerberus-admin-token`
+/// to the upstream (fix review v4 #2).
+fn api_client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-cerberus-admin-token",
+        reqwest::header::HeaderValue::from_static(HARNESS_ADMIN_TOKEN),
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("api client")
+}
+
 fn local_addr(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
@@ -21,7 +51,13 @@ fn local_addr(port: u16) -> SocketAddr {
 /// Build a `ProxyContext` manually (mirrors the pattern from proxy.rs unit test).
 #[allow(clippy::needless_pass_by_value)]
 fn make_ctx(rules: Vec<cerberus_engine::rule::Rule>, operation_mode: OperationMode) -> std::sync::Arc<ProxyContext> {
-    make_ctx_opts(rules, operation_mode, "http://127.0.0.1:9999", FailPolicy::Closed, None)
+    make_ctx_opts(
+        rules,
+        operation_mode,
+        "http://127.0.0.1:9999",
+        FailPolicy::Closed,
+        Some(HARNESS_ADMIN_TOKEN),
+    )
 }
 
 /// Variant with a configurable upstream (for integrations with a real mock).
@@ -31,7 +67,13 @@ fn make_ctx_with_url(
     operation_mode: OperationMode,
     upstream_url: &str,
 ) -> std::sync::Arc<ProxyContext> {
-    make_ctx_opts(rules, operation_mode, upstream_url, FailPolicy::Closed, None)
+    make_ctx_opts(
+        rules,
+        operation_mode,
+        upstream_url,
+        FailPolicy::Closed,
+        Some(HARNESS_ADMIN_TOKEN),
+    )
 }
 
 /// Variant with a protected control plane (`admin_token`) — fix P1 admin.
@@ -83,7 +125,9 @@ fn make_ctx_with_token_and_config_path(
         config: shared.clone(),
         engine: engine_arc,
         redact_options: cerberus_engine::redact::RedactOptions::default(),
-        api: ApiContext::new(shared).with_config_path(config_path),
+        api: ApiContext::new(shared)
+            .with_config_path(config_path)
+            .with_audit_hash_key(HARNESS_INSTALLATION_KEY.to_vec()),
         last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
     })
 }
@@ -95,7 +139,29 @@ fn make_ctx_with_fail_policy(
     upstream_url: &str,
     fail_policy: FailPolicy,
 ) -> std::sync::Arc<ProxyContext> {
-    make_ctx_opts(rules, operation_mode, upstream_url, fail_policy, None)
+    make_ctx_opts(
+        rules,
+        operation_mode,
+        upstream_url,
+        fail_policy,
+        Some(HARNESS_ADMIN_TOKEN),
+    )
+}
+
+/// Tokenless variant (R9-5/F6): for tests that exercise the CLOSED control
+/// plane itself or the startup validation that refuses tokenless binds.
+#[allow(clippy::needless_pass_by_value)]
+fn make_ctx_tokenless(
+    rules: Vec<cerberus_engine::rule::Rule>,
+    operation_mode: OperationMode,
+) -> std::sync::Arc<ProxyContext> {
+    make_ctx_opts(
+        rules,
+        operation_mode,
+        "http://127.0.0.1:9999",
+        FailPolicy::Closed,
+        Some(HARNESS_ADMIN_TOKEN),
+    )
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
@@ -122,6 +188,8 @@ fn make_ctx_opts(
         upstreams,
         mode: operation_mode,
         fail_policy,
+        // Raw semantics: None stays None (see make_ctx_tokenless); the
+        // convenience wrappers below default the harness token (R9-5/F6).
         admin_token: admin_token.map(ToString::to_string),
         ..ProxyConfig::default()
     };
@@ -131,7 +199,7 @@ fn make_ctx_opts(
         config: shared.clone(),
         engine: engine_arc,
         redact_options: cerberus_engine::redact::RedactOptions::default(),
-        api: ApiContext::new(shared),
+        api: ApiContext::new(shared).with_audit_hash_key(HARNESS_INSTALLATION_KEY.to_vec()),
         last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
     })
 }
@@ -161,7 +229,9 @@ fn make_ctx_with_config_path(
         upstreams,
         mode: operation_mode,
         fail_policy: FailPolicy::Closed,
-        admin_token: None,
+        // R9-5/F6: dev-mode None = closed control plane; the harness
+        // authenticates like the product.
+        admin_token: Some(HARNESS_ADMIN_TOKEN.to_string()),
         ..ProxyConfig::default()
     };
     let shared = std::sync::Arc::new(std::sync::RwLock::new(config));
@@ -170,7 +240,9 @@ fn make_ctx_with_config_path(
         config: shared.clone(),
         engine: engine_arc,
         redact_options: cerberus_engine::redact::RedactOptions::default(),
-        api: ApiContext::new(shared).with_config_path(config_path),
+        api: ApiContext::new(shared)
+            .with_config_path(config_path)
+            .with_audit_hash_key(HARNESS_INSTALLATION_KEY.to_vec()),
         last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
     })
 }
@@ -180,9 +252,13 @@ fn make_ctx_with_config_path(
 /// and the dataplane.
 fn make_policy_ctx(
     base_rules: Vec<cerberus_engine::rule::Rule>,
-    config: ProxyConfig,
+    mut config: ProxyConfig,
     config_path: std::path::PathBuf,
 ) -> std::sync::Arc<ProxyContext> {
+    // R9-5/F6: dev-mode None = closed control plane; the harness authenticates.
+    if config.admin_token.is_none() {
+        config.admin_token = Some(HARNESS_ADMIN_TOKEN.to_string());
+    }
     let engine =
         cerberus_proxy::detection_policy::build_engine(&base_rules, &config.policy, None).expect("policy engine");
     let shared = std::sync::Arc::new(std::sync::RwLock::new(config));
@@ -194,7 +270,8 @@ fn make_policy_ctx(
         redact_options: cerberus_engine::redact::RedactOptions::default(),
         api: ApiContext::new(shared)
             .with_config_path(config_path)
-            .with_engine(control),
+            .with_engine(control)
+            .with_audit_hash_key(HARNESS_INSTALLATION_KEY.to_vec()),
         last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
     })
 }
@@ -225,7 +302,9 @@ async fn test_health_check_with_reqwest() {
     let ctx = make_ctx(vec![], OperationMode::Enforce);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let resp = reqwest::get(&format!("http://{addr}/health"))
+    let resp = api_client()
+        .get(format!("http://{addr}/health"))
+        .send()
         .await
         .expect("health request");
     assert_eq!(resp.status(), 200);
@@ -236,7 +315,9 @@ async fn test_api_config_returns_json() {
     let ctx = make_ctx(vec![], OperationMode::Enforce);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let resp = reqwest::get(&format!("http://{addr}/api/config"))
+    let resp = api_client()
+        .get(format!("http://{addr}/api/config"))
+        .send()
         .await
         .expect("config request");
     assert_eq!(resp.status(), 200);
@@ -249,7 +330,9 @@ async fn test_api_events_empty() {
     let ctx = make_ctx(vec![], OperationMode::Enforce);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let resp = reqwest::get(&format!("http://{addr}/api/events"))
+    let resp = api_client()
+        .get(format!("http://{addr}/api/events"))
+        .send()
         .await
         .expect("events request");
     assert_eq!(resp.status(), 200);
@@ -265,7 +348,9 @@ async fn test_api_stats_total_zero() {
     let ctx = make_ctx(vec![], OperationMode::Enforce);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let resp = reqwest::get(&format!("http://{addr}/api/stats"))
+    let resp = api_client()
+        .get(format!("http://{addr}/api/stats"))
+        .send()
         .await
         .expect("stats request");
     assert_eq!(resp.status(), 200);
@@ -294,7 +379,7 @@ async fn test_shadow_does_not_block() {
     let ctx = make_ctx(rules, OperationMode::Shadow);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let resp = reqwest::Client::new()
+    let resp = api_client()
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
         .body(r#"{"content":"sk-abcDEFghijklmnopqrstuvwxyz1234"}"#)
@@ -338,7 +423,7 @@ async fn test_enforce_blocks_secret() {
     let ctx = make_ctx(rules, OperationMode::Enforce);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let resp = reqwest::Client::new()
+    let resp = api_client()
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
         .body(r#"{"content":"sk-abcDEFghijklmnopqrstuvwxyz1234"}"#)
@@ -370,7 +455,7 @@ async fn test_events_recorded_after_block() {
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
     // Trigger block
-    let _block_resp = reqwest::Client::new()
+    let _block_resp = api_client()
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
         .body(r#"{"content":"sk-abcDEFghijklmnopqrstuvwxyz1234"}"#)
@@ -379,7 +464,9 @@ async fn test_events_recorded_after_block() {
         .expect("trigger block");
 
     // Check events
-    let events_resp = reqwest::get(&format!("http://{addr}/api/events"))
+    let events_resp = api_client()
+        .get(format!("http://{addr}/api/events"))
+        .send()
         .await
         .expect("events check");
     assert_eq!(events_resp.status(), 200);
@@ -409,7 +496,7 @@ async fn test_clean_request_not_blocked() {
     let ctx = make_ctx(rules, OperationMode::Shadow);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let resp = reqwest::Client::new()
+    let resp = api_client()
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
         .body(r#"{"content":"normal message"}"#)
@@ -526,7 +613,7 @@ async fn test_hot_reload_put_config_takes_effect() {
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
 
-    let client = reqwest::Client::new();
+    let client = api_client();
     let before = client
         .post(format!("{base}/test"))
         .header("content-type", "application/json")
@@ -582,7 +669,7 @@ async fn test_break_glass_header_bypasses_block() {
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
     // Without bypass, 403.
-    let client = reqwest::Client::new();
+    let client = api_client();
     let resp = client
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
@@ -621,7 +708,7 @@ async fn test_allowlist_applied_in_scan_path() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let before = client
         .post(format!("{base}/test"))
@@ -669,10 +756,10 @@ async fn test_health_requires_admin_token_when_configured() {
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
 
-    let ok = reqwest::get(&format!("{base}/health")).await.expect("health");
+    let ok = api_client().get(format!("{base}/health")).send().await.expect("health");
     assert_eq!(ok.status(), 200, "health is exempt from admin auth");
 
-    let client = reqwest::Client::new();
+    let client = api_client();
     let denied = client
         .get(format!("{base}/api/config"))
         .send()
@@ -702,7 +789,7 @@ async fn test_put_config_requires_admin_token() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     // PUT /api/config without token → 401
     let denied = client
@@ -737,7 +824,7 @@ async fn test_fail_policy_open_forwards_non_json_body() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let client = reqwest::Client::new();
+    let client = api_client();
     let body = "not-json";
     let resp = client
         .post(format!("http://{addr}/test"))
@@ -766,7 +853,7 @@ async fn test_fail_policy_closed_rejects_dead_body() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let client = reqwest::Client::new();
+    let client = api_client();
     let resp = client
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
@@ -799,7 +886,7 @@ async fn test_bypass_reason_never_persisted_raw() {
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
 
-    let client = reqwest::Client::new();
+    let client = api_client();
     let by = client
         .post(format!("{base}/test"))
         .header("content-type", "application/json")
@@ -841,7 +928,7 @@ async fn test_upstream_response_too_large_is_502() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     // Limit the body to 8 bytes (the mock response {"ok":true} exceeds it).
     let cfg: serde_json::Value = client
@@ -886,7 +973,32 @@ const ADMIN_TOKEN: &str = "s3cret-admin-token-12345678";
 async fn test_spawn_non_loopback_requires_admin_token() {
     // Review v4 #1: startup on 0.0.0.0 without an admin token must FAIL with
     // an error (a compose with `change-me` < 24 chars also does not start).
-    let ctx = make_ctx(vec![], OperationMode::Enforce);
+    // R9-5/F6: `make_ctx` now defaults a token (dev-mode None = closed), so
+    // the tokenless spawn is built explicitly.
+    let ctx = make_ctx_opts(
+        vec![],
+        OperationMode::Enforce,
+        "http://127.0.0.1:9999",
+        FailPolicy::Closed,
+        None,
+    );
+    let ctx = {
+        let mut cfg = (*ctx.config.read().unwrap_or_else(std::sync::PoisonError::into_inner)).clone();
+        cfg.admin_token = None;
+        let engine = ctx
+            .engine
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let api = ctx.api.clone();
+        std::sync::Arc::new(ProxyContext {
+            config: std::sync::Arc::new(std::sync::RwLock::new(cfg)),
+            engine: std::sync::Arc::new(std::sync::RwLock::new(engine)),
+            redact_options: cerberus_engine::redact::RedactOptions::default(),
+            api,
+            last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        })
+    };
     let non_loop: SocketAddr = "0.0.0.0:0".parse().expect("addr");
     let err = spawn_proxy(non_loop, ctx).await.unwrap_err().to_string();
     assert!(err.contains("admin token"), "got: {err}");
@@ -903,7 +1015,7 @@ async fn test_admin_token_header_not_forwarded_to_upstream() {
         ADMIN_TOKEN,
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let resp = client
         .post(format!("http://{addr}/test"))
@@ -944,7 +1056,7 @@ async fn test_bypass_data_plane_requires_admin_header_not_bearer() {
         ADMIN_TOKEN,
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     // Bypass via Authorization → ignored → 403 (block).
     let blocked = client
@@ -996,7 +1108,7 @@ async fn test_dashboard_served_without_auth_when_token_set() {
         ADMIN_TOKEN,
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let base = format!("http://{addr}");
 
     // Dashboard without auth → 200 HTML and no token in the DOM.
@@ -1052,7 +1164,9 @@ async fn test_stats_filters_by_provider_query() {
     }
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
 
-    let stats = reqwest::get(&format!("http://{addr}/api/stats?provider=openai"))
+    let stats = api_client()
+        .get(format!("http://{addr}/api/stats?provider=openai"))
+        .send()
         .await
         .expect("filtered stats")
         .json::<serde_json::Value>()
@@ -1078,7 +1192,7 @@ async fn test_api_body_limited_to_1_mebibyte() {
     let ctx = make_ctx_with_url(Vec::new(), OperationMode::Enforce, &format!("http://{mock_addr}"));
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let big_body = serde_json::json!({ "value": "x".repeat(1_100_000) }).to_string();
     assert!(big_body.len() > (1 << 20), "test requires a >1MiB body");
@@ -1119,7 +1233,7 @@ async fn test_hot_reload_swaps_engine_without_restart() {
     let ctx = make_ctx_with_url(Vec::new(), OperationMode::Enforce, "https://invalid-upstream");
     let proxy = spawn_proxy(local_addr(0), ctx.clone()).await.expect("spawn");
     let base = format!("http://{}", proxy.0);
-    let client = reqwest::Client::new();
+    let client = api_client();
     let marker = "HOTRELOAD_SIGNAL_VAL";
 
     // 1) base engine (no rules) → the marker is NOT blocked (goes to upstream/mock).
@@ -1190,7 +1304,7 @@ async fn config_get_never_leaks_admin_token() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     // Without token → 401 (the config exposes control-plane data).
     let denied = client
@@ -1242,7 +1356,7 @@ async fn config_put_persists_yaml() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let cfg: serde_json::Value = client
         .get(format!("{base}/api/config"))
@@ -1284,7 +1398,7 @@ async fn upstream_add_list_delete() {
     let ctx = make_ctx_with_url(Vec::new(), OperationMode::Enforce, &format!("http://{mock_adj}"));
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     // Initial list: only the default upstream.
     let list0 = client
@@ -1361,7 +1475,7 @@ async fn upstream_requires_auth_when_token_set() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     assert_eq!(
         client
@@ -1423,7 +1537,7 @@ async fn config_get_then_put_over_http_preserves_the_admin_token() {
         make_ctx_with_token_and_config_path("http://127.0.0.1:9999", Some(STRONG_ADMIN_TOKEN), config_path.clone());
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     // 1) Authenticated GET: the token value does NOT travel; the boolean does.
     let resp = client
@@ -1502,7 +1616,7 @@ async fn put_config_cannot_disable_auth_via_the_read_only_flag() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let put = client
         .put(format!("{base}/api/config"))
@@ -1528,23 +1642,16 @@ async fn put_config_cannot_disable_auth_via_the_read_only_flag() {
 async fn put_config_rejects_public_listen_without_a_strong_token() {
     let config_path = std::env::temp_dir().join("cerberus_v61_public_listen.yaml");
     std::fs::remove_file(&config_path).ok();
-    let ctx = make_ctx_with_token_and_config_path("http://127.0.0.1:9999", None, config_path.clone());
+    // R9-5/F6 delta: a tokenless control plane is CLOSED (401) — the API can
+    // no longer be driven at all in that state, so the weak-token rejection
+    // is exercised from an AUTHENTICATED context whose live token is strong.
+    let ctx =
+        make_ctx_with_token_and_config_path("http://127.0.0.1:9999", Some(HARNESS_ADMIN_TOKEN), config_path.clone());
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
-    // No token and public listen → 400 (the daemon would not start like that).
-    let denied = client
-        .put(format!("{base}/api/config"))
-        .json(&serde_json::json!({"listen": "0.0.0.0:8080"}))
-        .send()
-        .await
-        .expect("put public listen");
-    assert_eq!(denied.status(), 400, "must refuse to open the control plane");
-    let text = denied.text().await.unwrap_or_default();
-    assert!(text.contains("non-loopback"), "{text}");
-
-    // Short token: also 400.
+    // Public listen + SHORT token → 400 (the daemon would not start like that).
     let short = client
         .put(format!("{base}/api/config"))
         .json(&serde_json::json!({"listen": "0.0.0.0:8080", "admin_token": "change-me"}))
@@ -1552,6 +1659,8 @@ async fn put_config_rejects_public_listen_without_a_strong_token() {
         .await
         .expect("put short token");
     assert_eq!(short.status(), 400, "short token must be refused");
+    let text = short.text().await.unwrap_or_default();
+    assert!(text.contains("non-loopback"), "{text}");
 
     // Nothing was applied in memory or written to disk.
     let cfg: serde_json::Value = client
@@ -1567,10 +1676,10 @@ async fn put_config_rejects_public_listen_without_a_strong_token() {
         Some("127.0.0.1:8787"),
         "rejected patch must not touch the live config"
     );
-    assert_eq!(cfg["admin_token_configured"].as_bool(), Some(false));
+    assert!(cfg["admin_token_configured"].as_bool().unwrap_or(true));
     assert!(!config_path.exists(), "a rejected patch must not write the YAML");
 
-    // With a strong token, the same listen change DOES pass (requires_restart).
+    // With the strong token, the same listen change DOES pass (requires_restart).
     let ok = client
         .put(format!("{base}/api/config"))
         .json(&serde_json::json!({"listen": "0.0.0.0:8080", "admin_token": STRONG_ADMIN_TOKEN}))
@@ -1588,10 +1697,11 @@ async fn put_config_rejects_public_listen_without_a_strong_token() {
 #[tokio::test]
 async fn put_config_persist_failure_leaves_the_live_config_untouched() {
     let unwritable = std::path::PathBuf::from("/nonexistent-cerberus-dir-v61/config.yaml");
-    let ctx = make_ctx_with_token_and_config_path("http://127.0.0.1:9999", None, unwritable);
+    // R9-5/F6: authenticated context (a tokenless control plane is closed).
+    let ctx = make_ctx_with_token_and_config_path("http://127.0.0.1:9999", Some(HARNESS_ADMIN_TOKEN), unwritable);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let put = client
         .put(format!("{base}/api/config"))
@@ -1624,7 +1734,7 @@ async fn policy_categories_and_rules_round_trip() {
     let ctx = make_ctx_with_url(vec![], OperationMode::Enforce, "http://127.0.0.1:9999");
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let pol: serde_json::Value = client
         .get(format!("{base}/api/policy"))
@@ -1704,7 +1814,7 @@ async fn allowlist_add_list_and_remove() {
     let ctx = make_ctx_with_url(vec![], OperationMode::Enforce, "http://127.0.0.1:9999");
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let empty: serde_json::Value = client
         .get(format!("{base}/api/allowlist"))
@@ -1723,6 +1833,14 @@ async fn allowlist_add_list_and_remove() {
         .await
         .expect("post allowlist");
     assert_eq!(added.status(), 200);
+    // R9-7: the add response carries the FINGERPRINT, never the raw value.
+    let added_doc: serde_json::Value = added.json().await.expect("add doc");
+    let expected_fp = harness_fingerprint("sk-EXAMPLE-do-not-flag");
+    assert_eq!(added_doc["fingerprint"].as_str(), Some(expected_fp.as_str()));
+    assert!(
+        !added_doc.to_string().contains("sk-EXAMPLE-do-not-flag"),
+        "the raw value must not be echoed: {added_doc}"
+    );
 
     let listed: serde_json::Value = client
         .get(format!("{base}/api/allowlist"))
@@ -1732,7 +1850,8 @@ async fn allowlist_add_list_and_remove() {
         .json()
         .await
         .expect("parse");
-    assert_eq!(listed[0].as_str(), Some("sk-EXAMPLE-do-not-flag"));
+    // R9-7: the listing shows fingerprints only (the UI shows the digest).
+    assert_eq!(listed[0].as_str(), Some(expected_fp.as_str()));
 
     // The allowlist also appears in the policy document (a single view).
     let pol: serde_json::Value = client
@@ -1743,7 +1862,7 @@ async fn allowlist_add_list_and_remove() {
         .json()
         .await
         .expect("parse");
-    assert_eq!(pol["allowlist"][0].as_str(), Some("sk-EXAMPLE-do-not-flag"));
+    assert_eq!(pol["allowlist"][0].as_str(), Some(expected_fp.as_str()));
 
     let removed = client
         .delete(format!("{base}/api/allowlist"))
@@ -1783,7 +1902,7 @@ async fn policy_and_allowlist_require_the_admin_token() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     for path in ["/api/policy", "/api/allowlist"] {
         let denied = client
@@ -1829,7 +1948,7 @@ async fn policy_custom_rule_and_allowlist_scan_before_after_and_reopen() {
     let ctx = make_policy_ctx(vec![pack_rule.clone()], config, config_path.clone());
     let (addr, proxy_handle) = spawn_proxy(local_addr(0), ctx.clone()).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     assert_eq!(
         post_scan(&client, &base, "badge CUSTOM-1234").await,
@@ -1892,7 +2011,12 @@ async fn policy_custom_rule_and_allowlist_scan_before_after_and_reopen() {
     assert_eq!(custom.flag, "custom.badge");
     assert_eq!(custom.min_length, Some(11));
     assert_eq!(custom.context_keywords, vec!["badge".to_string()]);
-    assert_eq!(reopened.policy.allowlist, vec!["CUSTOM-1234".to_string()]);
+    // R9-7: the YAML stores the FINGERPRINT of the allowed value.
+    assert_eq!(reopened.policy.allowlist, vec![harness_fingerprint("CUSTOM-1234")]);
+    assert!(
+        !yaml.contains("CUSTOM-1234\""),
+        "raw value must not be in the YAML: {yaml}"
+    );
 
     proxy_handle.abort();
     let reopened_ctx = make_policy_ctx(vec![pack_rule], reopened, config_path.clone());
@@ -1964,19 +2088,23 @@ async fn pack_install_wire_v2_accepts_bytes_and_never_opens_legacy_path() {
     let engine = cerberus_engine::engine::EngineBuilder::new(&[])
         .build()
         .expect("engine");
-    let config = ProxyConfig::with_upstream("default", "http://127.0.0.1:9999");
+    let mut config = ProxyConfig::with_upstream("default", "http://127.0.0.1:9999");
+    // R9-5/F6: the harness authenticates the control plane like the product.
+    config.admin_token = Some(HARNESS_ADMIN_TOKEN.to_string());
     let shared = std::sync::Arc::new(std::sync::RwLock::new(config));
     let live = std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(engine)));
     let ctx = std::sync::Arc::new(ProxyContext {
         config: shared.clone(),
         engine: live,
         redact_options: cerberus_engine::redact::RedactOptions::default(),
-        api: ApiContext::new(shared).with_pack_worker(tx),
+        api: ApiContext::new(shared)
+            .with_pack_worker(tx)
+            .with_audit_hash_key(HARNESS_INSTALLATION_KEY.to_vec()),
         last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
     });
     let (addr, proxy_handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let signed_pack = serde_json::json!({
         "pack_json": r#"{"metadata":{"name":"demo","version":"1.0.0","description":"d","author":"a","published":"2026-01-01","min_engine_version":"0.1.0"},"rules":[]}"#,
         "signature_hex": "aa".repeat(64),
@@ -2043,7 +2171,9 @@ async fn dashboard_serves_an_effective_csp_header() {
     let base = format!("http://{addr}");
 
     // The dashboard is public HTML: it is served without a token (carries no data).
-    let resp = reqwest::get(format!("{base}/api/dashboard"))
+    let resp = api_client()
+        .get(format!("{base}/api/dashboard"))
+        .send()
         .await
         .expect("get dashboard");
     assert_eq!(resp.status(), 200);
@@ -2147,7 +2277,7 @@ async fn test_break_glass_one_shot_end_to_end() {
     let ctx_clone = std::sync::Arc::clone(&ctx);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let admin_h = ("x-cerberus-admin-token", admin);
 
     // 1. Issuing WITHOUT a valid admin token is rejected (401).
@@ -2258,7 +2388,7 @@ async fn test_break_glass_wrong_provider_scope_rejected() {
     let ctx_clone = std::sync::Arc::clone(&ctx);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let issued = client
         .post(format!("{base}/api/break-glass"))
@@ -2307,7 +2437,7 @@ async fn test_reversible_vault_round_trip_request_scoped() {
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     // Request 1: secret A.
     let body1 = r#"{"content":"sk-ROUNDTRIPaaa111222333444"}"#;
@@ -2364,7 +2494,7 @@ async fn test_reversible_redaction_is_opt_in_default_irreversible() {
         false, // reversible_redaction NOT enabled
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let r = client
         .post(format!("http://{addr}/test"))
         .header("content-type", "application/json")
@@ -2476,6 +2606,8 @@ fn make_ctx_default_fail_policy(
         upstreams,
         mode: operation_mode,
         // fail_policy left at the DEFAULT (closed-on-critical, R9-12).
+        // R9-5/F6: the harness authenticates the control plane like the product.
+        admin_token: Some(HARNESS_ADMIN_TOKEN.to_string()),
         ..ProxyConfig::default()
     };
     let shared = std::sync::Arc::new(std::sync::RwLock::new(config));
@@ -2484,7 +2616,7 @@ fn make_ctx_default_fail_policy(
         config: shared.clone(),
         engine: engine_arc,
         redact_options: cerberus_engine::redact::RedactOptions::default(),
-        api: ApiContext::new(shared),
+        api: ApiContext::new(shared).with_audit_hash_key(HARNESS_INSTALLATION_KEY.to_vec()),
         last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
     })
 }
@@ -2583,7 +2715,7 @@ async fn per_upstream_shadow_mode_never_blocks_in_mixed_fleet() {
         None,
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("BLOCKSECRET1{}", "aaaaaaaaaa");
 
     // Shadow upstream: never blocks, forwards intact.
@@ -2626,7 +2758,7 @@ async fn per_upstream_enforce_mode_overrides_global_shadow() {
         Some(OperationMode::Enforce),
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("BLOCKSECRET1{}", "bbbbbbbbbb");
     let body = format!(r#"{{"content":"{secret}"}}"#);
 
@@ -2679,9 +2811,10 @@ async fn closed_on_critical_rejects_redaction_failure_with_critical_findings() {
     // Allowlist the BLOCK secret so the pipeline passes the block stage and
     // reaches redaction, where the JSON leaf re-scan still fails on it
     // (the same mechanism as the forward.rs redaction-failure test).
-    ctx.config.write().unwrap().policy.allowlist = vec![block.clone()];
+    // R9-7: the allowlist carries the HMAC fingerprint, not the raw value.
+    ctx.config.write().unwrap().policy.allowlist = vec![harness_fingerprint(&block)];
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let r = client
         .post(format!("http://{addr}/v1/chat"))
@@ -2713,9 +2846,10 @@ async fn closed_on_critical_forwards_original_for_non_critical_redaction_failure
         OperationMode::Enforce,
         &format!("http://{mock_adj}"),
     );
-    ctx.config.write().unwrap().policy.allowlist = vec![block.clone()];
+    // R9-7: the allowlist carries the HMAC fingerprint, not the raw value.
+    ctx.config.write().unwrap().policy.allowlist = vec![harness_fingerprint(&block)];
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let original = format!(r#"{{"content":"{block} {redactable}"}}"#);
 
     let r = client
@@ -2752,7 +2886,7 @@ async fn closed_on_critical_rejects_undecodable_json_body() {
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
     let ctx = make_ctx_default_fail_policy(&[], OperationMode::Enforce, &format!("http://{mock_adj}"));
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let r = client
         .post(format!("http://{addr}/v1/chat"))
         .header("content-type", "application/json")
@@ -2778,7 +2912,7 @@ async fn multipart_text_part_redacted_binary_part_byte_exact_end_to_end() {
         &format!("http://{mock_adj}"),
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("REDACTSECRET2{}", "gggggggggg");
     let binary: Vec<u8> = (0u8..=255).cycle().take(256).collect();
 
@@ -2849,7 +2983,7 @@ async fn multipart_block_rule_blocks_the_request() {
         &format!("http://{mock_adj}"),
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("BLOCKSECRET1{}", "hhhhhhhhhh");
 
     let mut body = Vec::new();
@@ -2879,7 +3013,7 @@ async fn multipart_shadow_mode_forwards_intact() {
     let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
     let ctx = make_ctx_default_fail_policy(&[f3_block_rule()], OperationMode::Shadow, &format!("http://{mock_adj}"));
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("BLOCKSECRET1{}", "iiiiiiiiii");
     let original = format!("--F3B3\r\nContent-Type: text/plain\r\n\r\nnote {secret}\r\n--F3B3--\r\n");
 
@@ -2908,7 +3042,7 @@ async fn multipart_over_body_limit_returns_413() {
     let ctx = make_ctx_default_fail_policy(&[], OperationMode::Enforce, &format!("http://{mock_adj}"));
     ctx.config.write().unwrap().max_body_bytes = Some(1024);
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let mut body = Vec::new();
     body.extend_from_slice(b"--F3B4\r\nContent-Type: text/plain\r\n\r\n");
@@ -2937,7 +3071,7 @@ async fn multipart_malformed_structure_still_blocks_via_text_fallback() {
         &format!("http://{mock_adj}"),
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("BLOCKSECRET1{}", "jjjjjjjjjj");
 
     // Multipart hint WITHOUT a boundary parameter → no structured parse.
@@ -2976,7 +3110,7 @@ async fn a1_yaml_config_drives_the_proxy_end_to_end() {
         last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
     });
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let r = client
         .post(format!("http://{addr}/v1/chat"))
         .header("content-type", "application/json")
@@ -3062,7 +3196,7 @@ async fn f1_repro_keyword_in_part_header_blocks_via_pipeline() {
         &format!("http://{mock_adj}"),
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let redactable = format!("REDACTSECRET2{}", "dddddddddddd");
     let block = format!("BLOCKSECRET1{}", "cccccccccccc");
 
@@ -3110,7 +3244,7 @@ async fn multipart_context_keyword_in_other_part_redacts_via_pipeline() {
         &format!("http://{mock_adj}"),
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("CTXSECRET-{}", "kkkkkkkkkkkk");
 
     // Keyword in part 1's PAYLOAD, secret in part 2's payload.
@@ -3153,7 +3287,7 @@ async fn multipart_keyword_in_part_metadata_redacts_via_pipeline() {
         &format!("http://{mock_adj}"),
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("CTXSECRET-{}", "llllllllllll");
 
     // The keyword appears ONLY in the part HEADER (`name="zeta"` metadata).
@@ -3194,7 +3328,7 @@ async fn multipart_preamble_epilogue_and_header_secrets_never_forward_raw() {
         &format!("http://{mock_adj}"),
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let pre = format!("REDACTSECRET2{}", "mmmmmmmmmm");
     let epi = format!("REDACTSECRET2{}", "nnnnnnnnnn");
     let hdr = format!("REDACTSECRET2{}", "oooooooooo");
@@ -3246,7 +3380,7 @@ async fn multipart_block_secret_in_part_header_blocks_via_pipeline() {
         &format!("http://{mock_adj}"),
     );
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("BLOCKSECRET1{}", "pppppppppp");
 
     let mut body = Vec::new();
@@ -3278,7 +3412,7 @@ async fn multipart_binary_claimed_part_under_scan_is_audited() {
     let ctx = make_ctx_default_fail_policy(&[], OperationMode::Enforce, &format!("http://{mock_adj}"));
     let events = ctx.api.events.clone();
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let mut body = Vec::new();
     body.extend_from_slice(b"--BINAUDIT\r\n");
@@ -3320,9 +3454,10 @@ async fn closed_on_critical_fail_open_is_audited_honestly() {
         &format!("http://{mock_adj}"),
     );
     let events = ctx.api.events.clone();
-    ctx.config.write().unwrap().policy.allowlist = vec![block.clone()];
+    // R9-7: the allowlist carries the HMAC fingerprint, not the raw value.
+    ctx.config.write().unwrap().policy.allowlist = vec![harness_fingerprint(&block)];
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let original = format!(r#"{{"content":"{block} {redactable}"}}"#);
 
     let r = client
@@ -3377,9 +3512,10 @@ async fn closed_on_critical_reject_is_audited_honestly() {
         &format!("http://{mock_adj}"),
     );
     let events = ctx.api.events.clone();
-    ctx.config.write().unwrap().policy.allowlist = vec![block.clone()];
+    // R9-7: the allowlist carries the HMAC fingerprint, not the raw value.
+    ctx.config.write().unwrap().policy.allowlist = vec![harness_fingerprint(&block)];
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
 
     let r = client
         .post(format!("http://{addr}/v1/chat"))
@@ -3414,7 +3550,7 @@ async fn shadow_mode_events_carry_the_shadow_flag() {
     let ctx = make_ctx_default_fail_policy(&[f3_block_rule()], OperationMode::Shadow, &format!("http://{mock_adj}"));
     let events = ctx.api.events.clone();
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
-    let client = reqwest::Client::new();
+    let client = api_client();
     let secret = format!("BLOCKSECRET1{}", "iiiiiiiiii");
 
     let r = client
@@ -3439,4 +3575,408 @@ async fn shadow_mode_events_carry_the_shadow_flag() {
     );
     drop(events);
     mock_handle.abort();
+}
+
+// ─── R9-5 / R9-7 (F6.A): fail-closed auth, anti-rebinding, HMAC allowlist ──
+
+/// Send a RAW HTTP/1.1 request over TCP so the Host/Origin headers are fully
+/// attacker-controlled (reqwest derives Host from the URL).
+async fn raw_http(port: u16, request: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_to_end(&mut buf)).await;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    (status, text)
+}
+
+/// R9-5 acceptance 1: EVERY data `/api/*` route is FAIL-CLOSED — no token →
+/// 401, wrong token → 401, valid token → NOT 401 (loopback included: the
+/// proxy binds 127.0.0.1 here, exactly the R9-5 vulnerable shape).
+#[tokio::test]
+async fn r9_5_route_matrix_fail_closed() {
+    let ctx = make_ctx(vec![], OperationMode::Enforce);
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    // NO token at all.
+    let bare = reqwest::Client::new();
+    // A client with a WRONG token.
+    let wrong = {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-cerberus-admin-token",
+            reqwest::header::HeaderValue::from_static("wrong-token-wrong-token-1234"),
+        );
+        reqwest::Client::builder().default_headers(headers).build().unwrap()
+    };
+    let valid = api_client();
+
+    // Every route of the control plane (method, path, JSON body or None).
+    let routes: Vec<(&str, &str, Option<serde_json::Value>)> = vec![
+        ("GET", "/api/config", None),
+        ("PUT", "/api/config", Some(serde_json::json!({"mode": "shadow"}))),
+        ("GET", "/api/events", None),
+        ("GET", "/api/stats", None),
+        ("POST", "/api/allowlist", Some(serde_json::json!({"value": "x"}))),
+        ("GET", "/api/allowlist", None),
+        ("DELETE", "/api/allowlist", Some(serde_json::json!({"value": "x"}))),
+        ("GET", "/api/policy", None),
+        ("PUT", "/api/policy", Some(serde_json::json!({}))),
+        ("GET", "/api/upstreams", None),
+        (
+            "POST",
+            "/api/upstreams",
+            Some(serde_json::json!({"name": "n", "url": "http://u"})),
+        ),
+        ("GET", "/api/packs", None),
+        ("POST", "/api/break-glass", Some(serde_json::json!({"reason": "r"}))),
+        // An UNKNOWN api path must not become an oracle either (401 before 404).
+        ("GET", "/api/nonexistent", None),
+    ];
+
+    for (method, path, body) in &routes {
+        for (who, client) in [("no-token", &bare), ("wrong-token", &wrong)] {
+            let mut req = match *method {
+                "GET" => client.get(format!("{base}{path}")),
+                "PUT" => client.put(format!("{base}{path}")),
+                "POST" => client.post(format!("{base}{path}")),
+                "DELETE" => client.delete(format!("{base}{path}")),
+                _ => unreachable!(),
+            };
+            if let Some(json) = body {
+                req = req.json(json);
+            }
+            let resp = req.send().await.expect("request");
+            assert_eq!(
+                resp.status(),
+                401,
+                "{method} {path} with {who} must be 401 (fail-closed, R9-5), got {}",
+                resp.status()
+            );
+        }
+        // Valid token → the gate passes (the route may 200/400/404/413/503,
+        // but never 401: authentication is what this matrix verifies).
+        let mut req = match *method {
+            "GET" => valid.get(format!("{base}{path}")),
+            "PUT" => valid.put(format!("{base}{path}")),
+            "POST" => valid.post(format!("{base}{path}")),
+            "DELETE" => valid.delete(format!("{base}{path}")),
+            _ => unreachable!(),
+        };
+        if let Some(json) = body {
+            req = req.json(json);
+        }
+        let resp = req.send().await.expect("request");
+        assert_ne!(
+            resp.status(),
+            401,
+            "{method} {path} with a VALID token must pass the auth gate, got {}",
+            resp.status()
+        );
+    }
+
+    // The dashboard stays public (static HTML without data)…
+    let dash = bare
+        .get(format!("{base}/api/dashboard"))
+        .send()
+        .await
+        .expect("dashboard");
+    assert_eq!(dash.status(), 200, "dashboard HTML is public");
+    // …and /health stays public.
+    let health = bare.get(format!("{base}/health")).send().await.expect("health");
+    assert_eq!(health.status(), 200);
+}
+
+/// R9-5 acceptance 2: DNS-rebinding attack shapes are REJECTED (403) by the
+/// Host/Origin allowlist BEFORE authentication — `attacker.com` as Host, an
+/// evil Origin, `Origin: null`, and a form-submittable content type on a
+/// browser mutation. A same-shape request with the allowed loopback Host
+/// reaches the auth layer instead (401 without token — never 403).
+#[tokio::test]
+async fn r9_5_rebinding_attack_shapes_are_rejected() {
+    let ctx = make_ctx(vec![], OperationMode::Enforce);
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let port = addr.port();
+
+    // (name, request, expected status)
+    let attacks: Vec<(&str, String, u16)> = vec![
+        // Classic DNS-rebinding: attacker.com resolves to 127.0.0.1 and the
+        // browser sends Host: attacker.com:8787.
+        (
+            "rebound-host",
+            format!("GET /api/events HTTP/1.1\r\nHost: attacker.com:{port}\r\nConnection: close\r\n\r\n"),
+            403,
+        ),
+        (
+            "rebound-host-mutation",
+            format!(
+                "POST /api/allowlist HTTP/1.1\r\nHost: attacker.com:{port}\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{{\"value\":\"evil\"}}\r\n"
+            ),
+            403,
+        ),
+        // Evil Origin on an allowed loopback Host (cross-site browser fetch).
+        (
+            "evil-origin",
+            format!(
+                "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://attacker.com\r\nConnection: close\r\n\r\n"
+            ),
+            403,
+        ),
+        // Sandboxed iframe (opaque origin) — never trusted.
+        (
+            "null-origin",
+            format!("GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: null\r\nConnection: close\r\n\r\n"),
+            403,
+        ),
+        // CSRF classic: simple form content type on a browser mutation.
+        (
+            "simple-form-mutation",
+            format!(
+                "POST /api/allowlist HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{{\"value\":\"evil\"}}\r\n"
+            ),
+            403,
+        ),
+    ];
+    for (name, request, expected) in &attacks {
+        let (status, body) = raw_http(port, request).await;
+        assert_eq!(status, *expected, "{name} must be rejected, got {status}: {body}");
+    }
+
+    // The same loopback shape WITHOUT the attack headers reaches the auth
+    // layer (401 = fail-closed token gate, NOT 403).
+    let (status, _) = raw_http(
+        port,
+        &format!("GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(
+        status, 401,
+        "loopback Host without token → 401 (auth gate), got {status}"
+    );
+
+    // Allowed loopback Host + valid token + JSON → the API serves.
+    let (status, body) = raw_http(
+        port,
+        &format!(
+            "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Cerberus-Admin-Token: {HARNESS_ADMIN_TOKEN}\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "allowed Host + valid token must serve: {body}");
+}
+
+/// R9-5/F6.2 — the ADAPTED F4 negative test: the F4 evidence injected an
+/// UNAUTHENTICATED `X-Cerberus-Bypass` in dev mode (no token configured) and
+/// the secret reached the upstream. That vector must now FAIL: the bypass is
+/// refused (no valid credential exists), the request proceeds to the normal
+/// scan and is BLOCKED (403) — the secret never reaches the mock.
+#[tokio::test]
+async fn r9_5_f4_injection_vector_bypass_without_token_is_refused() {
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    // Tokenless control plane (the F4 dev-mode shape) — and the data-plane
+    // request carries NO admin token, only the bypass header.
+    let ctx = make_ctx_tokenless(vec![block_rule()], OperationMode::Enforce);
+    // Point the default upstream at the mock so a granted bypass WOULD leak.
+    {
+        let mut cfg = ctx.config.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(upstream) = cfg.upstreams.get_mut("default") {
+            upstream.url = format!("http://{mock_adj}");
+        }
+    }
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let plain = reqwest::Client::new();
+
+    // THE F4 VECTOR: unauthenticated bypass carrying a secret payload.
+    let leak_attempt = plain
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-bypass", "smoke-negative-leak-injection")
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("bypass injection");
+    assert_eq!(
+        leak_attempt.status(),
+        403,
+        "the unauthenticated bypass must be REFUSED and the request BLOCKED (got {})",
+        leak_attempt.status()
+    );
+
+    // Contrast (the F4 review-v4 rule, unchanged): WITH the admin token the
+    // audited bypass still works — token-gated, not dead.
+    let granted = api_client()
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-bypass", "smoke-negative-leak-injection")
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("authenticated bypass");
+    assert_eq!(granted.status(), 200, "valid admin token → audited bypass still works");
+
+    mock_handle.abort();
+}
+
+/// R9-7 acceptance: end-to-end fingerprinting — add a raw value through the
+/// API, verify the STORED BYTES (config.yaml + GET responses) are `hmac:`
+/// fingerprints, the hot path honors the fingerprint, and the raw value is
+/// grep-clean from every surface. Key rotation invalidates fingerprints.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn r9_7_allowlist_fingerprints_end_to_end() {
+    // Matches the harness block rule (`sk-[A-Za-z0-9]{20,}`).
+    let raw_value = "sk-ENDTOENDfingerprintcheck00011";
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let config_path = unique_temp_path("r9-7-allowlist.yaml");
+    // Context with a BLOCK RULE + config path: mirror
+    // make_ctx_with_token_and_config_path but with the block rule.
+    let ctx = {
+        let engine = cerberus_engine::engine::EngineBuilder::new(&[block_rule()])
+            .build()
+            .expect("engine");
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "default".to_string(),
+            UpstreamConfig {
+                url: format!("http://{mock_adj}"),
+                path_prefix: None,
+                auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
+            },
+        );
+        let config = ProxyConfig {
+            upstreams,
+            mode: OperationMode::Enforce,
+            fail_policy: FailPolicy::Closed,
+            admin_token: Some(HARNESS_ADMIN_TOKEN.to_string()),
+            ..ProxyConfig::default()
+        };
+        let shared = std::sync::Arc::new(std::sync::RwLock::new(config));
+        let engine_arc = std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(engine)));
+        std::sync::Arc::new(ProxyContext {
+            config: shared.clone(),
+            engine: engine_arc,
+            redact_options: cerberus_engine::redact::RedactOptions::default(),
+            api: ApiContext::new(shared)
+                .with_config_path(config_path.clone())
+                .with_audit_hash_key(HARNESS_INSTALLATION_KEY.to_vec()),
+            last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        })
+    };
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx.clone()).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = api_client();
+
+    // 1) The raw value is blocked before triage.
+    assert_eq!(
+        post_scan(&client, &base, raw_value).await,
+        403,
+        "precondition: the value must be flagged before allowlisting"
+    );
+
+    // 2) One-click triage: POST the RAW value → the API converts it.
+    let add = client
+        .post(format!("{base}/api/allowlist"))
+        .json(&serde_json::json!({"value": raw_value}))
+        .send()
+        .await
+        .expect("allowlist add");
+    assert_eq!(add.status(), 200);
+    let doc: serde_json::Value = add.json().await.expect("add doc");
+    let fp = harness_fingerprint(raw_value);
+    assert_eq!(doc["fingerprint"].as_str(), Some(fp.as_str()));
+    assert!(!doc.to_string().contains(raw_value), "raw never echoed: {doc}");
+
+    // 3) The hot path honors the FINGERPRINT (the raw is gone from config).
+    assert_eq!(
+        post_scan(&client, &base, raw_value).await,
+        200,
+        "the fingerprint must allow the value on the scan path"
+    );
+
+    // 4) STORED BYTES: the YAML on disk contains the fingerprint and NEVER
+    // the raw value (R9-7: "check stored bytes are hmac: fingerprints").
+    let yaml = std::fs::read_to_string(&config_path).expect("stored yaml");
+    assert!(yaml.contains(fp.as_str()), "fingerprint persisted: {yaml}");
+    assert!(yaml.contains("hmac:"), "stored entry is an hmac: fingerprint");
+    assert!(
+        !yaml.contains(raw_value),
+        "raw value must NOT be in the stored YAML: {yaml}"
+    );
+
+    // 5) API surfaces never return the raw value (grep-clean). The policy
+    // views carry the fingerprints; /api/config (no policy view) is checked
+    // only for the raw leak.
+    for path in ["/api/allowlist", "/api/policy"] {
+        let body = client
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .expect("get")
+            .text()
+            .await
+            .expect("body");
+        assert!(body.contains("hmac:"), "{path} carries fingerprints: {body}");
+        assert!(!body.contains(raw_value), "{path} leaked the raw value: {body}");
+    }
+    let cfg_view = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .expect("get config")
+        .text()
+        .await
+        .expect("config body");
+    assert!(
+        !cfg_view.contains(raw_value),
+        "/api/config leaked the raw value: {cfg_view}"
+    );
+
+    // 6) KEY ROTATION invalidates fingerprints (documented, fail-closed):
+    // under a different installation key the value is flagged again.
+    *ctx.config.write().unwrap_or_else(std::sync::PoisonError::into_inner) = {
+        let mut cfg = ctx
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        cfg.policy.allowlist = vec![cerberus_proxy::allowlist::fingerprint(
+            b"a-different-installation-key-0123456789",
+            raw_value,
+        )];
+        cfg
+    };
+    // ...and with the key GONE (unkeyed context), nothing is allowed either.
+    *ctx.config.write().unwrap_or_else(std::sync::PoisonError::into_inner) = {
+        let mut cfg = ctx
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        cfg.policy.allowlist = vec!["not-a-fingerprint".to_string()];
+        cfg
+    };
+    ctx.config
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .policy
+        .allowlist = vec![harness_fingerprint("another-value-entirely")];
+    assert_eq!(
+        post_scan(&client, &base, raw_value).await,
+        403,
+        "a rotated key / foreign fingerprint must NOT allow the value (fail-closed)"
+    );
+
+    mock_handle.abort();
+    std::fs::remove_file(&config_path).ok();
 }
