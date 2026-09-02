@@ -343,6 +343,13 @@ impl EngineControl {
             .num_rules()
     }
 
+    /// Snapshot of the live engine as a shared handle (F6.B: `/api/scan`
+    /// dry-runs exactly the engine the dataplane is using right now).
+    #[must_use]
+    pub fn live_snapshot(&self) -> Arc<CompiledEngine> {
+        Arc::clone(&self.live.read().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+
     /// Compile the effective engine for `policy` **without publishing it**: so
     /// the control plane can reject (400) a policy that does not compile
     /// before touching the YAML or the live memory.

@@ -80,6 +80,13 @@ pub(crate) fn license_path() -> PathBuf {
         .map_or_else(|| config_dir().join("license.json"), PathBuf::from)
 }
 
+/// Daemon log file (F6.B, Appendix B B.5 `cerberus logs [-f]`): the daemon
+/// tees its non-blocking log stream here while running. No secrets — the
+/// logging layer only ever emits flags, categories, counts and hashes.
+pub(crate) fn log_file_path() -> PathBuf {
+    config_dir().join("logs").join("cerberus.log")
+}
+
 /// Load the active license for the daemon (F7 connection in the product,
 /// fix from code review item 12).
 ///
@@ -605,6 +612,88 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
                 PackCommand::List { reply } => {
                     let packs = packs_worker_manager.list_packs().await;
                     let res = Ok(format!("{} packs installed", packs.len()));
+                    (reply, res)
+                }
+                PackCommand::Enable { name, reply } => {
+                    // Same gate as install/rollback: enabling (re)activates
+                    // rules — a Pro benefit (open-core consistency).
+                    let license = load_license(Some(&license_path()));
+                    let res = if let Err(e) = require_pro_for_pack_ops(&license) {
+                        Err(format!("pack enable aborted via control plane: {e}"))
+                    } else {
+                        match packs_worker_manager.set_active(&name, true).await {
+                            Ok(()) => match packs_worker_manager.snapshot_engine(payload_secret.as_deref()).await {
+                                Ok(new_engine) => {
+                                    match rebase_live_engine(&engine_control_worker, &policy_source, &new_engine) {
+                                        Ok(rules) => Ok(format!(
+                                            "pack '{name}' enabled (hot-reload): engine now has {rules} rules"
+                                        )),
+                                        Err(e) => Err(format!("policy rebase failed after enable: {e}")),
+                                    }
+                                }
+                                Err(e) => Err(format!("snapshot engine failed: {e}")),
+                            },
+                            Err(e) => Err(e),
+                        }
+                    };
+                    (reply, res)
+                }
+                PackCommand::Disable { name, reply } => {
+                    // Disabling only REDUCES detection: available in every
+                    // tier (no trust-root gate).
+                    let res = match packs_worker_manager.set_active(&name, false).await {
+                        Ok(()) => match packs_worker_manager.snapshot_engine(payload_secret.as_deref()).await {
+                            Ok(new_engine) => {
+                                match rebase_live_engine(&engine_control_worker, &policy_source, &new_engine) {
+                                    Ok(rules) => Ok(format!(
+                                        "pack '{name}' disabled (hot-reload): engine now has {rules} rules"
+                                    )),
+                                    Err(e) => Err(format!("policy rebase failed after disable: {e}")),
+                                }
+                            }
+                            Err(e) => Err(format!("snapshot engine failed: {e}")),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    (reply, res)
+                }
+                PackCommand::Update { reply } => {
+                    // F6 contract of `packs update`: re-verify every
+                    // installed signature and hot-reload. Fetching NEW
+                    // versions from a registry is the F7 auto-update unit.
+                    let license = load_license(Some(&license_path()));
+                    let res = if let Err(e) = require_pro_for_pack_ops(&license) {
+                        Err(format!("pack update aborted via control plane: {e}"))
+                    } else {
+                        match packs_worker_manager.verify_installed().await {
+                            Ok(results) => {
+                                let ok = results.iter().filter(|(_, good)| *good).count();
+                                let failed: Vec<String> = results
+                                    .iter()
+                                    .filter(|(_, good)| !good)
+                                    .map(|(k, _)| k.clone())
+                                    .collect();
+                                let reload = if failed.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("; DEACTIVATED after failed verification: {}", failed.join(", "))
+                                };
+                                match packs_worker_manager.snapshot_engine(payload_secret.as_deref()).await {
+                                    Ok(new_engine) => {
+                                        match rebase_live_engine(&engine_control_worker, &policy_source, &new_engine) {
+                                            Ok(rules) => Ok(format!(
+                                                "packs update: {ok}/{} signatures verified{reload}; engine hot-reloaded with {rules} rules",
+                                                results.len()
+                                            )),
+                                            Err(e) => Err(format!("policy rebase failed after update: {e}")),
+                                        }
+                                    }
+                                    Err(e) => Err(format!("snapshot engine failed: {e}")),
+                                }
+                            }
+                            Err(e) => Err(e),
+                        }
+                    };
                     (reply, res)
                 }
             };

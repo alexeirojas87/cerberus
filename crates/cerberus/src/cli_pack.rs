@@ -11,20 +11,19 @@
 //! resolved by the CLIENT against ITS cwd (canonicalized locally); the control
 //! plane never interprets foreign paths nor depends on sharing a filesystem
 //! with the CLI. The wire contract lives in [`cerberus_packs::wire`].
+//!
+//! F6.B: endpoint/token resolution and the unreachable-daemon error contract
+//! are shared with every other daemon-backed command via [`crate::cli_api`].
 
 use std::process::Command as StdCommand;
 
 use reqwest::Client;
 
-use crate::daemon::{config_dir, pid_path};
-use cerberus_packs::wire::{
-    ControlPlaneEndpoint, PackInstallRequest, ENDPOINT_FILE, MAX_PACK_BYTES, PACK_INSTALL_PATH, PACK_LIST_PATH,
-    PACK_ROLLBACK_PATH,
-};
-use cerberus_proxy::config::ProxyConfig;
+use crate::cli_api::{admin_token, resolve_endpoint};
+use crate::daemon::pid_path;
+use cerberus_packs::wire::{PackInstallRequest, MAX_PACK_BYTES, PACK_INSTALL_PATH, PACK_LIST_PATH, PACK_ROLLBACK_PATH};
 
 const ADMIN_TOKEN_HEADER: &str = "x-cerberus-admin-token";
-const DEFAULT_PORT: u16 = 8787;
 
 /// Is the daemon running? (pid file present + live process).
 #[must_use]
@@ -63,126 +62,6 @@ fn process_alive(pid: u32) -> bool {
         let _ = pid;
         false
     }
-}
-
-/// Non-empty env value as `Option<String>`.
-fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|s| !s.is_empty())
-}
-
-/// Where the effective endpoint came from (for diagnostics and tests).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EndpointSource {
-    /// Explicit override via environment (`CERBERUS_LISTEN`).
-    Env,
-    /// Descriptor published by the daemon (`~/.cerberus/endpoint.json`).
-    Descriptor,
-    /// `listen` from `~/.cerberus/config.yaml`.
-    Config,
-    /// Compiled default.
-    Default,
-}
-
-/// Effective control plane endpoint resolved by the CLI.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedEndpoint {
-    /// Port to talk to.
-    pub(crate) port: u16,
-    /// Origin of the port.
-    pub(crate) source: EndpointSource,
-}
-
-impl ResolvedEndpoint {
-    /// Base URL: ALWAYS loopback. The daemon may bind `0.0.0.0` (Docker),
-    /// but the local CLI never leaves `127.0.0.1`.
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-}
-
-/// Path of the endpoint descriptor published by the daemon.
-pub(crate) fn endpoint_descriptor_path() -> std::path::PathBuf {
-    config_dir().join(ENDPOINT_FILE)
-}
-
-/// Endpoint descriptor published by the daemon, if readable and valid.
-///
-/// Fail-safe: a missing, corrupt, or port-0 descriptor does not abort
-/// anything — it is ignored and resolution continues with the config.
-fn endpoint_descriptor() -> Option<ControlPlaneEndpoint> {
-    let path = endpoint_descriptor_path();
-    let raw = std::fs::read_to_string(&path).ok()?;
-    match ControlPlaneEndpoint::from_json(&raw) {
-        Ok(ep) => Some(ep),
-        Err(e) => {
-            eprintln!("warning: {} invalid ({e}); using the config", path.display());
-            None
-        }
-    }
-}
-
-/// Discover the effective control plane endpoint. Precedence:
-///   1. env `CERBERUS_LISTEN` (format `host:port`) — explicit override;
-///   2. `~/.cerberus/endpoint.json` published by the daemon (the REAL port,
-///      including ephemeral ports or a `listen` changed at runtime);
-///   3. `listen` from `~/.cerberus/config.yaml`;
-///   4. default `8787`.
-pub(crate) fn resolve_endpoint() -> ResolvedEndpoint {
-    if let Some(listen) = env_nonempty("CERBERUS_LISTEN") {
-        return ResolvedEndpoint {
-            port: port_from_listen(&listen),
-            source: EndpointSource::Env,
-        };
-    }
-    if let Some(ep) = endpoint_descriptor() {
-        return ResolvedEndpoint {
-            port: ep.port,
-            source: EndpointSource::Descriptor,
-        };
-    }
-    if let Some(listen) = config_listen() {
-        return ResolvedEndpoint {
-            port: port_from_listen(&listen),
-            source: EndpointSource::Config,
-        };
-    }
-    ResolvedEndpoint {
-        port: DEFAULT_PORT,
-        source: EndpointSource::Default,
-    }
-}
-
-/// The port of a `listen` (`host:port`), or the default if it doesn't parse.
-#[must_use]
-fn port_from_listen(listen: &str) -> u16 {
-    cerberus_packs::wire::port_from_listen(listen).unwrap_or(DEFAULT_PORT)
-}
-
-/// `listen` from config.yaml, if it exists and parses.
-fn config_listen() -> Option<String> {
-    let cfg = config_dir().join("config.yaml");
-    if !cfg.exists() {
-        return None;
-    }
-    ProxyConfig::from_file(cfg).ok().map(|c| c.listen)
-}
-
-/// Control plane admin token: env `CERBERUS_ADMIN_TOKEN` > `admin_token`
-/// from the YAML configuration.
-#[must_use]
-fn admin_token() -> Option<String> {
-    if let Some(t) = env_nonempty("CERBERUS_ADMIN_TOKEN") {
-        return Some(t);
-    }
-    config_admin_token()
-}
-
-fn config_admin_token() -> Option<String> {
-    let cfg = config_dir().join("config.yaml");
-    if !cfg.exists() {
-        return None;
-    }
-    ProxyConfig::from_file(cfg).ok().and_then(|c| c.admin_token)
 }
 
 /// Control plane base URL (always against loopback; the port identifies the
@@ -311,9 +190,6 @@ pub(crate) async fn rollback() -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// Serializes tests that mutate `HOME`/`CERBERUS_LISTEN` (global process).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Minimal structurally valid `SignedRulePack` (the signature is verified
     /// by the daemon against ITS trust root; the CLI only validates the form).
     fn sample_signed_pack() -> String {
@@ -400,89 +276,6 @@ mod tests {
         let empty = home.join("empty.json");
         std::fs::write(&empty, "").expect("write");
         assert!(read_pack_request(empty.to_str().expect("utf8")).is_err());
-        std::fs::remove_dir_all(&home).ok();
-    }
-
-    /// Effective endpoint discovery: env > endpoint.json > config.yaml
-    /// > default, and a corrupt descriptor degrades without aborting.
-    #[test]
-    fn endpoint_discovery_precedence() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = temp_home("endpoint");
-        let prev_home = std::env::var("HOME").ok();
-        let prev_appdata = std::env::var("APPDATA").ok();
-        let prev_listen = std::env::var("CERBERUS_LISTEN").ok();
-        std::env::set_var("HOME", &home);
-        std::env::set_var("APPDATA", &home);
-        std::env::remove_var("CERBERUS_LISTEN");
-
-        // 4. default.
-        assert_eq!(
-            resolve_endpoint(),
-            ResolvedEndpoint {
-                port: DEFAULT_PORT,
-                source: EndpointSource::Default
-            }
-        );
-
-        // 3. config.yaml.
-        std::fs::write(config_dir().join("config.yaml"), "listen: 0.0.0.0:9001\n").expect("cfg");
-        assert_eq!(
-            resolve_endpoint(),
-            ResolvedEndpoint {
-                port: 9001,
-                source: EndpointSource::Config
-            }
-        );
-
-        // 2. endpoint.json published by the daemon (real ephemeral port).
-        let ep = ControlPlaneEndpoint::new("0.0.0.0:54321", 4242).expect("endpoint");
-        std::fs::write(endpoint_descriptor_path(), ep.to_json().expect("json")).expect("write ep");
-        let resolved = resolve_endpoint();
-        assert_eq!(
-            resolved,
-            ResolvedEndpoint {
-                port: 54321,
-                source: EndpointSource::Descriptor
-            }
-        );
-        assert_eq!(resolved.base_url(), "http://127.0.0.1:54321", "always loopback");
-
-        // Corrupt descriptor ⇒ fail-safe to the config, no panic.
-        std::fs::write(endpoint_descriptor_path(), "{ not json").expect("write junk");
-        assert_eq!(
-            resolve_endpoint(),
-            ResolvedEndpoint {
-                port: 9001,
-                source: EndpointSource::Config
-            }
-        );
-
-        // 1. env wins over everything.
-        std::env::set_var("CERBERUS_LISTEN", "127.0.0.1:7777");
-        assert_eq!(
-            resolve_endpoint(),
-            ResolvedEndpoint {
-                port: 7777,
-                source: EndpointSource::Env
-            }
-        );
-        // A listen without a valid port falls back to the default (no abort).
-        std::env::set_var("CERBERUS_LISTEN", "host:noport");
-        assert_eq!(resolve_endpoint().port, DEFAULT_PORT);
-
-        match prev_listen {
-            Some(v) => std::env::set_var("CERBERUS_LISTEN", v),
-            None => std::env::remove_var("CERBERUS_LISTEN"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match prev_appdata {
-            Some(v) => std::env::set_var("APPDATA", v),
-            None => std::env::remove_var("APPDATA"),
-        }
         std::fs::remove_dir_all(&home).ok();
     }
 }

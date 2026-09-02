@@ -85,6 +85,27 @@ pub enum PackCommand {
         /// oneshot that returns the result to the caller.
         reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
+    /// Enable a pack by name (Appendix B B.3 `packs enable`); the worker
+    /// flips the manifest flag and hot-reloads the engine.
+    Enable {
+        /// Pack name (metadata name, not a versioned key).
+        name: String,
+        /// oneshot that returns the result to the caller.
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+    /// Disable a pack by name (rules leave the engine; JSON stays on disk).
+    Disable {
+        /// Pack name.
+        name: String,
+        /// oneshot that returns the result to the caller.
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+    /// Re-verify every installed pack signature and hot-reload (F6 contract
+    /// of `packs update`; registry fetch is the F7 auto-update unit).
+    Update {
+        /// oneshot that returns the result to the caller.
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// Canonical header for the admin token. Always accepted on `/api/*` and on
@@ -285,6 +306,53 @@ pub fn is_api_path(path: &str) -> bool {
     path.starts_with("/api/")
 }
 
+/// The control-plane route table, as `<METHOD> <path>` pairs (F6.B).
+///
+/// Single source of truth for the CI parity test (`crates/cerberus` walks
+/// the Appendix B CLI surface and asserts each daemon-backed command's
+/// endpoint is present here) and for the parity matrix
+/// (`evidence/f6/parity-matrix.md`). Keep in sync with
+/// [`handle_api_request`].
+#[must_use]
+pub const fn known_api_routes() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("GET", "/api/config"),
+        ("PUT", "/api/config"),
+        ("GET", "/api/events"),
+        ("GET", "/api/stats"),
+        ("POST", "/api/allowlist"),
+        ("DELETE", "/api/allowlist"),
+        ("GET", "/api/allowlist"),
+        ("POST", "/api/break-glass"),
+        ("GET", "/api/policy"),
+        ("PUT", "/api/policy"),
+        ("GET", "/api/upstreams"),
+        ("POST", "/api/upstreams"),
+        ("DELETE", "/api/upstreams/{name}"),
+        ("GET", "/api/packs"),
+        ("POST", "/api/packs/install"),
+        ("POST", "/api/packs/rollback"),
+        ("POST", "/api/packs/enable"),
+        ("POST", "/api/packs/disable"),
+        ("POST", "/api/packs/update"),
+        ("POST", "/api/reload"),
+        ("POST", "/api/scan"),
+        ("GET", "/api/dashboard"),
+        ("GET", "/ui"),
+    ]
+}
+
+/// Does `(method, path)` exist in the control-plane route table? The
+/// parameterized upstream delete is matched by prefix.
+#[must_use]
+pub fn is_known_api_route(method: &str, path: &str) -> bool {
+    known_api_routes().iter().any(|&(m, p)| {
+        m == method
+            && (p == path
+                || (p == "/api/upstreams/{name}" && path.starts_with("/api/upstreams/") && path != "/api/upstreams"))
+    })
+}
+
 /// Constant-time comparison (accumulated xor + loop sum) to avoid timing
 /// attacks when validating the admin token. No short-circuit by position.
 #[must_use]
@@ -345,7 +413,8 @@ fn admin_token_header(headers: &hyper::HeaderMap) -> Option<&str> {
 /// PUBLIC static HTML without data → never requires auth (review v5 F6).
 #[must_use]
 fn route_serves_data(path: &str) -> bool {
-    path != "/api/dashboard"
+    // `/ui` (F6.B) is a pure 302 to the dashboard — public HTML, no data.
+    path != "/api/dashboard" && path != "/ui"
 }
 
 /// Control-plane authentication gate — **FAIL-CLOSED** (R9-5 / F6.1).
@@ -434,9 +503,18 @@ fn anti_rebinding_gate(
 /// Extract the `provider` query param (review v5 F6). `None` = no filter.
 #[must_use]
 fn query_provider(query: &str) -> Option<String> {
+    query_param(query, "provider")
+}
+
+/// Extract a single query param (`name=value`), URL-decoded as far as the
+/// wire format requires for our identifiers (plain tokens; `+` is NOT
+/// decoded to space to keep the parser trivial and injection-free).
+#[must_use]
+fn query_param(query: &str, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
     let mut found: Option<String> = None;
     for pair in query.split('&') {
-        if let Some(value) = pair.strip_prefix("provider=") {
+        if let Some(value) = pair.strip_prefix(&prefix) {
             if !value.is_empty() {
                 found = Some(value.to_string());
             }
@@ -451,6 +529,26 @@ fn filter_by_provider(events: &[AuditEvent], provider: Option<String>) -> Vec<Au
     provider.map_or_else(
         || events.to_vec(),
         |p| events.iter().filter(|e| e.provider == p).cloned().collect(),
+    )
+}
+
+/// Filter events by originating tool (Appendix B B.5 `--tool`).
+#[must_use]
+fn filter_by_tool(events: &[AuditEvent], tool: Option<String>) -> Vec<AuditEvent> {
+    tool.map_or_else(
+        || events.to_vec(),
+        |t| events.iter().filter(|e| e.tool == t).cloned().collect(),
+    )
+}
+
+/// Filter events recorded at or after `since` (unix epoch seconds; Appendix
+/// B B.5 `--since`). The CLI accepts RFC 3339 or `30m/2h/1d` shorthand and
+/// normalizes to epoch seconds on the wire.
+#[must_use]
+fn filter_since(events: &[AuditEvent], since_unix: Option<i64>) -> Vec<AuditEvent> {
+    since_unix.map_or_else(
+        || events.to_vec(),
+        |s| events.iter().filter(|e| e.ts_unix >= s).cloned().collect(),
     )
 }
 
@@ -490,8 +588,12 @@ pub async fn handle_api_request(
     }
 
     // Query param `provider` for per-provider filters (review v5 F6).
+    // F6.B (Appendix B B.5): `tool` and `since` (unix epoch seconds) extend
+    // the same filter surface for `cerberus events` / `cerberus stats`.
     let query = parts.uri.query().map_or_else(String::new, |q| q.to_string());
     let provider = query_provider(&query);
+    let tool = query_param(&query, "tool");
+    let since_unix = query_param(&query, "since").and_then(|s| s.parse::<i64>().ok());
 
     // Upstream CRUD (review v6 F6): DELETE carries the name in the path. It
     // is resolved BEFORE the static match because `/api/upstreams/{name}` is
@@ -506,8 +608,8 @@ pub async fn handle_api_request(
     match (method.as_str(), path.as_str()) {
         ("GET", "/api/config") => handle_get_config(ctx).await,
         ("PUT", "/api/config") => handle_put_config(ctx, body).await,
-        ("GET", "/api/events") => handle_get_events(ctx, provider).await,
-        ("GET", "/api/stats") => handle_get_stats(ctx, provider).await,
+        ("GET", "/api/events") => handle_get_events(ctx, provider, tool, since_unix).await,
+        ("GET", "/api/stats") => handle_get_stats(ctx, provider, tool, since_unix).await,
         ("POST", "/api/allowlist") => handle_post_allowlist(ctx, body).await,
         ("POST", "/api/break-glass") => handle_post_break_glass(ctx, body).await,
         ("GET", "/api/allowlist") => handle_get_allowlist(ctx).await,
@@ -519,7 +621,20 @@ pub async fn handle_api_request(
         ("GET", "/api/packs") => handle_pack_mode(ctx, PackKind::List).await,
         ("POST", "/api/packs/install") => handle_pack_install(ctx, body).await,
         ("POST", "/api/packs/rollback") => handle_pack_mode(ctx, PackKind::Rollback).await,
+        // F6.B (Appendix B B.3): per-pack enable/disable and the update
+        // (verify + hot-reload) contract; the pack worker owns the manifest.
+        ("POST", "/api/packs/enable") => handle_pack_enable_disable(ctx, body, true).await,
+        ("POST", "/api/packs/disable") => handle_pack_enable_disable(ctx, body, false).await,
+        ("POST", "/api/packs/update") => handle_pack_mode(ctx, PackKind::Update).await,
+        // F6.B (Appendix B B.7): hot-reload of the on-disk config.
+        ("POST", "/api/reload") => handle_reload(ctx).await,
+        // F6.B (Appendix B B.4): dry-run scan for the dashboard "Test
+        // detection" box. Scans with the LIVE engine; nothing is persisted.
+        ("POST", "/api/scan") => handle_api_scan(ctx, body).await,
         (_, "/api/dashboard") => handle_dashboard(ctx),
+        // Public redirect so the documented `http://localhost:8787/ui`
+        // (Appendix B B.6 `cerberus dashboard`) resolves to the dashboard.
+        (_, "/ui") => Ok(redirect_dashboard()),
         _ => Ok(not_found()),
     }
 }
@@ -528,6 +643,8 @@ pub async fn handle_api_request(
 enum PackKind {
     List,
     Rollback,
+    /// Verify + hot-reload installed packs (`packs update` F6 contract).
+    Update,
 }
 
 /// Send a (bodyless) pack command to the worker and wait for its reply.
@@ -542,6 +659,7 @@ async fn handle_pack_mode(ctx: &ApiContext, kind: PackKind) -> Result<Response<F
     let cmd = match kind {
         PackKind::List => PackCommand::List { reply: reply_tx },
         PackKind::Rollback => PackCommand::Rollback { reply: reply_tx },
+        PackKind::Update => PackCommand::Update { reply: reply_tx },
     };
     if worker.send(cmd).await.is_err() {
         return Ok(json_response(
@@ -564,6 +682,250 @@ async fn handle_pack_mode(ctx: &ApiContext, kind: PackKind) -> Result<Response<F
             r#"{"error":"pack worker timed out"}"#,
         )),
     }
+}
+
+/// Core of `POST /api/packs/enable|disable` (F6.B, Appendix B B.3): sends
+/// `PackCommand::Enable/Disable` to the worker, which owns the manifest.
+async fn apply_pack_enable_disable(ctx: &ApiContext, body_bytes: &[u8], enable: bool) -> Response<Full<Bytes>> {
+    #[derive(serde::Deserialize)]
+    struct PackNameRequest {
+        name: String,
+    }
+    let parsed: PackNameRequest = match serde_json::from_slice(body_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"invalid request: expected {{\"name\": \"<pack>\"}}","detail":"{e}"}}"#),
+            );
+        }
+    };
+    let Some(worker) = ctx.pack_worker.as_ref() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"pack worker not connected"}"#,
+        );
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let cmd = if enable {
+        PackCommand::Enable {
+            name: parsed.name,
+            reply: reply_tx,
+        }
+    } else {
+        PackCommand::Disable {
+            name: parsed.name,
+            reply: reply_tx,
+        }
+    };
+    if worker.try_send(cmd).is_err() {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"pack worker not running"}"#,
+        );
+    }
+    match reply_rx.await {
+        Ok(Ok(message)) => json_response(StatusCode::OK, &format!(r#"{{"status":"ok","message":{message:?}}}"#)),
+        Ok(Err(e)) => json_response(StatusCode::BAD_REQUEST, &format!(r#"{{"error":{e:?}}}"#)),
+        Err(_) => json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"pack worker disconnected"}"#,
+        ),
+    }
+}
+
+async fn handle_pack_enable_disable(
+    ctx: &ApiContext,
+    body: hyper::body::Incoming,
+    enable: bool,
+) -> Result<Response<Full<Bytes>>, String> {
+    let body_bytes = match collect_api_body(body).await {
+        Ok(b) => b,
+        Err(ApiBodyError::TooLarge) => {
+            return Ok(json_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                r#"{"error":"request body too large"}"#,
+            ));
+        }
+        Err(ApiBodyError::Read(msg)) => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"{msg}"}}"#),
+            ));
+        }
+    };
+    Ok(apply_pack_enable_disable(ctx, &body_bytes, enable).await)
+}
+
+/// Core of `POST /api/reload` (F6.B, Appendix B B.7): re-reads the config
+/// file from disk, validates it, and hot-swaps the live config + policy
+/// engine WITHOUT restarting the proxy. The listen address is intentionally
+/// NOT reloaded (the socket is already bound); a changed `admin_token`
+/// takes effect immediately (the auth gate reads the live config).
+///
+/// Requires a `config_path` wired at boot (the daemon always wires it;
+/// API-only test contexts may not have one → 503).
+fn apply_reload(ctx: &ApiContext) -> Response<Full<Bytes>> {
+    let Some(path) = ctx.config_path.as_ref() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"no config path wired at boot: reload is unavailable"}"#,
+        );
+    };
+    let raw = match std::fs::read_to_string(path) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!(r#"{{"error":"cannot read {}: {e}"}}"#, path.display()),
+            );
+        }
+    };
+    let loaded: ProxyConfig = match serde_yaml::from_str(&raw) {
+        Ok(c) => c,
+        Err(e) => return invalid_config_response(&format!("config does not parse: {e}")),
+    };
+    let mut candidate = loaded;
+    // Preserve the RUNNING port: a listen change in the file cannot move a
+    // bound socket; the operator restarts for that. Everything else reloads.
+    {
+        let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        candidate.listen.clone_from(&live.listen);
+    }
+    if let Err(e) = candidate.policy.validate() {
+        return invalid_config_response(&format!("policy in {} is invalid: {e}", path.display()));
+    }
+    // Anti-lockout (fail-closed preserved): the live daemon was booted with
+    // a token (product wiring); a reload that would REMOVE it silently
+    // closes the control plane mid-session and locks the operator out
+    // (every /api/* answers 401, including reload itself). Reject the
+    // reload instead — the operator edits the file or restarts. Changing
+    // to a DIFFERENT token is applied immediately (the gate reads the live
+    // config).
+    {
+        let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        if live.admin_token.is_some() && candidate.admin_token.is_none() {
+            return invalid_config_response(
+                "reload would remove the admin token and CLOSE the control plane (fail-closed); \
+                 keep admin_token in the file or restart the daemon",
+            );
+        }
+    }
+    let (published, mode) = {
+        let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
+        if live.upstreams.is_empty() && candidate.upstreams.is_empty() {
+            return invalid_config_response("reload would leave zero upstreams; fix the file first");
+        }
+        let compiled = match ctx.engine.as_ref() {
+            Some(engine) => match engine.compile(&candidate.policy) {
+                Ok(c) => Some(engine.publish(c)),
+                Err(e) => return invalid_config_response(&format!("policy does not compile: {e}")),
+            },
+            None => None,
+        };
+        // Persist is NOT performed: the file on disk IS the source we just
+        // read (Mode A IaC semantics; B.7 "config before deploying").
+        *live = candidate;
+        let mode = format!("{:?}", live.mode).to_lowercase();
+        (compiled, mode)
+    };
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({
+            "status": "ok",
+            "message": "config reloaded from disk (listen unchanged, hot-reload applied)",
+            "mode": mode,
+            "engine_rules": published,
+        })
+        .to_string(),
+    )
+}
+
+async fn handle_reload(ctx: &ApiContext) -> Result<Response<Full<Bytes>>, String> {
+    Ok(apply_reload(ctx))
+}
+
+/// Core of `POST /api/scan` (F6.B, Appendix B B.4 — dashboard "Test
+/// detection"): dry-runs the LIVE engine over the body text and returns the
+/// findings (flags, counts, action, keyed hashes). NOTHING is persisted and
+/// raw input is NEVER echoed — the response mirrors the event schema's
+/// no-leak contract.
+fn apply_api_scan(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Bytes>> {
+    #[derive(serde::Deserialize)]
+    struct ScanRequest {
+        text: String,
+    }
+    let parsed: ScanRequest = match serde_json::from_slice(body_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"invalid request: expected {{\"text\": \"...\"}}","detail":"{e}"}}"#),
+            );
+        }
+    };
+    let Some(engine_control) = ctx.engine.as_ref() else {
+        return json_response(StatusCode::SERVICE_UNAVAILABLE, r#"{"error":"engine not wired"}"#);
+    };
+    let mode = {
+        let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        live.mode
+    };
+    let engine = engine_control.live_snapshot();
+    let output = engine.scan(&parsed.text);
+    let findings = output.findings;
+    // Enforce reports the effective action of the highest finding; shadow
+    // only reports what WOULD happen (warn, nothing applied).
+    let action_taken = if findings.is_empty() {
+        cerberus_engine::rule::Action::Allow
+    } else if mode == crate::config::OperationMode::Enforce {
+        output.action_overall
+    } else {
+        cerberus_engine::rule::Action::Warn
+    };
+    let mut counts = std::collections::BTreeMap::new();
+    for f in &findings {
+        *counts.entry(f.flag.clone()).or_insert(0usize) += 1;
+    }
+    let hashed: Vec<String> = findings.iter().map(|f| f.hashed_value.clone()).collect();
+    let body = serde_json::json!({
+        "status": "ok",
+        "action": action_taken.to_string(),
+        "finding_count": findings.len(),
+        "flags": counts,
+        "hashed_values": hashed,
+    });
+    json_response(StatusCode::OK, &body.to_string())
+}
+
+async fn handle_api_scan(ctx: &ApiContext, body: hyper::body::Incoming) -> Result<Response<Full<Bytes>>, String> {
+    let body_bytes = match collect_api_body(body).await {
+        Ok(b) => b,
+        Err(ApiBodyError::TooLarge) => {
+            return Ok(json_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                r#"{"error":"request body too large"}"#,
+            ));
+        }
+        Err(ApiBodyError::Read(msg)) => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"{msg}"}}"#),
+            ));
+        }
+    };
+    Ok(apply_api_scan(ctx, &body_bytes))
+}
+
+/// 302 to the dashboard so the documented `http://localhost:8787/ui`
+/// (Appendix B B.6) resolves. Public: HTML only, no data.
+fn redirect_dashboard() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header("location", "/api/dashboard")
+        .header("content-security-policy", "default-src 'none'; frame-ancestors 'none'")
+        .body(Full::new(Bytes::new()))
+        .unwrap_or_else(|_| not_found())
 }
 
 async fn handle_pack_install(ctx: &ApiContext, body: hyper::body::Incoming) -> Result<Response<Full<Bytes>>, String> {
@@ -994,16 +1356,30 @@ async fn events_snapshot(ctx: &ApiContext, limit: usize) -> Vec<AuditEvent> {
     all
 }
 
-async fn handle_get_events(ctx: &ApiContext, provider: Option<String>) -> Result<Response<Full<Bytes>>, String> {
+async fn handle_get_events(
+    ctx: &ApiContext,
+    provider: Option<String>,
+    tool: Option<String>,
+    since_unix: Option<i64>,
+) -> Result<Response<Full<Bytes>>, String> {
     let events = events_snapshot(ctx, 10_000).await;
     let events = filter_by_provider(&events, provider);
+    let events = filter_by_tool(&events, tool);
+    let events = filter_since(&events, since_unix);
     let json = serde_json::to_string(&events).map_err(|e| format!("serialize error: {e}"))?;
     Ok(json_response(StatusCode::OK, json))
 }
 
-async fn handle_get_stats(ctx: &ApiContext, provider: Option<String>) -> Result<Response<Full<Bytes>>, String> {
+async fn handle_get_stats(
+    ctx: &ApiContext,
+    provider: Option<String>,
+    tool: Option<String>,
+    since_unix: Option<i64>,
+) -> Result<Response<Full<Bytes>>, String> {
     let events = events_snapshot(ctx, 10_000).await;
     let events = filter_by_provider(&events, provider);
+    let events = filter_by_tool(&events, tool);
+    let events = filter_since(&events, since_unix);
     let s = stats::summary(&events);
     let json = serde_json::to_string(&s).map_err(|e| format!("serialize error: {e}"))?;
     Ok(json_response(StatusCode::OK, json))
@@ -1170,7 +1546,11 @@ use crate::detection_policy::{
 ///
 /// Wire names stable with respect to v6.1 (`rules` = per-flag overrides) and
 /// `persisted: true`: what you see here is in the YAML.
-fn policy_document(policy: &DetectionPolicy, engine_rules: Option<usize>) -> serde_json::Value {
+fn policy_document(
+    policy: &DetectionPolicy,
+    engine_rules: Option<usize>,
+    effective_rules: Option<&[serde_json::Value]>,
+) -> serde_json::Value {
     serde_json::json!({
         "categories": policy
             .categories
@@ -1188,6 +1568,7 @@ fn policy_document(policy: &DetectionPolicy, engine_rules: Option<usize>) -> ser
         "valid_categories": POLICY_CATEGORIES,
         "persisted": true,
         "engine_rules": engine_rules,
+        "effective_rules": effective_rules,
     })
 }
 
@@ -1305,7 +1686,27 @@ fn commit_policy(
 /// Current policy (categories, overrides, custom rules and allowlist).
 async fn handle_get_policy(ctx: &ApiContext) -> Result<Response<Full<Bytes>>, String> {
     let config = ctx.config.read().unwrap_or_else(|p| p.into_inner());
-    let json = serialize_policy_document(&config.policy, ctx.engine.as_ref().map(EngineControl::live_rules));
+    // F6.B (Appendix B B.3 `rules list`): the EFFECTIVE rule set (base pack
+    // rules + operator overrides + custom rules) exactly as the dataplane
+    // runs it, so the CLI/dashboard list what is really live.
+    let effective = ctx.engine.as_ref().map(|e| {
+        e.live_snapshot()
+            .rules()
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "flag": r.flag,
+                    "category": r.category.to_string(),
+                    "action": r.action.to_string(),
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let json = serialize_policy_document(
+        &config.policy,
+        ctx.engine.as_ref().map(EngineControl::live_rules),
+        effective.as_deref(),
+    );
     Ok(json_response(StatusCode::OK, json))
 }
 
@@ -1352,13 +1753,33 @@ fn apply_policy_patch(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Byte
         }
     };
     let engine_rules = engine_rules.or_else(|| ctx.engine.as_ref().map(EngineControl::live_rules));
-    json_response(StatusCode::OK, serialize_policy_document(&doc, engine_rules))
+    let effective = ctx.engine.as_ref().map(|e| {
+        e.live_snapshot()
+            .rules()
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "flag": r.flag,
+                    "category": r.category.to_string(),
+                    "action": r.action.to_string(),
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    json_response(
+        StatusCode::OK,
+        serialize_policy_document(&doc, engine_rules, effective.as_deref()),
+    )
 }
 
 /// Serialize the policy document; if `serde_json` failed (it cannot with
 /// this document), a minimal JSON is returned instead of an opaque 500.
-fn serialize_policy_document(policy: &DetectionPolicy, engine_rules: Option<usize>) -> String {
-    serde_json::to_string(&policy_document(policy, engine_rules))
+fn serialize_policy_document(
+    policy: &DetectionPolicy,
+    engine_rules: Option<usize>,
+    effective_rules: Option<&[serde_json::Value]>,
+) -> String {
+    serde_json::to_string(&policy_document(policy, engine_rules, effective_rules))
         .unwrap_or_else(|_| r#"{"error":"policy serialize failed"}"#.to_string())
 }
 
@@ -2009,7 +2430,7 @@ mod tests {
             ));
         }
 
-        let s = handle_get_stats(&ctx, Some("openai".to_string()))
+        let s = handle_get_stats(&ctx, Some("openai".to_string()), None, None)
             .await
             .unwrap()
             .into_body()
@@ -2026,7 +2447,7 @@ mod tests {
         );
 
         // Without provider → counts both.
-        let all = handle_get_stats(&ctx, None)
+        let all = handle_get_stats(&ctx, None, None, None)
             .await
             .unwrap()
             .into_body()

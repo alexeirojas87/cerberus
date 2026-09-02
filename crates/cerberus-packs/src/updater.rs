@@ -610,6 +610,133 @@ impl PackManager {
         Ok(())
     }
 
+    /// Enable or disable a pack by name (Appendix B B.3: `packs
+    /// enable/disable <pack>`): flips the `active` flag of the pack's latest
+    /// installed version in the manifest, persists the manifest, and rebuilds
+    /// the live engine. Disabling is additive-safe: the pack JSON stays on
+    /// disk (history, `active: false`), so a later `enable` re-activates it
+    /// without re-installing.
+    ///
+    /// This is NOT the uninstall path: no JSON is deleted and the activation
+    /// sequence is left intact for `rollback`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pack is not installed, or the rebuild or
+    /// manifest persistence fails.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn set_active(&self, pack_name: &str, active: bool) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        let mut manifest = state.manifest.clone();
+        let Some(versions) = manifest.versions_by_pack.get(pack_name) else {
+            return Err(format!("pack '{pack_name}' is not installed"));
+        };
+        // Target key: enabling activates the latest on-disk version;
+        // disabling deactivates the currently active one. Already in the
+        // requested state → idempotent no-op success.
+        let key = if active {
+            let latest = versions.installed.clone();
+            if latest.is_empty() || manifest.active.get(&versioned_key(pack_name, &latest)).copied() == Some(true) {
+                return Ok(());
+            }
+            versioned_key(pack_name, &latest)
+        } else {
+            let current = versions.active.clone();
+            if current.is_empty() {
+                return Ok(());
+            }
+            versioned_key(pack_name, &current)
+        };
+        if active && self.effective_trust_root().is_none() {
+            // Enabling (re)activates rules — same Pro trust-root policy as
+            // install/rollback. Disabling only reduces detection and stays
+            // available in every tier.
+            return Err("pack enable requires a trust root (Pro tier or CERBERUS_PACK_TRUST_ROOT)".to_string());
+        }
+        manifest.active.insert(key.clone(), active);
+        if let Some(vm) = manifest.versions_by_pack.get_mut(pack_name) {
+            vm.active = if active {
+                parse_versioned_key(&key).1
+            } else {
+                String::new()
+            };
+        }
+
+        let (engine, installed) = match rebuild_active_set(
+            &mut manifest,
+            &self.pack_dir,
+            &self.base_rules,
+            self.effective_trust_root().as_deref(),
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                return Err(format!(
+                    "pack {} rebuild failed: {e}",
+                    if active { "enable" } else { "disable" }
+                ))
+            }
+        };
+        Self::persist_manifest(&self.pack_dir, &manifest)?;
+        state.installed = installed;
+        state.manifest = manifest;
+        *self.active_engine.lock().await = engine;
+        tracing::info!("pack {}: {pack_name}", if active { "enabled" } else { "disabled" });
+        Ok(())
+    }
+
+    /// Re-verify every installed pack's signature against the effective
+    /// trust root and rebuild the live engine from the verified manifest
+    /// (Appendix B B.3: `packs update` — F6 contract is verify + hot-reload;
+    /// fetching newer versions from a registry is the F7 auto-update unit).
+    ///
+    /// Returns one `(pack@version, ok)` entry per installed version; a
+    /// failed verification deactivates that version in the manifest (the
+    /// same policy as boot-time tamper handling) before the rebuild.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the post-verification rebuild fails.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn verify_installed(&self) -> Result<Vec<(String, bool)>, String> {
+        let mut state = self.state.lock().await;
+        let mut manifest = state.manifest.clone();
+        let root = self.effective_trust_root();
+        let mut results: Vec<(String, bool)> = Vec::new();
+        for (key, installed) in &state.installed {
+            let ok = match (&root, &installed.signature_hex, &installed.signer_public_key_hex) {
+                (Some(expected), Some(sig), Some(signer)) => {
+                    let signed = SignedRulePack {
+                        pack_json: installed.pack_json.clone(),
+                        signature_hex: sig.clone(),
+                        signer_public_key_hex: signer.clone(),
+                    };
+                    signed.verify_with_trusted_root(expected).is_ok()
+                }
+                // No trust root / unsigned pack: without a root there is
+                // nothing to verify AGAINST — the pack is inactive anyway
+                // (boot gate), report it as unverified rather than "ok".
+                _ => false,
+            };
+            if !ok {
+                let (name, ver) = parse_versioned_key(key);
+                deactivate_pack(&mut manifest, &name, &ver);
+            }
+            results.push((key.clone(), ok));
+        }
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let (engine, installed) =
+            match rebuild_active_set(&mut manifest, &self.pack_dir, &self.base_rules, root.as_deref()) {
+                Ok(x) => x,
+                Err(e) => return Err(format!("packs update rebuild failed: {e}")),
+            };
+        Self::persist_manifest(&self.pack_dir, &manifest)?;
+        state.installed = installed;
+        state.manifest = manifest;
+        *self.active_engine.lock().await = engine;
+        Ok(results)
+    }
+
     /// Get the active engine.
     #[must_use]
     pub fn engine(&self) -> Arc<Mutex<CompiledEngine>> {

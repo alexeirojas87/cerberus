@@ -2176,7 +2176,10 @@ async fn pack_install_wire_v2_accepts_bytes_and_never_opens_legacy_path() {
                     let _ = reply.send(Ok("accepted bytes".to_string()));
                 }
                 cerberus_proxy::api::PackCommand::Rollback { reply }
-                | cerberus_proxy::api::PackCommand::List { reply } => {
+                | cerberus_proxy::api::PackCommand::List { reply }
+                | cerberus_proxy::api::PackCommand::Enable { reply, .. }
+                | cerberus_proxy::api::PackCommand::Disable { reply, .. }
+                | cerberus_proxy::api::PackCommand::Update { reply } => {
                     let _ = reply.send(Err("unexpected command".to_string()));
                 }
             }

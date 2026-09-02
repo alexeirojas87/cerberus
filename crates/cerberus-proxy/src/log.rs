@@ -302,16 +302,114 @@ fn maybe_report_drops(
     let _ = sink.flush();
 }
 
+/// Size cap for the daemon log file before a single rotation to `.1`
+/// (F6.B Appendix B B.5: `cerberus logs`). Bounded so a runaway daemon can
+/// never fill the disk with logs.
+pub const LOG_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Daemon log tee path (F6.B, B.5): set BEFORE [`init_logging`] by
+/// `cerberus start` so the subscriber's worker sink also writes the file.
+/// Read exactly once, when the logging worker constructs its sink.
+static LOG_TEE_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Request that the logging worker tees every formatted chunk to `path`.
+///
+/// Must be called BEFORE [`init_logging`]. Appends with a single rotation
+/// to `<path>.1` at [`LOG_FILE_MAX_BYTES`]. Returns `false` when the parent
+/// directory cannot be created (the caller prints a console-only warning);
+/// the file open itself stays best-effort at sink construction.
+#[must_use]
+pub fn set_log_tee_file(path: &std::path::Path) -> bool {
+    if let Some(dir) = path.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return false;
+        }
+    }
+    LOG_TEE_FILE.set(path.to_path_buf()).is_ok()
+}
+
+/// Tee sink: every formatted chunk goes to the console AND (best-effort)
+/// to the daemon log file. All writes stay on the single logging worker
+/// thread (never on the request hot path).
+struct TeeSink {
+    console: Box<dyn io::Write + Send>,
+    file: Option<std::fs::File>,
+    path: Option<std::path::PathBuf>,
+    size: u64,
+    cap: u64,
+}
+
+impl TeeSink {
+    /// Build the sink for the requested tee path (console-only file sink if
+    /// the file cannot be opened). Reads the current size so rotation
+    /// resumes at the right threshold.
+    fn open(path: &std::path::Path) -> Self {
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
+        let size = file.as_ref().and_then(|f| f.metadata().ok()).map_or(0, |m| m.len());
+        Self {
+            console: Box::new(io::stdout()),
+            file,
+            path: Some(path.to_path_buf()),
+            size,
+            cap: LOG_FILE_MAX_BYTES,
+        }
+    }
+
+    /// One-shot rotation when the cap is exceeded: current file is renamed
+    /// to `<path>.1` (overwriting any previous rotation) and a fresh file
+    /// is opened. Best-effort: any failure just truncates in place —
+    /// logging MUST never fail the request path.
+    fn maybe_rotate(&mut self) {
+        let Some(path) = self.path.clone() else { return };
+        if self.size <= self.cap {
+            return;
+        }
+        let _ = self.file.take(); // close before renaming
+        let rotated = path.with_extension("log.1");
+        let _ = std::fs::rename(&path, &rotated);
+        self.file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+        self.size = 0;
+    }
+}
+
+impl io::Write for TeeSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let _ = self.console.write_all(buf);
+        if let Some(file) = self.file.as_mut() {
+            if file.write_all(buf).is_ok() {
+                self.size += buf.len() as u64;
+                self.maybe_rotate();
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let _ = self.console.flush();
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.flush();
+        }
+        Ok(())
+    }
+}
+
 /// Initialize the global logger with format and filter — NON-BLOCKING.
 ///
 /// The `tracing` subscriber writes into [`NonBlockingWriter`]; the returned
 /// [`LogGuard`] must be held for the process lifetime and dropped on
-/// shutdown (bounded flush — see [`LogGuard`]). Calling this after a global
-/// subscriber is already installed keeps the existing subscriber and still
-/// returns a live guard (the worker drains cleanly on drop).
+/// shutdown (bounded flush — see [`LogGuard`]).
+///
+/// Calling this after a global subscriber is already installed keeps the
+/// existing subscriber and still returns a live guard (the worker drains
+/// cleanly on drop). If [`set_log_tee_file`] was called first, the worker
+/// ALSO tees to the daemon log file (F6.B B.5).
 #[must_use]
 pub fn init_logging(log_level: &str) -> LogGuard {
-    let (writer, guard) = spawn_worker(Box::new(io::stdout()));
+    let sink: Box<dyn io::Write + Send> = match LOG_TEE_FILE.get() {
+        Some(path) => Box::new(TeeSink::open(path)),
+        None => Box::new(io::stdout()),
+    };
+    let (writer, guard) = spawn_worker(sink);
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(log_level)
         .with_target(false)
@@ -511,5 +609,80 @@ mod tests {
         );
         drop(guard);
         drop(blocker);
+    }
+
+    /// F6.B (B.5): the tee sink writes every chunk to BOTH the console and
+    /// the daemon log file, so `cerberus logs` sees what the daemon logged.
+    #[test]
+    fn tee_sink_writes_console_and_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus-log-tee-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("cerberus.log");
+        let sink = TeeSink::open(&path);
+        assert!(sink.file.is_some(), "log file must open");
+
+        let (mut writer, guard) = spawn_worker(Box::new(sink));
+        writer.write_all(b"tee-probe-line\n").expect("write");
+        drop(guard); // bounded drain + flush
+
+        let content = std::fs::read_to_string(&path).expect("read log");
+        assert!(
+            content.contains("tee-probe-line"),
+            "file must receive the chunk: {content}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The tee cap rotates once to `<path>.1` instead of growing unbounded.
+    #[test]
+    fn tee_sink_rotates_at_the_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus-log-rotate-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("cerberus.log");
+        let mut sink = TeeSink {
+            console: Box::new(io::sink()),
+            file: None,
+            path: Some(path.clone()),
+            size: LOG_FILE_MAX_BYTES,
+            cap: LOG_FILE_MAX_BYTES,
+        };
+        sink.file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+        io::Write::write_all(&mut sink, b"rotation-trigger\n").expect("write");
+        assert!(sink.size < LOG_FILE_MAX_BYTES, "rotation resets the counter");
+        assert!(path.with_extension("log.1").exists(), "rotated file exists");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `set_log_tee_file` stores the path once; a second call cannot
+    /// replace it (`OnceLock`) — and reports failure honestly.
+    #[test]
+    fn tee_file_path_is_set_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus-log-teelock-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let first = dir.join("first.log");
+        let second = dir.join("second.log");
+        if LOG_TEE_FILE.get().is_none() {
+            assert!(set_log_tee_file(&first), "first set wins");
+        }
+        // Whichever state the process is in, a second set must NOT swap it.
+        let before = LOG_TEE_FILE.get().cloned();
+        let _ = set_log_tee_file(&second);
+        assert_eq!(LOG_TEE_FILE.get(), before.as_ref(), "tee path is immutable once set");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

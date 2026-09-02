@@ -721,6 +721,17 @@ a:hover { text-decoration: underline; }
         <p class="tab-desc">Audit events recorded by the proxy. Each event shows the timestamp, provider, action taken, and detection flags. Raw secret values are never stored or displayed — only SHA-256 hashes.</p>
         <div id="overview-events"><div class="loading">Loading...</div></div>
       </div>
+
+      <div class="card">
+        <div class="card-title">Test Detection</div>
+        <p class="tab-desc">Dry-run the live engine without sending anything to the LLM provider (CLI: <code>cerberus test "text"</code> / <code>cerberus scan &lt;file&gt;</code>). Nothing you type here is persisted — the reply shows flags, counts and hashes only.</p>
+        <div class="form-row">
+          <textarea id="scan-text" rows="3" placeholder='Paste candidate text, e.g. "my key is sk-EXAMPLE-do-not-flag"'></textarea>
+          <button class="primary sm" id="btn-scan-text" type="button">Scan</button>
+        </div>
+        <div class="msg" id="scan-msg"></div>
+        <div id="scan-result"></div>
+      </div>
     </div>
 
     <!-- ── Events tab ───────────────────────────────────────── -->
@@ -868,6 +879,16 @@ a:hover { text-decoration: underline; }
           <input type="file" id="pack-file" accept=".json,application/json">
           <button class="primary sm" id="btn-install-pack" type="button">Install</button>
           <button class="danger sm" id="btn-rollback-pack" type="button">Rollback</button>
+        </div>
+        <div class="form-row">
+          <label for="pack-toggle-name">Pack name</label>
+          <input type="text" id="pack-toggle-name" placeholder="aws" autocomplete="off">
+          <button class="sm" id="btn-enable-pack" type="button">Enable</button>
+          <button class="danger sm" id="btn-disable-pack" type="button">Disable</button>
+        </div>
+        <div class="form-row">
+          <button class="sm" id="btn-update-packs" type="button">Update packs</button>
+          <span class="tab-desc-mt">Re-verifies every installed signature and hot-reloads the engine.</span>
         </div>
         <div class="msg" id="packs-msg"></div>
       </div>
@@ -1827,6 +1848,70 @@ async function rollbackPack() {
   renderPacks();
 }
 
+// F6.B (Appendix B B.3): per-pack enable/disable + verify-and-reload update.
+async function setPackActive(enable) {
+  const input = document.getElementById('pack-toggle-name');
+  const name = input ? input.value.trim() : '';
+  if (!name) { setMsg('packs-msg', 'Enter a pack name', 'err'); return; }
+  const verb = enable ? 'Enabling' : 'Disabling';
+  setMsg('packs-msg', verb + ' pack "' + name + '"...');
+  const path = enable ? '/api/packs/enable' : '/api/packs/disable';
+  const resp = await sendJson('POST', path, { name: name });
+  if (!resp) return;
+  const body = await resp.json().catch(() => ({}));
+  setMsg('packs-msg', resp.ok ? (body.message || (enable ? 'Enabled' : 'Disabled')) : (body.error || 'HTTP ' + resp.status), resp.ok ? 'ok' : 'err');
+  if (resp.ok && input) input.value = '';
+  renderPacks();
+}
+
+async function updatePacks() {
+  setMsg('packs-msg', 'Verifying installed packs...');
+  const resp = await sendJson('POST', '/api/packs/update', {});
+  if (!resp) return;
+  const body = await resp.json().catch(() => ({}));
+  setMsg('packs-msg', resp.ok ? (body.message || 'Packs verified') : (body.error || 'HTTP ' + resp.status), resp.ok ? 'ok' : 'err');
+  renderPacks();
+}
+
+// F6.B (Appendix B B.4): "Test detection" — dry-run via POST /api/scan.
+// The reply carries flags/counts/hashes only; the input is never persisted.
+async function scanText() {
+  const input = document.getElementById('scan-text');
+  const text = input ? input.value : '';
+  if (!text.trim()) { setMsg('scan-msg', 'Enter text to scan', 'err'); return; }
+  setMsg('scan-msg', 'Scanning with the live engine...');
+  const resp = await sendJson('POST', '/api/scan', { text: text });
+  if (!resp) { setMsg('scan-msg', 'Request failed', 'err'); return; }
+  const body = await resp.json().catch(() => ({}));
+  const box = document.getElementById('scan-result');
+  if (!resp.ok) {
+    setMsg('scan-msg', body.error || 'HTTP ' + resp.status, 'err');
+    if (box) box.replaceChildren();
+    return;
+  }
+  setMsg('scan-msg', 'Done', 'ok');
+  if (!box) return;
+  box.replaceChildren();
+  const table = el('table');
+  const rows = [
+    ['Action (would apply)', body.action || '?'],
+    ['Findings', String(body.finding_count || 0)],
+    ['Flags', Object.keys(body.flags || {}).map(f => f + ' x' + (body.flags[f])).join(', ') || 'none'],
+    ['Hashed values', String((body.hashed_values || []).length)],
+  ];
+  rows.forEach(([k, v]) => {
+    const tr = el('tr');
+    const td1 = el('td');
+    td1.textContent = k;
+    const td2 = el('td');
+    td2.textContent = v;
+    tr.appendChild(td1);
+    tr.appendChild(td2);
+    table.appendChild(tr);
+  });
+  box.appendChild(table);
+}
+
 // ── Event bindings ───────────────────────────────────────────────
 function on(id, fn) {
   const n = document.getElementById(id);
@@ -1849,6 +1934,10 @@ on('btn-clear-provider', clearProviderFilter);
 on('btn-add-upstream', addUpstream);
 on('btn-install-pack', installPack);
 on('btn-rollback-pack', rollbackPack);
+on('btn-enable-pack', () => setPackActive(true));
+on('btn-disable-pack', () => setPackActive(false));
+on('btn-update-packs', updatePacks);
+on('btn-scan-text', scanText);
 on('btn-add-allow', addAllowlist);
 on('btn-set-category', () => setCategory(
   (document.getElementById('cat-name').value || '').trim(),

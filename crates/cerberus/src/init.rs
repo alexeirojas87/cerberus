@@ -33,6 +33,25 @@ const KNOWN_AGENTS: &[(&str, &str, &[&str])] = &[
     ("Continue (Cursor)", "CONTINUE_BASE_URL", &["continue", "cursor"]),
 ];
 
+/// Resolve an agent query (display name, first word, or env var) against
+/// the known-agents table (F6.B: `cerberus agents wire/unwire <agent>`).
+#[must_use]
+pub(crate) fn agent_by_name(query: &str) -> Option<(&'static str, &'static str)> {
+    let q = query.trim().to_ascii_lowercase();
+    KNOWN_AGENTS
+        .iter()
+        .find(|(name, env_var, aliases)| {
+            name.to_ascii_lowercase() == q
+                || env_var.eq_ignore_ascii_case(&q)
+                || name
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|n| n.to_ascii_lowercase() == q)
+                || aliases.iter().any(|a| a.eq_ignore_ascii_case(&q))
+        })
+        .map(|(name, env_var, _)| (*name, *env_var))
+}
+
 /// Run `cerberus init`.
 ///
 /// # Errors

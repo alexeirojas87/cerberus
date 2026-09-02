@@ -569,8 +569,10 @@ pub(crate) async fn proxy_handler(
     let path = parts.uri.path().to_string();
     let query = parts.uri.query().map_or_else(String::new, |q| format!("?{q}"));
 
-    // API routes.
-    if direct_upstream.is_none() && api::is_api_path(&path) {
+    // API routes. `/ui` (F6.B, Appendix B B.6) is served here too: it is a
+    // public 302 to `/api/dashboard`, so the documented
+    // `http://localhost:8787/ui` URL never leaks into the dataplane.
+    if direct_upstream.is_none() && (api::is_api_path(&path) || path == "/ui") {
         let api_req = Request::from_parts(parts, body);
         return api::handle_api_request(api_req, &ctx.api).await;
     }
