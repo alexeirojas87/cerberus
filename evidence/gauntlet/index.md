@@ -147,6 +147,24 @@ the §8B build → evidence → independent review loop and its explicit phase g
 
 F4 opens; F4–F9 remain under Review 9 containment.
 
+- **F4.3 smoke-test hygiene (R9-17): CLOSED/PASS (2026-09-01, attempt 1;
+  combined correctness+security verification PASS).** All three broken checks
+  repaired (curl http_code misread, `smock` typo grepping a never-existing
+  file, swallowed init failure) plus 3-surface leak-check enumeration with
+  fail-closed semantics (missing artifact = FAIL, grep rc≥2 = FAIL). The
+  decisive negative test was independently reproduced: the OLD test passed
+  vacuously on an injected real leak while the repaired test failed it
+  (exit 1, raw-secret hit named). No product code changed. Evidence:
+  `evidence/f4/r9-smoke-test-hygiene.md`,
+  `evidence/review9/f43-attempt1-verification.md`.
+
+- **F4 phase gate: CLOSED (2026-09-01, owner sign-off).** Integration battery
+  on a clean clone of `3b59407`: 753/0 debug, pack 19/19, load 14/14,
+  smoke-harness e2e 63/63, frozen hash match, containment intact. Evidence:
+  `evidence/review9/f4-integrator-check.md`.
+
+F5 opens; F5–F9 remain under Review 9 containment.
+
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
 - **Orchestration:** Orca Run `run_a64b51716aba`; workers exclusively **Codex** and **OpenCode**. No Claude was used in the v6.1 review/fix/recheck.
