@@ -74,12 +74,16 @@ pub(crate) fn run_init(config_dir: &str) -> Result<String, String> {
     let yaml = init_config_yaml(&admin_token);
     let config_path = cfg_path.join("config.yaml");
     write_config_0600(&config_path, &yaml).map_err(|e| format!("cannot write config: {e}"))?;
+    // F6.A attempt 2 (P2-1): the mode in the report is stat-ed from the file,
+    // so the output tells the truth (the old text claimed "mode 0600" even
+    // when a re-init left a pre-existing 0644 file untouched).
     writeln!(
         report,
-        "\n🔐 Control plane: a random admin token was generated and written to {} (mode 0600, R9-5). \
+        "\n🔐 Control plane: a random admin token was generated and written to {} ({}, R9-5). \
          View it with `grep admin_token {}` and paste it into the dashboard login card; it is never \
          served by the API or printed here. Without it every data /api/* route responds 401.",
         config_path.display(),
+        actual_mode_note(&config_path),
         config_path.display()
     )
     .ok();
@@ -133,25 +137,33 @@ fn generate_admin_token() -> String {
 }
 
 /// Write config.yaml with restrictive permissions (it carries the admin
-/// token): 0600 on unix at creation (no umask window — same pattern as the
-/// F5 F-1 audit-key fix). Every error is handled (init fails loudly instead
-/// of leaving a world-readable credential file).
+/// token). F6.A attempt 2 (P2-1): delegates to the shared atomic helper —
+/// the file is REPLACED via a tmp created 0600 + rename (F5 F-1 discipline,
+/// no umask window), so a re-init over an existing non-0600 config REPAIRS
+/// the mode instead of preserving it (the old in-place create/truncate
+/// applied 0600 only at creation). Every error is handled (init fails
+/// loudly instead of leaving a world-readable credential file).
 fn write_config_0600(path: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
+    cerberus_proxy::api::write_config_file_0600(path, content)
+}
+
+/// Truthful permission note for the init report (F6.A attempt 2, P2-1): the
+/// mode claim is DERIVED from the file itself (stat), not asserted — on unix
+/// it reports the actual octal mode (the helper guarantees 0600); when the
+/// platform has no unix mode or the stat fails, no numeric claim is made.
+fn actual_mode_note(path: &Path) -> String {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(content.as_bytes())
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).map_or_else(
+            |_| "permissions applied".to_string(),
+            |m| format!("mode {:04o}", m.permissions().mode() & 0o777),
+        )
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, content)
+        let _ = path;
+        "permissions applied".to_string()
     }
 }
 
@@ -439,6 +451,47 @@ mod tests {
             written.contains("https://api.openai.com"),
             "the written config must preserve the upstreams: {written}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F6.A attempt 2 (P2-1 regression): re-running init over an existing
+    /// non-0600 config.yaml must ENFORCE 0600 on the rewritten file (the
+    /// rotated token must never live in a world-readable file) and the
+    /// report's mode claim must match the real file.
+    #[test]
+    fn reinit_over_non_0600_config_enforces_0600_and_tells_the_truth() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus_f6a2_reinit_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let config_path = dir.join("config.yaml");
+        std::fs::write(&config_path, "listen: 127.0.0.1:8787\nadmin_token: stale\n").expect("seed config");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).expect("chmod 644");
+        }
+
+        let report = run_init(dir.to_str().expect("utf8")).expect("re-init");
+
+        let yaml = std::fs::read_to_string(&config_path).expect("rewritten config");
+        assert!(yaml.contains("admin_token"), "a fresh token must be present: {yaml}");
+        assert!(!yaml.contains("stale"), "the old token must be rotated away: {yaml}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&config_path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "re-init must repair the mode to 0600, got {mode:o}");
+            // The report tells the truth: it claims 0600 and the file IS 0600.
+            assert!(
+                report.contains("mode 0600"),
+                "the report must state the real mode: {report}"
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

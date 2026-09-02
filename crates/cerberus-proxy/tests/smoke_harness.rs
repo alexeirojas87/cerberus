@@ -1392,6 +1392,104 @@ async fn config_put_persists_yaml() {
 }
 
 #[tokio::test]
+async fn config_put_persists_yaml_at_0600() {
+    // F6.A attempt 2 (P1 regression, live control-plane flow): PUT /api/config
+    // on a 0600 fixture must leave config.yaml at 0600 — the file carries the
+    // admin token, and the old writer regressed it to umask 0644 on the
+    // first PUT (review9 f6a-attempt1-correctness P1).
+    let config_path = unique_temp_path("f6a2-config-0600.yaml");
+    std::fs::write(&config_path, "listen: 127.0.0.1:8787\nmode: enforce\n").expect("fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).expect("chmod fixture");
+    }
+
+    let ctx = make_ctx_with_config_path(
+        Vec::new(),
+        OperationMode::Enforce,
+        "http://127.0.0.1:9999",
+        config_path.clone(),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = api_client();
+
+    let cfg: serde_json::Value = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .expect("get config")
+        .json()
+        .await
+        .expect("parse config");
+    let mut body = cfg.as_object().cloned().unwrap();
+    body.insert("mode".to_string(), serde_json::json!("shadow"));
+    let put = client
+        .put(format!("{base}/api/config"))
+        .json(&body)
+        .send()
+        .await
+        .expect("put config");
+    assert_ne!(
+        put.status(),
+        500,
+        "persisted PUT /api/config must not fail (got {})",
+        put.status()
+    );
+
+    let yaml = std::fs::read_to_string(&config_path).expect("read persisted yaml");
+    assert!(yaml.contains("shadow"), "persisted mode value must be shadow: {yaml}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&config_path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "config.yaml must stay 0600 after PUT /api/config, got {mode:o}"
+        );
+    }
+
+    std::fs::remove_file(&config_path).ok();
+}
+
+#[tokio::test]
+async fn upstream_post_malformed_json_answers_400_not_connection_drop() {
+    // F6.A attempt 2 (P3-1 regression): an authenticated POST /api/upstreams
+    // with a malformed JSON body must answer 400 with a JSON error — the old
+    // `?` mapped the serde error to a handler Err, so hyper logged
+    // "error from user's Service" and closed the connection (curl HTTP=000).
+    let ctx = make_ctx_with_config_path(
+        Vec::new(),
+        OperationMode::Enforce,
+        "http://127.0.0.1:9999",
+        unique_temp_path("f6a2-upstream-400.yaml"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = api_client(); // carries the admin token (authenticated route)
+
+    let resp = client
+        .post(format!("{base}/api/upstreams"))
+        .header("content-type", "application/json")
+        .body("{ not valid json")
+        .send()
+        .await
+        .expect("the connection must stay open and answer — a drop fails HERE");
+    assert_eq!(
+        resp.status(),
+        400,
+        "malformed JSON must be a 400, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("the 400 must carry a JSON body");
+    assert!(
+        body["error"].as_str().is_some(),
+        "the 400 body must carry an error field: {body}"
+    );
+}
+
+#[tokio::test]
 async fn upstream_add_list_delete() {
     // Review v6 F6, requirement 3: upstream CRUD via GET/POST/DELETE.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;

@@ -209,21 +209,12 @@ fn migrate_allowlist_to_fingerprints_persisting_to(
 
 /// Atomic config write (tmp + rename, 0600 — the YAML carries the admin
 /// token and now only fingerprinted allowlist entries).
+///
+/// F6.A attempt 2 (P2): delegates to the shared F-1-discipline helper so the
+/// tmp is CREATED with mode 0600 (the old write-then-chmod briefly exposed
+/// the tmp at the umask default before the chmod).
 fn atomic_write_config(path: &Path, content: &str) -> Result<(), String> {
-    let tmp = path.with_extension("yaml.tmp");
-    fs::write(&tmp, content).map_err(|e| format!("tmp write: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)) {
-            let _ = fs::remove_file(&tmp);
-            return Err(format!("chmod: {e}"));
-        }
-    }
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("rename: {e}")
-    })
+    cerberus_proxy::api::write_config_file_0600(path, content).map_err(|e| format!("config write: {e}"))
 }
 
 /// Non-empty env value as `Option<String>`.
@@ -1060,6 +1051,43 @@ mod tests {
             0,
             "no key → no conversion (the write gate would reject raw at validate)"
         );
+    }
+
+    /// F6.A attempt 2 (P2 regression): `atomic_write_config` (the migration
+    /// persist writer) must leave the file at 0600 — it replaces a regressed
+    /// 0644 file with 0600 (mode enforced on the RESULT, tmp created 0600 —
+    /// no umask window).
+    #[test]
+    fn atomic_write_config_enforces_0600_on_result() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerb_f6a2_atomic_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "listen: 127.0.0.1:8787\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        atomic_write_config(&path, "listen: 127.0.0.1:8787\n").expect("atomic write");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "rewritten config must be 0600, got {mode:o}");
+        }
+        assert!(
+            !dir.join("config.yaml.tmp").exists(),
+            "no tmp residue may be left behind"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

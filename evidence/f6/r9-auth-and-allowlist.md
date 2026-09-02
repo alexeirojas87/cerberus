@@ -217,3 +217,154 @@ a1e013333b19035be8fd22f28754df4700d729ad27c92948cd471ed4ee9959f1  crates/cerberu
 All acceptance criteria are implemented and verified by running code (unit + HTTP-level + live release
 boots + smoke script with the adapted F4 vector). No threshold moved; no prior finding's semantics
 changed beyond R9-5/R9-7/F5-F-1/2/3 as authorized. **Returns to VERIFY** for the §8B panel.
+---
+
+## FIX attempt 2
+
+- **Trigger**: attempt 1 (`40283eb`) passed both panel lenses on the security core; the correctness
+  lens registered one P1 (blocking, pre-gate) + P2s, the security lens P2-1/P3-1, and fix-plan F6.1
+  mandates session-scoped dashboard credentials. This attempt closes those items ONLY —
+  findings-preserving, no threshold moved, no security semantic touched.
+- **Candidate**: branch `r9-f6-attempt2` (worktree off `40283eb`); not pushed.
+
+### Item 1 — P1 (blocking): `persist_config` regressed config.yaml 0600 → 0644 after any control-plane write
+
+- **Root cause**: `persist_config` (was api.rs:836–846) wrote `config.yaml.tmp` with plain
+  `std::fs::write` (umask → 0644) and renamed it over the 0600 file — no mode enforcement, and the
+  tmp itself carried the admin token at umask perms during the write→rename window. Empirically
+  confirmed by the lens: one `PUT /api/config` → `100644`, and re-init could not repair it.
+- **Fix**: new shared helper `write_config_file_0600` + `write_tmp_0600`
+  (`crates/cerberus-proxy/src/api.rs:847,867`) with the F5 F-1 discipline: stale-tmp removal, then
+  `OpenOptions::create_new(true).mode(0o600)` (mode applied AT CREATION on unix — no umask window),
+  then atomic rename; every `Result` handled (tmp removed on any failure; the previous file is left
+  untouched). `persist_config` (api.rs:895) now delegates to it, so EVERY mutation that persists
+  (PUT /api/config, PUT /api/policy, POST /api/allowlist, upstream CRUD) leaves config.yaml at 0600,
+  regardless of the prior mode.
+- **Tests**: `persist_config_keeps_0600_on_an_existing_file` (api.rs:2279 — 0600 fixture → stays
+  0600 + no tmp residue) and `persist_config_creates_the_file_at_0600` (api.rs:2318 — from-scratch
+  creation at 0600); live-flow harness `config_put_persists_yaml_at_0600`
+  (smoke_harness.rs:1395 — real daemon, PUT /api/config over a 0600 fixture → stat 0600); live
+  release-binary check: init → PUT /api/config → `stat` = `100600` (was `100644` at attempt 1).
+
+### Item 2 — P2: migration `atomic_write_config` wrote the tmp at umask default before chmod
+
+- **Root cause**: `atomic_write_config` (daemon.rs:212–227 at attempt 1) wrote the tmp with
+  `fs::write` (umask) and only then `set_permissions` — the final file was 0600, but the tmp briefly
+  existed at umask perms (same class as the P1, shorter window).
+- **Fix**: the function (daemon.rs:216) now delegates to the SAME shared helper — one writer, one
+  discipline; the migration persist path creates its tmp at 0600 from birth.
+- **Test**: `atomic_write_config_enforces_0600_on_result` (daemon.rs:1061 — 0644 fixture →
+  rewritten 0600, no tmp residue); the pre-existing migration test
+  (`allowlist_migration_converts_raw_entries_and_persists_fingerprints`) still passes unchanged.
+
+### Item 3 — P2-1 (security lens): re-init over a non-0600 config kept 0644 and the report lied "mode 0600"
+
+- **Root cause**: `write_config_0600` (init.rs:139–156 at attempt 1) opened the FINAL path with
+  `.create(true).truncate(true).mode(0o600)` — the mode applies only at creation, so re-init over an
+  existing 0644 file kept it 0644 while the report asserted "(mode 0600, R9-5)".
+- **Fix**: (a) `write_config_0600` (init.rs:146) delegates to the shared tmp+rename helper — a
+  re-init now REPLACES the file with a 0600-created tmp, repairing the mode; (b) the report is
+  truthful: `actual_mode_note` (init.rs:154) stats the written file and prints its REAL octal mode
+  (`mode 0600` on unix; a non-numeric note when the platform has no unix mode or the stat fails).
+- **Test**: `reinit_over_non_0600_config_enforces_0600_and_tells_the_truth` (init.rs:462 — seed a
+  0644 config, re-init → file 0600, old token rotated, report claims `mode 0600` and the file IS
+  0600); live release-binary check: `chmod 644 config.yaml` → `cerberus init` → mode `100600`,
+  report prints `mode 0600, R9-5` truthfully (attempt 1: mode stayed 0644 with the same claim).
+
+### Item 4 — P2 (fix-plan F6.1): dashboard persisted the admin token in `localStorage`
+
+- **Root cause**: fix-plan F6.1 mandates "credencial solo en memoria/session scope"; the dashboard
+  stored the token in `localStorage` (survives browser restarts on the operator's disk).
+  dashboard.html:1098,1121,1138,1152.
+- **Fix**: switched all four sites to `sessionStorage` (same `TOKEN_KEY`, same login/logout flow);
+  a comment marks the plan mandate. CSP script hash is derived from the served HTML at runtime, so
+  it self-adapts (verified live: served CSP sha256 matches the edited `<script>`; zero
+  `localStorage.` API calls remain in the served HTML).
+- **Test**: full smoke harness 69/69 (dashboard HTML/CSP/token-absence tests green post-edit); live
+  dashboard served with a matching CSP hash. (No harness test asserted the storage backend; the
+  behavioral proof is the live CSP/served-script match + unchanged login flow.)
+
+### Item 5 — P3-1 (security lens): malformed JSON on authenticated POST /api/upstreams dropped the connection
+
+- **Root cause**: `handle_post_upstreams` mapped the serde error with `?` (`format!(...)` into the
+  handler's `Err(String)`), so hyper logged "error from user's Service" and closed the connection
+  (curl `HTTP=000`) instead of answering. Trivial and isolated (every other parse arm already
+  returns 400), so fixed rather than documented.
+- **Fix**: parse arm returns `400 {"status":"error","error":"invalid upstream payload: …"}` via the
+  standard `invalid_config_response` (api.rs:1075–1077).
+- **Tests**: harness `upstream_post_malformed_json_answers_400_not_connection_drop`
+  (smoke_harness.rs:1457 — live HTTP: the response arrives (a drop fails the test), 400 + JSON
+  error body); live release-binary check: malformed POST → `HTTP 400` + JSON error (was `HTTP 000`).
+
+### What deliberately did NOT move
+
+- No threshold, rule, route semantics, auth/allowlist/rebinding behavior, or attempt-1 finding
+  judgment was altered. `tests/redos_fuzz.rs` and all attempt-1 security semantics are byte/behavior
+  preserved. The only init behavioral delta is the mandated one: re-init now repairs the file mode
+  (and the in-place write became an atomic tmp+rename — strictly safer; a symlinked config.yaml is
+  now replaced rather than written through, the safer behavior for a credential file).
+- Attempt-1 residuals accepted by the panel lenses remain registered: data-plane Host/Origin gate
+  out of scope (P2 observation), P3-2 timing note (informational), re-init UX note (wholesale
+  config replace).
+
+## FIX attempt 2 — Builder matrix (all run in the isolated worktree)
+
+| # | Gate | Command | Result |
+|---|---|---|---|
+| 1 | fmt | `rtk cargo fmt --all -- --check` | clean |
+| 2 | clippy | `rtk cargo clippy --workspace --all-targets -- -D warnings` | 0 warnings |
+| 3 | workspace debug | `rtk cargo test --workspace --all-targets` | **810 passed, 0 failed** (26 suites; 804 + 6 new) |
+| 4 | production pack | `rtk cargo test -p cerberus-packs --test production_pack_pr` | **19/19** |
+| 5 | redos (frozen rule) | `cargo test --release --test redos_fuzz -- --test-threads=1` | **11/11** (file untouched) |
+| 6 | load (release, serial) | `cargo test --release --test load_test -- --test-threads=1` | **14/14** incl. `load_test_f3_3_honest_http_round_trip_gate` (7.52 s) |
+| 7 | smoke harness | `cargo test -p cerberus-proxy --test smoke_harness` | **69/69** (67 + 2 new) |
+| 8 | smoke script | `bash tests/smoke-test.sh --port 18955` (release binary) | **17/17 PASS, Fail: 0** |
+| 9 | **live 0600 check** | release binary, isolated `$HOME`: init → start → GET+PUT `/api/config` → `stat config.yaml` | PUT 200 → **`100600`** (attempt 1: `100644`) |
+| 10 | live re-init check | `chmod 644 config.yaml` → `cerberus init` | mode **`100600`**, report `mode 0600, R9-5` (truthful) |
+| 11 | live P3-1 check | malformed-JSON POST /api/upstreams + token | **HTTP 400** + JSON error (was HTTP 000) |
+| 12 | live dashboard check | GET /api/dashboard → sha256(CSP) vs served `<script>` | **match**; 0 `localStorage.` calls |
+| 13 | whitespace | `rtk git diff --check` | clean (exit 0) |
+
+New tests: `persist_config_keeps_0600_on_an_existing_file`, `persist_config_creates_the_file_at_0600`
+(api.rs), `atomic_write_config_enforces_0600_on_result` (daemon.rs),
+`reinit_over_non_0600_config_enforces_0600_and_tells_the_truth` (init.rs),
+`config_put_persists_yaml_at_0600`, `upstream_post_malformed_json_answers_400_not_connection_drop`
+(smoke_harness.rs).
+
+## FIX attempt 2 — Frozen SHA-256 (files touched by this fix)
+
+```
+e61579a0a91c62b28422c1d32302e409fa5de25e64c8e29e4cc0b8999fea3a1c  crates/cerberus-proxy/dashboard.html
+7c2a7879ee69ed04e8da66b70bf09b6c6293c3eefd8dd4cc4e61545fe50fa467  crates/cerberus-proxy/src/api.rs
+f6d6cb708e292171c2b064dc8eb62bba55f59a411f5bff1b35fa401ef64fe44e  crates/cerberus-proxy/tests/smoke_harness.rs
+63a48344801d83825580cdc8f4ad5d36a247dd99842fe561fc876f447aba5d12  crates/cerberus/src/daemon.rs
+2c2c1757aaa0a69670312e81c940913b0e099d196fc803240ca2ba0e6cd9b2d9  crates/cerberus/src/init.rs
+```
+
+(All other attempt-1 frozen hashes are unchanged; this fix touched exactly the five files above.)
+
+## FIX attempt 2 — Risks for re-verification
+
+1. **tmp name unification**: the shared helper names the tmp `<path>.tmp` for every writer
+   (attempt 1 used the same effective name for both config writers: `config.yaml.tmp`), so on-disk
+   artifacts are unchanged; a stale tmp is now removed before the exclusive create (loudly, no
+   silent reuse). Re-verification should confirm no `<path>.tmp` residue in operator trees.
+2. **init write is now replace-atomic**: inode is replaced instead of truncated in place. Any
+   external process holding an open fd to the old config.yaml keeps reading the old inode until
+   reopen — operationally irrelevant for init (single-user, pre-start), but noted for completeness.
+3. **Truthful mode claim**: on unix the report derives the mode from the file (will print e.g.
+   `mode 0644` if some future regression reintroduces one — the claim can no longer lie); on
+   non-unix platforms no numeric claim is made.
+4. **sessionStorage UX delta**: the dashboard token now dies with the tab — operators must re-paste
+   the token in each new tab/browser session (the intended fix-plan trade: credential never
+   persisted to disk).
+5. **P3-1 400 body shape**: `{"status":"error","error":"invalid upstream payload: …"}` mirrors the
+   PUT /api/config parse-arm shape; any client keying on connection-drop behavior (none known)
+   would now see a clean 400.
+
+## FIX attempt 2 — Builder verdict
+
+All five fix items are implemented and proven (unit tests, live HTTP harness tests, and live
+release-binary checks including the mandated PUT → stat = 0600 check). The full builder matrix is
+green with zero failures and no threshold or semantic moved. **Returns to VERIFY** for the §8B
+panel; the P1 is closed pre-gate.

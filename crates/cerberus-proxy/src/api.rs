@@ -828,21 +828,76 @@ async fn handle_get_config(ctx: &ApiContext) -> Result<Response<Full<Bytes>>, St
     Ok(json_response(StatusCode::OK, json))
 }
 
+/// Atomically replace `path` with `content`, enforcing mode **0600** on the
+/// RESULT (F6.A attempt 2, P1/P2 fix — F5 F-1 discipline).
+///
+/// The tmp file is removed if stale, then created EXCLUSIVELY with mode 0600
+/// AT CREATION on unix (no umask window — the content carries the admin
+/// token), and only then renamed over `path`. Because the rename replaces
+/// any pre-existing file, the final mode is 0600 regardless of what it was
+/// before (a re-init or later write REPAIRS a regressed 0644 config instead
+/// of preserving it).
+///
+/// Every `Result` is handled: on any failure the tmp is removed and the
+/// error returned — the previous file is left untouched (rename is atomic).
+///
+/// # Errors
+///
+/// Propagates the tmp creation/write or rename error.
+pub fn write_config_file_0600(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    // Temp in the SAME directory so the rename is atomic.
+    let tmp = std::path::PathBuf::from(format!("{}.tmp", path.to_string_lossy()));
+    // A stale tmp from a crashed writer must not be reused at its old mode:
+    // remove it BEFORE the exclusive create (the F-1 pattern).
+    let _ = std::fs::remove_file(&tmp);
+    let write = write_tmp_0600(&tmp, content);
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// Create the tmp file EXCLUSIVELY (`create_new`) with `0600` applied at
+/// creation (unix) and write `content`. Exclusive create + creation-time
+/// mode ⇒ there is NO window where the credential-carrying tmp exists at a
+/// umask-derived mode, and a concurrent writer cannot interleave.
+fn write_tmp_0600(tmp: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(tmp)?;
+        f.write_all(content.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(tmp)?;
+        f.write_all(content.as_bytes())
+    }
+}
+
 /// Persist the shared config to YAML at `ctx.config_path` (review v6 F6).
 ///
 /// Atomic write (temp + rename) so the file is not corrupted on a cutoff.
-/// `None` (tests/dev) → no-op without error. If the write fails, `Err` is
-/// returned; the caller decides whether to roll back the in-memory change.
+/// F6.A attempt 2 (P1): the write goes through [`write_config_file_0600`]
+/// so EVERY control-plane write leaves `config.yaml` at 0600 — the old plain
+/// tmp write regressed a 0600 config to umask 0644 (the file carries the
+/// admin token). `None` (tests/dev) → no-op without error. If the write
+/// fails, `Err` is returned; the caller decides whether to roll back the
+/// in-memory change.
 fn persist_config(ctx: &ApiContext, config: &ProxyConfig) -> Result<(), String> {
     let Some(path) = ctx.config_path.as_ref() else {
         return Ok(());
     };
     let yaml = serde_yaml::to_string(config).map_err(|e| format!("config yaml serialize error: {e}"))?;
-    // Temp in the SAME directory so the rename is atomic.
-    let tmp = std::path::PathBuf::from(format!("{}.tmp", path.to_string_lossy()));
-    std::fs::write(&tmp, yaml).map_err(|e| format!("config write failed: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("config commit failed: {e}"))?;
-    Ok(())
+    write_config_file_0600(path, &yaml).map_err(|e| format!("config write failed: {e}"))
 }
 
 /// Control-plane body limited to 1 MiB (review v4 #4). Distinguishes the
@@ -1012,8 +1067,14 @@ async fn handle_post_upstreams(ctx: &ApiContext, body: hyper::body::Incoming) ->
             ));
         }
     };
-    let payload: UpstreamPayload =
-        serde_json::from_slice(&body_bytes).map_err(|e| format!("invalid upstream payload: {e}"))?;
+    // F6.A attempt 2 (P3-1): a malformed JSON body must answer 400 like
+    // every other parse arm — the old `?` surfaced the serde error as a
+    // handler `Err`, so hyper logged "error from user's Service" and closed
+    // the connection (curl HTTP=000) instead of answering.
+    let payload: UpstreamPayload = match serde_json::from_slice(&body_bytes) {
+        Ok(p) => p,
+        Err(e) => return Ok(invalid_config_response(&format!("invalid upstream payload: {e}"))),
+    };
     if payload.name.is_empty() {
         return Ok(json_response(StatusCode::BAD_REQUEST, r#"{"error":"missing 'name'"}"#));
     }
@@ -2206,6 +2267,73 @@ mod tests {
         let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default())))
             .with_config_path(std::path::PathBuf::from("/nonexistent-cerberus-dir/config.yaml"));
         assert!(persist_config(&ctx, &ProxyConfig::default()).is_err());
+    }
+
+    /// F6.A attempt 2 (P1 regression): a control-plane write on a 0600
+    /// fixture must leave config.yaml at 0600 — the file carries the admin
+    /// token, and the old plain tmp write replaced it with a umask 0644 file
+    /// on the first PUT. `persist_config` is the writer behind every
+    /// mutation (PUT /api/config, PUT /api/policy, POST /api/allowlist,
+    /// upstream CRUD).
+    #[test]
+    fn persist_config_keeps_0600_on_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus_f6a2_persist_existing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "listen: 127.0.0.1:8787\nadmin_token: stale-token\n").expect("fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod fixture");
+        }
+
+        let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default()))).with_config_path(path.clone());
+        persist_config(&ctx, &ProxyConfig::default()).expect("persist");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "config.yaml must stay 0600 after a control-plane write, got {mode:o}"
+            );
+        }
+        assert!(
+            !dir.join("config.yaml.tmp").exists(),
+            "no tmp residue may be left behind"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F6.A attempt 2 (P1): the first write on a fresh path must create the
+    /// file at 0600 from birth too (no umask-derived creation).
+    #[test]
+    fn persist_config_creates_the_file_at_0600() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus_f6a2_persist_fresh_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("config.yaml");
+        let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default()))).with_config_path(path.clone());
+        persist_config(&ctx, &ProxyConfig::default()).expect("persist");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "a created config.yaml must be 0600, got {mode:o}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ─── F6 v6.1 fix: persistent detection policy ───────────────────────────

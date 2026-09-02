@@ -1092,10 +1092,14 @@ export CLAUDE_CODE_BASE_URL=http://127.0.0.1:8787</code></pre>
 
 <script>
 // ── Token management ─────────────────────────────────────────────
+// F6.A attempt 2 (fix-plan F6.1: "credencial solo en memoria/session
+// scope"): the admin token lives in sessionStorage — it dies with the tab
+// and is never written to the operator's disk (localStorage survived
+// browser restarts).
 const TOKEN_KEY = 'cerberus.adminJWT';
 
 function getToken() {
-  return window.localStorage ? localStorage.getItem(TOKEN_KEY) : null;
+  return window.sessionStorage ? sessionStorage.getItem(TOKEN_KEY) : null;
 }
 
 function showAuth(msg) {
@@ -1118,7 +1122,7 @@ function saveToken() {
   const input = document.getElementById('cerberus-token');
   const t = (input.value || '').trim();
   if (!t) { return; }
-  if (window.localStorage) localStorage.setItem(TOKEN_KEY, t);
+  if (window.sessionStorage) sessionStorage.setItem(TOKEN_KEY, t);
   input.value = '';
   hideAuth();
   loadData();
@@ -1135,7 +1139,7 @@ async function fetchJson(url) {
   if (tok) headers['X-Cerberus-Admin-Token'] = tok;
   const resp = await fetch(url, { headers });
   if (resp.status === 401) {
-    if (window.localStorage) localStorage.removeItem(TOKEN_KEY);
+    if (window.sessionStorage) sessionStorage.removeItem(TOKEN_KEY);
     showAuth('This server requires an admin token. Enter it below.');
     throw new Error('unauthorized');
   }
@@ -1149,7 +1153,7 @@ async function sendJson(method, url, payload) {
   if (tok) headers['X-Cerberus-Admin-Token'] = tok;
   const resp = await fetch(url, { method, headers, body: JSON.stringify(payload) });
   if (resp.status === 401) {
-    if (window.localStorage) localStorage.removeItem(TOKEN_KEY);
+    if (window.sessionStorage) sessionStorage.removeItem(TOKEN_KEY);
     showAuth('This server requires an admin token.');
     return null;
   }
