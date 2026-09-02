@@ -165,6 +165,32 @@ F4 opens; F4–F9 remain under Review 9 containment.
 
 F5 opens; F5–F9 remain under Review 9 containment.
 
+- **F5.1 non-blocking hot-path logging (R9-10) + F5.2 HMAC keyed default
+  (R9-16): CLOSED/PASS (2026-09-01, attempt 1; panel 2/2, zero P0/P1).**
+  Hot path free of synchronous console writes (structural gate 3/3):
+  bounded 8,192-entry queue, single worker thread, WorkerGuard-pattern
+  shutdown with bounded drain, dropped-writes counted with rate-limited
+  content-free notice. HMAC-SHA256 keyed by default with domain separation
+  (`cerberus:audit-event:v1`, `cerberus:break-glass:v1`,
+  `cerberus:allowlist:v1` reserved), persisted 0600 CSPRNG key file,
+  legacy `sha256:` rows kept readable + prefix-gated (migration
+  discontinuity documented). Security lens confirmed RFC-4231-conformant
+  HMAC, key reach into every production construction site, and durable
+  persistence of 24,164 security events under console-sink flood.
+  `redos_fuzz.rs` byte-untouched (R9-16 rule). Evidence:
+  `evidence/f5/r9-logging-and-hmac.md`,
+  `evidence/review9/f5-attempt1-correctness.md`,
+  `evidence/review9/f5-attempt1-security.md`.
+
+- **F5 phase gate: CLOSED (2026-09-01, owner sign-off).** Integration battery
+  on a clean clone of `099c470`: 776/0 debug, pack 19/19, ReDoS 11/11, load
+  14/14 (honest gate p99 0.839 ms), smoke-harness 63/63, structural
+  no-sync-write gate 3/3, containment intact. Evidence:
+  `evidence/review9/f5-integrator-check.md`. 9×P2 follow-ups registered
+  (key-file creation race window folded into F6 builder scope).
+
+F6 opens; F6–F9 remain under Review 9 containment.
+
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
 - **Orchestration:** Orca Run `run_a64b51716aba`; workers exclusively **Codex** and **OpenCode**. No Claude was used in the v6.1 review/fix/recheck.
