@@ -191,6 +191,49 @@ F5 opens; F5–F9 remain under Review 9 containment.
 
 F6 opens; F6–F9 remain under Review 9 containment.
 
+- **F6.A fail-closed control-plane auth (R9-5 P0) + HMAC-only allowlist
+  (R9-7 P1) + F5 key-file hygiene: CLOSED/PASS (2026-09-02, attempt 2; panel
+  2/2 + attempt-2 re-verification).** `admin_token: None` = CLOSED control
+  plane (401 on every `/api/*`, loopback included — the fix-plan's literal
+  F6.1 mandate); `cerberus init` generates a 256-bit CSPRNG token into a
+  0600 config; Host/Origin allowlist fails closed (19 rebinding shapes
+  403'd live); `X-Cerberus-Bypass` requires the admin token in ALL modes
+  (the F4 injection vector is dead); allowlist persists HMAC fingerprints
+  only (store-level write gate; raw values destroyed by boot migration).
+  Attempt-1's P1 (control-plane writes regressed config.yaml to 0644) was
+  closed in attempt 2 with a unified 0600 write helper. Evidence:
+  `evidence/f6/r9-auth-and-allowlist.md`,
+  `evidence/review9/f6a-attempt1-correctness.md`,
+  `evidence/review9/f6a-attempt1-security.md`,
+  `evidence/review9/f6a-attempt2-verification.md`.
+
+- **F6.B Appendix B CLI surface + parity matrix (R9-6 P1): CLOSED/PASS
+  (2026-09-02, attempts 2/3/3b; re-verification).** 26 new CLI commands
+  (independent inventory: 0 missing / 0 invented in-MVP), 42-row
+  API↔CLI↔dashboard parity matrix with a CI-runnable router-derived parity
+  test (mutation-proven non-vacuous). Attempt-1's P1 (PUT /api/config
+  accepted `admin_token:null` → persistent lockout) closed across attempts
+  2/3/3b: the unified fail-closed predicate rejects REMOVED, EMPTY, and
+  WHITESPACE-PADDED token encodings on both write paths (live-reproduced:
+  5/5 shapes → 400, plane survives); config mutations now emit honest
+  audit events. Process note recorded verbatim: attempt-3 briefly shipped a
+  clippy regression that a pipe-masked gate hid — caught by the spot
+  verifier, evidence corrected. Evidence:
+  `evidence/f6/r9-cli-parity.md`, `evidence/f6/parity-matrix.md`,
+  `evidence/review9/f6b-attempt1-correctness.md`,
+  `evidence/review9/f6b-attempt1-security.md`,
+  `evidence/review9/f6b-attempt2-verification.md`,
+  `evidence/review9/f6b-attempt3-verification.md`.
+
+- **F6 phase gate: CLOSED (2026-09-02, owner sign-off).** Integration battery
+  on a clean clone of `d378939`: 864/0 debug, clippy un-piped exit 0, pack
+  19/19, ReDoS 11/11, load 14/14 (honest gate p99 1.726 ms; one documented
+  contention tail on the phone_list probe re-run-passed serially), smoke
+  harness 69/69, live token-shape closure (5/5 → 400), containment intact.
+  Evidence: `evidence/review9/f6-integrator-check.md`.
+
+F7 opens; F7–F9 remain under Review 9 containment.
+
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
 - **Orchestration:** Orca Run `run_a64b51716aba`; workers exclusively **Codex** and **OpenCode**. No Claude was used in the v6.1 review/fix/recheck.
