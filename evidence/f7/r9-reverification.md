@@ -142,3 +142,144 @@ correct (fail-closed); now the report is honest too.
 
 **Verification:** clippy `--workspace --all-targets -D warnings` exit 0
 (un-piped); `cerberus-packs` 87/87; `cerberus` 119/119; workspace 864/864 ×5.
+
+## Round 2 — re-verification
+
+- **Candidate:** commit `bf5e1ba373d69e6c06abefc76aac4575d402c846` on branch `r9-remediation` (parent `c7f3574`; the FIX attempt 1 commit)
+- **Worktree:** `/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/f7-reverify2` (detached HEAD at `bf5e1ba`; `git status --short` empty before and after; main repo untouched except this file)
+- **Date:** 2026-09-03 (America/New_York, live session)
+- **Host:** macOS (Darwin 25.5.0, arm64) · rustc/cargo 1.97.1
+- **Reviewer:** independent adversarial re-verifier (round 2); no code/test/threshold edits anywhere; every command below executed verbatim from the worktree unless noted
+- **Scope:** re-verify the two round-1 findings (P1 ENV_LOCK split, P2 packs-update report divergence) + full round-1 battery re-run
+
+### Commands run (verbatim, exit codes captured)
+
+| # | Command (cwd = worktree unless noted) | Exit | Result |
+|---|---|---|---|
+| 1 | `git -C /Users/alexeirojas/Work/Personal/Cerberus worktree add --detach …/f7-reverify2 bf5e1ba` | 0 | worktree at candidate |
+| 2 | `grep -rn "static ENV_LOCK" crates/` (via rtk) | 0 | **8 definitions** (not 1) — see P1 topology below |
+| 3 | `shasum -a 256 crates/cerberus/src/daemon.rs crates/cerberus-packs/src/updater.rs` | 0 | `580b0f0b6812ad79c7ae88701701c8e6956bd3c7e3f69fdab8b6a65e117be68a` / `3f6ec31c94273e3fd934d2658f0997bf5c0513f3d6d620d938f127bfe667a32f`; identical to `git show bf5e1ba:…` blobs → worktree files = commit ✅ |
+| 4 | `rtk cargo test --workspace --all-targets` (run 1/3) | **0** | `864 passed (29 suites, 53.38s)` |
+| 5 | `rtk cargo test --workspace --all-targets` (run 2/3) | **101** | `FAILED. 232 passed; 1 failed` — `cerberus-engine::vault::tests::reversible_redaction_splices_vault_tokens` (see Finding R2-1) |
+| 6 | `rtk cargo test --workspace --all-targets` (run 3/3) | 0 | `864 passed (29 suites, 53.40s)` |
+| 7 | `rtk proxy cargo test -p cerberus --bin cerberus -- license login` × 4 (serial) | 0 ×4 | **4/4 green**; both `license_wired_from_signed_file_at_boot` + `login_verifies_and_installs_signed_license` ran concurrently in every run (logs `f7r2-pair-1..4.log`) — round 1: 16/16 FAIL on this filter |
+| 8 | `cargo test -p cerberus-engine --lib reversible_redaction_splices_vault_tokens` × 100 (isolated loop) | 5 failures / 100 | **5% intrinsic flake rate** — single test alone, no parallelism, no env → randomness-driven (Finding R2-1) |
+| 9 | `cargo test -p cerberus-packs --lib` × 10 | 0 ×10 | packs lib stable (pack↔updater residual lock overlap never manifested) |
+| 10 | `cargo test -p cerberus --bin cerberus` × 4 | 0 ×4 | ENV_LOCK-fixed bin suite stable |
+| 11 | `rtk cargo test -p cerberus-packs --all-targets` | 0 | `87 passed (2 suites, 0.20s)` |
+| 12 | `rtk proxy cargo test -p cerberus-packs --test production_pack_pr -- --test-threads=1` | 0 | **19/19** |
+| 13 | `rtk proxy cargo test -p cerberus --test pack_cli_e2e --test pack_cli_via_api` | 0 | **3/3 + 4/4** |
+| 14 | `rtk proxy cargo test -p cerberus-proxy --test smoke_harness` | 0 | **69/69** |
+| 15 | `bash tests/smoke-test.sh` | 0 | 17/17 (`ALL: Smoke test PASSED`; first attempt exit 1 was pre-release-build "Binary not found", re-run after build) |
+| 16 | `cargo fmt --all -- --check` | 0 | clean |
+| 17 | `cargo clippy --workspace --all-targets -- -D warnings` (**un-piped**, explicit `$?`) | **0** | zero warnings |
+| 18 | `git diff --check` / `git status --short` | 0 / empty | reviewer made no modifications |
+| 19 | `cargo build --release -p cerberus` | 0 | release binary for live battery |
+| 20–31 | Live daemon battery (below) | — | see per-attack results |
+
+### P1 (ENV_LOCK) closure analysis
+
+- **Fix shape verified:** `daemon.rs:1073` = `use crate::cli_api::tests::ENV_LOCK;`; private static and `use std::sync::Mutex` are gone. `mitm.rs` already aliased the shared lock; `cli_surface.rs` uses it at 1012/1175/1247; `daemon.rs` guards all 8 of its env tests with it.
+- **Mandated grep criterion NOT met as stated:** `grep -rn "static ENV_LOCK" crates/` shows **8 definitions, not 1**. All 7 others pre-exist at `c7f3574` (`git grep` at parent verified). Topology audit: `platform.rs`'s only private-lock env mutation is `#[cfg(target_os = "windows")]` (dead on macOS); `audit_key.rs` (private) touches only `CERBERUS_HMAC_SECRET`; `init.rs` (private) only `PATH` — both disjoint from shared-lock vars → no same-binary hazard from those. **Residual same-class overlap:** in the `cerberus-packs` lib test binary, `pack.rs:272` (`remove_var("CERBERUS_PACK_TRUST_ROOT")`, private `pack.rs` lock) and the `updater.rs` tests (same var, private `updater.rs` lock) are NOT mutually serialized — same hazard class as the round-1 P1; empirically silent (10/10 loop, all workspace runs), pre-existing, registered as Finding R2-3.
+- **Empirical:** pair filter 4/4 green (was 16/16 FAIL); `-p cerberus --bin cerberus` 4/4; the implicated race is closed.
+
+### P2 / packs-update live battery (release binary, isolated HOMEs, dead-proxy egress on the update daemon — update path confirmed network-free)
+
+Fixtures: throwaway generator (`f7r2-fixtures`, path-dep on the worktree's `cerberus-packs`/`cerberus-engine`), harness key seeds `[7u8;32]` license / `[9u8;32]` pack (roots `ea4a6c63…d22c` / `fd172438…f618`, identical to round 1). Ports 18794–18798; token `f7r2-reverify-admin-token-0123456789`.
+
+| # | Attack | Result | Evidence |
+|---|---|---|---|
+| L0 | Boot Pro+root, CLI `pack install` v1, keyword-bearing scan | ✅ | `pack installed (hot-reload): engine now has 16 rules`; `pack.f7r2.marker_v1:1`, action=block; manifest `f7r2-pack@1.0.0: true` |
+| P2-A | **Tamper 1 byte of the installed pack on disk** (`F`→`G` inside the pattern, JSON valid), then `cerberus packs update` | ⚠️/❌ see R2-2 | Response: `packs update: 0/1 signatures verified; DEACTIVATED after failed verification: f7r2-pack; engine hot-reloaded with 15 rules` — pack deactivated + persisted (`false`, `active: ""`), dataplane clean for original AND tampered markers, reboot → `0 packs installed`. WARN is flow-agnostic (`FAILED signature verification; deactivating` — no "on boot": round-1 secondary nit fixed). **BUT** the deactivation of the real key comes solely from `rebuild_active_set` (unchanged pre-fix path); the fix's own results loop returned false for the wrong reason (file-not-found, see R2-2), and a garbage `"f7r2-pack@": false` entry was persisted |
+| P2-B | **HEALTHY pack + `packs update`** (session-installed, home B; and boot-loaded, home B after restart) | ❌ **FALSE ALARM both times** | `packs update: 0/1 signatures verified; DEACTIVATED after failed verification: f7r2-pack; engine hot-reloaded with 16 rules` while the manifest keeps `f7r2-pack@1.0.0: true`, the engine keeps 16 rules and the scan STILL detects (`pack.f7r2.marker_v1:1`, block). A garbage `"f7r2-pack@": false` entry is persisted. Report claims a deactivation that did not happen — the mirror image of round-1's P2 |
+| L1 | Offline tamper → restart (boot-time verify) | ✅ | `WARN packs: active pack f7r2-pack@1.0.0 FAILED signature verification; deactivating: signature verification failed: signature error: Verification equation was not satisfied`; `0 active packs`, manifest persisted false, scan clean |
+| L2b | Active manifest, restart **without** `CERBERUS_PACK_TRUST_ROOT` (Pro intact) | ✅ | Both fail-closed WARNs; `0 packs installed`; scan clean |
+| L2c | Root present, **Free tier** | ✅ | `tier=free`; same fail-closed WARNs; 0 packs; scan clean |
+| L3a | install v1 → install v2 → `pack rollback` | ✅ | Pre-rollback scan: V2 only; post: V1 only; manifest `{"f7r2-pack@1.0.0": true, "f7r2-pack@2.0.0": false}`, `active: "1.0.0"` |
+| L3b | Tamper v1 on disk (rollback target) → `pack rollback` | ✅ | 15 rules; both markers undetected; both versions persisted inactive; reboot → `0 packs installed`, no resurrection |
+| L4 | Pro gate, Free tier + root: API install/rollback/update/enable | ✅ | All `400 {"error":"pack … aborted via control plane: rule packs require a Pro license (open-core)…"}`; CLI control-plane identical refusals (exit 1); CLI local mode `pack install aborted` / `pack rollback aborted` (exit 1); `disable` un-gated by design. Pro positives: install/update/enable all executed in homes A/B/D/E |
+| L6 | Wire v2 rejections vs `POST /api/packs/install` | ✅ | `{"path":…}` → 400 `install by path retired (wire v1)…`; `wire_version:1` → 400 `unsupported wire version: 1 (this binary speaks v2)`; `wire_version:3` → 400; `origin_name:"../evil/pack.json"` → 400 `origin_name must be a basename without path separators`; valid v2 (raw signed-pack JSON in `pack`) → 200 + detection |
+| — | All daemons terminated after battery | ✅ | No listeners remain on 18794–18798 |
+
+### Per-criterion verdicts (round 2)
+
+| Criterion | Verdict | Notes |
+|---|---|---|
+| Hash check `daemon.rs`/`updater.rs` vs commit | ✅ PASS | `580b0f0b…` / `3f6ec31c…` match commit blobs exactly |
+| Shared-lock fix in `daemon.rs` | ✅ PASS | import verified; pair race empirically closed (4/4 vs 16/16) |
+| Grep "exactly ONE `static ENV_LOCK`" | ❌ FAIL (as stated) | 8 definitions; 7 pre-existing (5 harmless on macOS, 1 residual overlap → R2-3) |
+| Workspace suite 3× 864/864 exit 0 | ❌ **FAIL** | 2/3 green; run 2 exit-101 on the vault test (R2-1), 5% intrinsic flake |
+| P2 closure — disk-bytes verification | ❌ **FAIL** | code reads `load_signed_from_dir` (no in-memory verify) BUT the verification can never find the file in any live flow (R2-2); tampered-pack outcome correct via the pre-existing rebuild path; healthy-pack reports are false alarms |
+| `cerberus-packs --all-targets` (87) | ✅ PASS | 68+19, exit 0 |
+| `production_pack_pr --test-threads=1` (19/19) | ✅ PASS | exit 0 |
+| Pack CLI e2e (3+4) | ✅ PASS | exit 0 |
+| smoke harness (69/69) | ✅ PASS | exit 0 |
+| smoke script (17/17) | ✅ PASS | exit 0 |
+| Signing-at-boot tamper (deactivate+persist) | ✅ PASS | L1 + P2-A + reboot persistence |
+| No-trust-root / Free-tier fail-closed | ✅ PASS | L2b / L2c |
+| Rollback integrity (v2→v1, tampered target, reboot) | ✅ PASS | L3a / L3b |
+| Pro gate (Free refused API+CLI+local; Pro allowed) | ✅ PASS | L4 |
+| Wire v2 ({path}/v1/v3/traversal rejected; valid transport) | ✅ PASS | L6 |
+| fmt / clippy -D warnings (un-piped) / git diff --check | ✅ PASS | exits 0 / 0 / 0 |
+| F6.B update POSITIVE (`N/N signatures verified` on a healthy pack) | ❌ **FAIL (regression)** | unreachable in every live flow at `bf5e1ba` (R2-2); passed at `c7f3574` (in-memory verify) |
+
+### Findings (round 2)
+
+#### R2-1 (P1) — The workspace suite is STILL non-deterministic: `vault::tests::reversible_redaction_splices_vault_tokens` fails ~5% of runs intrinsically
+- **Where:** `crates/cerberus-engine/src/vault.rs:636` — `assert!(!out.contains("abc") && !out.contains("def"), "no raw secret left: {out}")`. The output embeds two random 32-hex-char VAULT tokens; the hex alphabet contains the assertion substrings.
+- **Proof:** observed failing output `key1 [VAULT:1aa34ba35c00f978800bd43a7f2d56d1] key2 [VAULT:c60fb9341ff0cb283fbb945abc082c56]` — token 2 contains `abc` (`…945abc082…`). The splice is correct; the assertion collides with its own token alphabet. 100 ISOLATED single-test runs (no parallelism, no env) → **5 failures (5%)**.
+- **Impact:** the mandatory 3×-864/864 determinism criterion cannot be met (run 2/3 exit-101). Expected ~1-in-22 workspace-run failure from this test alone.
+- **Historical note:** round-1's "run B" failure (`232 passed; 1 failed`) matches this engine-suite signature, suggesting this flake pre-dates the ENV_LOCK fix and was conflated with the race; the ENV_LOCK pair was separately reproduced 16/16 in round 1, so the round-1 P1 diagnosis stands. Fix direction: assert on the stored originals (e.g. re-resolve via the vault) or use non-hex-colliding sentinel secrets.
+
+#### R2-2 (P1, regression introduced by FIX attempt 1) — `verify_installed`'s disk verification can never resolve the pack file: every `packs update` falsely reports `0/N verified; DEACTIVATED` for healthy packs
+- **Where:** `crates/cerberus-packs/src/updater.rs` — both writers of the in-memory installed map key by pack NAME: `install()` (line 488, `state.installed.insert(name.clone(), …)`) and `rebuild_active_set()` (line 1025, `installed.insert(name.clone(), …)`). The fixed `verify_installed` (lines 705–716) parses every key as `name@ver` (`parse_versioned_key`) → for a name-only key `ver=""` → `load_signed_from_dir(dir, name, "")` looks for `pack_<name>-v.json` (no version) → **file never exists → always `false`**.
+- **Live-proven (release daemon, two independent homes):** `packs update` on a HEALTHY pack — session-installed AND boot-loaded — reports `packs update: 0/1 signatures verified; DEACTIVATED after failed verification: f7r2-pack; engine hot-reloaded with 16 rules` while the manifest keeps `f7r2-pack@1.0.0: true`, the engine keeps 16 rules and the scan still detects. A garbage `"f7r2-pack@": false` entry is persisted into the manifest each time (persistent manifest pollution).
+- **Consequences:** (a) the round-1 P2 divergence is NOT closed — it is inverted: the report now claims a deactivation that did not happen (false operator alarm; the honest `1/1 verified` is unreachable in any live flow); (b) in the tampered flow the correct outcome is produced solely by the pre-existing `rebuild_active_set` path — the new disk-verification code contributes only a false (file-not-found) verdict, i.e. the fix's core mechanism is dead in practice; (c) `verify_installed` has **zero test coverage** (`rg verify_installed crates/` → definition + the single daemon.rs:668 caller only), which is why 87/87 + 864/864 stayed green while live behavior is broken.
+- **Security posture:** unchanged and fail-closed — tampered/unsigned bytes are still never activated; deactivation+persersistence of tampered packs verified live (P2-A). This is a correctness/observability regression on the F6.B update surface, not a fail-open.
+- **Fix direction:** key `state.installed` consistently by `name@ver` (or parse name-only keys by looking up `versions_by_pack[name].installed/active`), and add a unit test that runs `install → verify_installed` against a real pack dir.
+
+#### R2-3 (P2, pre-existing, non-blocking) — residual dual-private-`ENV_LOCK` overlap on `CERBERUS_PACK_TRUST_ROOT` in the `cerberus-packs` lib test binary
+- `pack.rs:272` (`remove_var`, private `pack.rs` lock) vs `updater.rs` tests (same var, private `updater.rs` lock) — the exact hazard class of round-1's P1, one binary over. Empirically silent (10/10 loop runs; every workspace run green). The mandated "exactly ONE definition" grep shows 8 definitions: `cli_api.rs` (shared), `daemon.rs`→shared import, and privates in `init.rs` (PATH), `platform.rs` (APPDATA, `cfg(windows)` only — dead on macOS), `audit_key.rs` (`CERBERUS_HMAC_SECRET`), `telemetry.rs`, `updater.rs`, `pack.rs`, `license.rs` (packs-crate vars disjoint from each other except the pack↔updater pair).
+
+No P0. No product-code fail-open found in any live attack (fail-closed held in every tamper/no-root/Free configuration).
+
+### P1/P2 closure outcomes
+
+- **P1 (ENV_LOCK split): CLOSED.** The implicated daemon↔cli_surface race is fixed correctly (shared lock import; pair 4/4 green after 16/16 failures; bin suite 4/4). The stated "exactly ONE definition" grep criterion is unmet (8 definitions) with one residual pre-existing overlap registered as R2-3.
+- **P2 (dishonest packs-update report): NOT CLOSED.** The tampered-pack scenario accidentally reports correctly (outcome delivered by the unchanged `rebuild_active_set`), but the fix's disk-verification never executes meaningfully and introduces R2-2: healthy packs are now always reported `0/N verified; DEACTIVATED` — the report/action divergence persists in mirror form, plus manifest pollution and a lost update-positive contract.
+
+### Final verdict (round 2)
+
+**FAIL** — per §8B ("VERIFY → FAIL: fails ≥1 criterion"): (1) the mandatory workspace-suite determinism criterion fails again (2/3 runs green; exit-101 from the R2-1 vault flake, 5% intrinsic); (2) the P2 fix is ineffective and regressed the F6.B update-positive surface (R2-2). Every functional/security criterion of F7 that round 1 passed (signing-at-boot, no-trust-root/Free fail-closed, rollback integrity, Pro gate, wire v2, 87-pack suite, 19/19 production PR, CLI e2e, 69/69 smoke, fmt/clippy/diff-check, frozen file hashes) passed again live. The ENV_LOCK P1 itself is genuinely fixed. The phase regains PASS after: (a) R2-1 assertion fix + determinism proof, (b) R2-2 key-consistency fix WITH a real `install → verify_installed` test, (c) re-run of this battery.
+
+## FIX attempt 2 (orchestrator-executed builder fix, 2026-09-03)
+
+**R2-1 (P1, vault test flake):** `reversible_redaction_splices_vault_tokens`
+asserted the output contains no "abc"/"def" — but vault tokens are random
+32-char hex, whose alphabet legitimately produces those subsequences (~5%
+intrinsic flake; the observed `…945abc082…` token). Fix: the test payload's
+raw secrets are now `SECRET_ONE`/`SECRET_TWO` (impossible in hex), spans
+adjusted (5..15, 21..31); the no-raw-secret assertion is meaningful again.
+
+**R2-2 (P1, regression from attempt 1):** `state.installed` is keyed by NAME
+(both writers + `rebuild_active_set` agree); attempt 1's fix parsed the key
+as `name@ver` → `ver=""` → `pack_<name>-v.json` never exists → every healthy
+pack reported "0/1 verified; DEACTIVATED" and a garbage `name@` manifest
+entry was persisted. Fix: `verify_installed` now resolves the version from
+`manifest.versions_by_pack[name].active` — the SAME source
+`rebuild_active_set` loads — verifies the DISK bytes via
+`load_signed_from_dir`, and deactivates only when a real active version
+exists (no garbage entries). **Real coverage added** (the gap that let the
+bug ship): `verify_installed_reports_disk_state_honestly` — healthy disk
+bytes → TRUE + stays active; out-of-band disk tampering → FALSE +
+deactivated + persisted across reopen. Live-positive-path proof:
+`packs update` on a healthy pack again reports "N/N signatures verified"
+(the F6.B positive case that attempt 1 had made unreachable).
+
+**R2-3 (P2, pre-existing dual trust-root locks):** registered, not fixed in
+this attempt (10/10 loop green today; same lock-unification class as the
+ENV_LOCK P1 if it ever bites).
+
+**Verification:** clippy `--workspace --all-targets -D warnings` exit 0
+(un-piped); workspace 865/865 ×3 consecutive (the round-2 flake signature is
+gone); focused tests 2/2.

@@ -626,15 +626,18 @@ mod tests {
 
     #[test]
     fn reversible_redaction_splices_vault_tokens() {
+        // F7 round-2 (R2-1): the raw secrets must be tokens the vault-token
+        // HEX alphabet cannot accidentally produce — "abc"/"def" are plain
+        // hex subsequences, so a random 32-hex token hit them ~5% of runs.
         let vault = Vault::new();
-        let text = "key1 abc key2 def";
-        let findings = vec![make_redact("k1", 5, 8), make_redact("k2", 14, 17)];
+        let text = "key1 SECRET_ONE key2 SECRET_TWO";
+        let findings = vec![make_redact("k1", 5, 15), make_redact("k2", 21, 31)];
         let out = super::apply_redaction_reversible(text, &findings, &vault).unwrap();
         assert!(out.starts_with("key1 [VAULT:"), "first span replaced: {out}");
         assert!(out.ends_with(']'), "second span replaced: {out}");
         assert!(out.contains("] key2 [VAULT:"), "structure preserved: {out}");
         assert!(
-            !out.contains("abc") && !out.contains("def"),
+            !out.contains("SECRET_ONE") && !out.contains("SECRET_TWO"),
             "no raw secret left: {out}"
         );
         assert_eq!(vault.len(), 2, "both originals stored");

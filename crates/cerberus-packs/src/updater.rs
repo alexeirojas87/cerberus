@@ -703,25 +703,37 @@ impl PackManager {
         let root = self.effective_trust_root();
         let mut results: Vec<(String, bool)> = Vec::new();
         for (key, installed) in &state.installed {
-            let (name, ver) = parse_versioned_key(key);
+            // F7 round-2 (R2-2): `state.installed` is keyed by NAME (both
+            // writers + `rebuild_active_set` agree); the version comes from
+            // the manifest's ACTIVE pointer — the same source the rebuild
+            // loads from. Parsing the key as `name@ver` produced a version
+            // that never exists on disk ("") and made every healthy pack
+            // report "0/N verified; DEACTIVATED".
+            let name = key.clone();
+            let active_ver = manifest.versions_by_pack.get(&name).map(|v| v.active.clone());
             let ok = match (&root, &installed.signature_hex, &installed.signer_public_key_hex) {
-                (Some(expected), Some(_sig), Some(_signer)) => {
-                    // F7 re-verification P2: verify the DISK bytes — the same
-                    // source `rebuild_active_set` uses — so the operator
-                    // report matches the rebuild outcome. Verifying the
-                    // in-memory copy masked out-of-band disk tampering (the
-                    // report said "verified" while the rebuild deactivated).
-                    // Disk file missing: nothing to verify — unverified.
-                    load_signed_from_dir(&self.pack_dir, &name, &ver)
-                        .is_some_and(|signed| signed.verify_with_trusted_root(expected).is_ok())
-                }
+                (Some(expected), Some(_sig), Some(_signer)) => active_ver.as_deref().is_none_or(
+                    // No active version in the manifest (or disk file
+                    // missing): nothing to verify — unverified. The DISK
+                    // bytes are the same source `rebuild_active_set` uses,
+                    // so the operator report matches the rebuild outcome.
+                    |ver| {
+                        load_signed_from_dir(&self.pack_dir, &name, ver)
+                            .is_some_and(|signed| signed.verify_with_trusted_root(expected).is_ok())
+                    },
+                ),
                 // No trust root / unsigned pack: without a root there is
                 // nothing to verify AGAINST — the pack is inactive anyway
                 // (boot gate), report it as unverified rather than "ok".
                 _ => false,
             };
             if !ok {
-                deactivate_pack(&mut manifest, &name, &ver);
+                // Only deactivate when a real active version exists; a
+                // name missing from the manifest gets no garbage
+                // `name@` manifest entry (round-2 finding).
+                if let Some(ver) = active_ver {
+                    deactivate_pack(&mut manifest, &name, &ver);
+                }
             }
             results.push((key.clone(), ok));
         }
@@ -1163,6 +1175,55 @@ mod tests {
         assert_eq!(packs.len(), 1);
         assert_eq!(packs[0].metadata.name, "test-pack");
         assert!(packs[0].active);
+    }
+
+    /// F7 round-2 (R2-2): `verify_installed` had ZERO coverage, which is how
+    /// the name@ver keying bug (every healthy pack reporting "0/1 verified;
+    /// DEACTIVATED") survived a green 864-test suite. This pins the honest
+    /// contract: healthy disk bytes verify TRUE and stay active; out-of-band
+    /// disk tampering verifies FALSE, deactivates, and persists.
+    #[tokio::test]
+    async fn verify_installed_reports_disk_state_honestly() {
+        let tmp = TempDir::new().unwrap();
+        let initial = EngineBuilder::new(&[]).build().unwrap();
+        let mgr = PackManager::new(tmp.path(), initial).unwrap();
+
+        let (signed, root) = sign_pack(&sample_pack());
+        mgr.install_with_root(signed, &root).await.unwrap();
+
+        // Healthy disk bytes: TRUE (this exact call reported "0/1 verified;
+        // DEACTIVATED" under the round-2 keying bug).
+        let results = mgr.verify_installed().await.unwrap();
+        assert_eq!(results.len(), 1, "one installed pack: {results:?}");
+        assert!(results[0].1, "healthy pack must verify against disk: {results:?}");
+        assert!(mgr.list_packs().await[0].active, "healthy pack stays active");
+
+        // Out-of-band disk tampering: flip one hex char of the signature on
+        // DISK (the in-memory state still holds the original bytes — the
+        // round-1 P2 divergence this test pins shut).
+        let disk_path = tmp
+            .path()
+            .join(versioned_file_name("test-pack", &sample_pack().metadata.version));
+        let disk = std::fs::read_to_string(&disk_path).expect("pack file on disk");
+        let tampered = disk.replacen("\"signature_hex\":\"", "\"signature_hex\":\"f", 1);
+        assert_ne!(disk, tampered, "signature field found on disk");
+        std::fs::write(&disk_path, tampered).expect("write tampered pack");
+
+        let results = mgr.verify_installed().await.unwrap();
+        assert!(!results[0].1, "tampered disk bytes must NOT verify: {results:?}");
+        // The rebuild drops the deactivated pack from the installed map, so
+        // the honest post-condition is: NO pack is active anymore.
+        assert!(
+            mgr.list_packs().await.iter().all(|p| !p.active),
+            "no pack may stay active after failed verification"
+        );
+
+        // Deactivation persists (a fresh manager reopens to the same state).
+        let reopened = open_with_trust_root(tmp.path(), &root);
+        assert!(
+            reopened.list_packs().await.iter().all(|p| !p.active),
+            "deactivation persisted across reopen"
+        );
     }
 
     #[tokio::test]
