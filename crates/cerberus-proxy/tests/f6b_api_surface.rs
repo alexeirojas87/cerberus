@@ -693,7 +693,71 @@ async fn reload_rejects_empty_token_file_anti_lockout() {
         "the old token must still authenticate after refusal"
     );
 
-    let _ = handle;
+    handle.abort();
+}
+
+/// ── Re-verification attempt 3b: unsendable token shapes ──────────────────
+/// The auth header layer trims, so an EMPTY or WHITESPACE-PADDED candidate
+/// token can never round-trip the auth header: accepting any of them locks
+/// the operator out (empty-string was the attempt-3 P1; whitespace was the
+/// attempt-3b P2). All three encodings must be rejected 400 with the plane
+/// and the on-disk file untouched.
+#[tokio::test]
+async fn put_config_rejects_unsendable_token_shapes() {
+    let dir = std::env::temp_dir().join(format!(
+        "cerberus-f6b-shapes-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let config_path = dir.join("config.yaml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "listen: 127.0.0.1:8787\nmode: enforce\nadmin_token: {HARNESS_ADMIN_TOKEN}\nupstreams:\n  openai:\n    url: https://api.openai.com\n"
+        ),
+    )
+    .expect("write");
+
+    let ctx = make_ctx_with_config_path(openai_rule(), OperationMode::Enforce, config_path.clone());
+    let (addr, handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+
+    for (label, body) in [
+        ("empty", r#"{"admin_token":""}"#),
+        ("whitespace-only", r#"{"admin_token":"   "}"#),
+        ("trailing-space", r#"{"admin_token":"abc "}"#),
+        ("leading-space", r#"{"admin_token":" abc"}"#),
+    ] {
+        let resp = client
+            .put(format!("http://{addr}/api/config"))
+            .header("content-type", "application/json")
+            .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+            .body(body)
+            .send()
+            .await
+            .expect("put unsendable shape");
+        assert_eq!(resp.status(), 400, "{label} token shape must be rejected");
+        let text = resp.text().await.expect("body");
+        assert!(text.contains("CLOSE the control plane"), "{label}: {text}");
+    }
+
+    // The plane stays up with the old token and the disk keeps it.
+    let resp = client
+        .get(format!("http://{addr}/api/config"))
+        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("get config after shape attempts");
+    assert_eq!(resp.status(), 200, "the real token must survive all attempts");
+    let disk = std::fs::read_to_string(&config_path).expect("read disk");
+    assert!(
+        disk.contains(&format!("admin_token: {HARNESS_ADMIN_TOKEN}")),
+        "on-disk config unchanged: {disk}"
+    );
+
+    handle.abort();
 }
 
 /// ── F1 anti-lockout on PUT /api/config (attempt 2, LIVE) ─────────────────
@@ -763,31 +827,8 @@ async fn put_config_rejects_admin_token_removal_anti_lockout() {
         "on-disk config must keep the old token: {disk}"
     );
 
-    // 3b. The re-verification finding: the EMPTY-STRING encoding must be
-    //     rejected exactly like null — the auth layer filters Some("") to
-    //     None, so an empty token closes the plane just the same.
-    let resp = client
-        .put(format!("http://{addr}/api/config"))
-        .header("content-type", "application/json")
-        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
-        .body(r#"{"admin_token":""}"#)
-        .send()
-        .await
-        .expect("put empty token");
-    assert_eq!(resp.status(), 400, "empty-token CLEAR via PUT must be rejected");
-    let body = resp.text().await.expect("body");
-    assert!(body.contains("CLOSE the control plane"), "anti-lockout error: {body}");
-    let resp = client
-        .get(format!("http://{addr}/api/config"))
-        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
-        .send()
-        .await
-        .expect("get config after empty attempt");
-    assert_eq!(
-        resp.status(),
-        200,
-        "the old token must survive the empty-string attempt"
-    );
+    // 3b. Token-shape rejections moved to their own test (too_many_lines):
+    //     see put_config_rejects_unsendable_token_shapes.
 
     // 4. Token CHANGE via PUT remains allowed (documented rotation
     //    semantics — the anti-lockout must not break rotation).

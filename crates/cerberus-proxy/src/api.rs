@@ -385,6 +385,14 @@ pub fn expected_admin_token(cfg: &ProxyConfig) -> Option<&str> {
     cfg.admin_token.as_deref().filter(|t| !t.is_empty())
 }
 
+/// A persisted admin token must round-trip through the `x-cerberus-admin-token`
+/// header: the header layer trims, so a whitespace-padded token can never
+/// authenticate (self-lockout), and an empty or whitespace-only value is no
+/// token at all (re-verification finding, F6.B attempt 3b).
+fn admin_token_shape_is_valid(t: &str) -> bool {
+    !t.is_empty() && t.trim() == t
+}
+
 /// Does the request carry a valid admin token? Accepts `Authorization: Bearer <t>`
 /// or `X-Cerberus-Admin-Token: <t>` (review v4 #2). Constant-time comparison
 /// for both headers.
@@ -830,15 +838,21 @@ fn apply_reload(ctx: &ApiContext) -> Response<Full<Bytes>> {
     // config).
     {
         let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
-        // Use the auth-layer's token semantics (expected_admin_token filters
-        // Some("") to None): an EMPTY token in the candidate would close the
-        // plane exactly like a removed one (re-verification finding, F6.B
-        // attempt 2). A live empty token means "already closed" — no-op
-        // reloads stay allowed, opening stays allowed.
-        if expected_admin_token(&live).is_some() && expected_admin_token(&candidate).is_none() {
+        // One fail-closed check covering every self-lockout encoding: a
+        // REMOVED token (None over a live token), an EMPTY token, or a
+        // WHITESPACE-PADDED token — all of them close the plane because the
+        // header layer trims and cannot send such a token back. A live
+        // already-unusable token means "already closed": no-op reloads stay
+        // allowed, opening stays allowed.
+        let candidate_token_closes_plane = candidate.admin_token.as_deref().map_or_else(
+            || expected_admin_token(&live).is_some(),
+            |t| !admin_token_shape_is_valid(t),
+        );
+        if candidate_token_closes_plane {
             return invalid_config_response(
-                "reload would remove or clear the admin token and CLOSE the control plane \
-                 (fail-closed); keep a non-empty admin_token in the file or restart the daemon",
+                "reload would remove, clear, or invalidate the admin token and CLOSE the \
+                 control plane (fail-closed); keep a non-empty, whitespace-free admin_token in \
+                 the file or restart the daemon",
             );
         }
     }
@@ -1363,16 +1377,18 @@ async fn handle_put_config(ctx: &ApiContext, body: hyper::body::Incoming) -> Res
         // the on-disk file keep the old token. Changing the token to a
         // DIFFERENT value stays allowed and applies immediately (documented
         // rotation semantics, live-verified).
-        // Same auth-layer semantics as the reload guard: an EMPTY token in
-        // the candidate closes the plane exactly like a removed one
-        // (re-verification finding, F6.B attempt 2). A live empty token
-        // means "already closed" — no-op PUTs stay allowed, opening stays
-        // allowed.
-        if expected_admin_token(&live).is_some() && expected_admin_token(&candidate).is_none() {
+        // One fail-closed check covering every self-lockout encoding (see
+        // the reload guard): removal, empty, or whitespace-padded candidate
+        // tokens all close the plane.
+        let candidate_token_closes_plane = candidate.admin_token.as_deref().map_or_else(
+            || expected_admin_token(&live).is_some(),
+            |t| !admin_token_shape_is_valid(t),
+        );
+        if candidate_token_closes_plane {
             return Ok(invalid_config_response(
-                "config update would remove or clear the admin token and CLOSE the control plane \
-                 (fail-closed); omit admin_token to keep it or PUT a new non-empty value to \
-                 rotate it",
+                "config update would remove, clear, or invalidate the admin token and CLOSE the \
+                 control plane (fail-closed); omit admin_token to keep it or PUT a new \
+                 non-empty, whitespace-free value to rotate it",
             ));
         }
 

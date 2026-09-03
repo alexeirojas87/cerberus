@@ -448,3 +448,40 @@ attempt-2 block for these two files.)
 
 **Builder verdict: attempt-3 fix executed — returns to VERIFY (unit NOT
 closed; the empty-string P1 is closed pre-gate).**
+
+## FIX attempt 3b (orchestrator-executed; evidence correction + whitespace class)
+
+The attempt-3 spot verification CLOSED the empty-string gap live (a–d) but
+found: **(P1)** the commit-introduced test code failed `clippy -D warnings`
+(`let_underscore_future` on a dropped JoinHandle; `too_many_lines` 117/100)
+— and the attempt-3 section's "clippy clean" claim was FALSE: the builder's
+gate run piped clippy through a pipe without pipefail, masking exit 101.
+Process error by the orchestrator-builder; recorded here verbatim.
+**(P2)** the anti-lockout remained bypassable via whitespace-encoded tokens
+(`"   "`, `"abc "` accepted 200 → unsendable via the trimmed auth header →
+plane locked, restart-persistent).
+
+**Fix (attempt 3b):**
+- `api.rs` — new `admin_token_shape_is_valid` (non-empty, trim-stable) + one
+  unified fail-closed predicate on BOTH guards (reload + PUT): removal, empty,
+  and whitespace-padded candidate tokens are all rejected 400 ("CLOSE the
+  control plane" wording preserved); a live already-unusable token counts as
+  "already closed" (no-op allowed, opening allowed). Whitespace class closed
+  at the source, not documented.
+- `f6b_api_surface.rs` — `let _ = handle` → `handle.abort()` (lint);
+  extracted `put_config_rejects_unsendable_token_shapes` covering empty,
+  whitespace-only, trailing-space, leading-space → all 400 + plane/disk
+  intact (also fixes `too_many_lines`).
+
+**Verification (no pipe masking; real exit codes):** `cargo clippy
+-p cerberus-proxy --all-targets -- -D warnings` → **exit 0**; fmt clean;
+workspace debug **864/864**; f6b_api_surface **12/12**; pack 19/19.
+
+**Frozen hashes (committed state; supersede attempt-3 block for these files):**
+
+```
+39883d3e9e1ace28edc0d381dba906c083ec95bcef05937e3ef27a8d3ec475bd  crates/cerberus-proxy/src/api.rs
+0e0371e5e6c805046e5bd41f3ed41907f4334c4298fa08677fda66318782e7cd  crates/cerberus-proxy/tests/f6b_api_surface.rs
+```
+
+**Builder verdict: attempt-3b executed — returns to VERIFY.**
