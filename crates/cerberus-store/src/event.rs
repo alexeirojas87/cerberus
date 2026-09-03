@@ -85,6 +85,46 @@ impl AuditEvent {
         let serialized = serde_json::to_string(self).unwrap_or_default();
         !raw_values.iter().any(|v| serialized.contains(*v))
     }
+
+    /// Build a CONTROL-PLANE audit event (F6.B attempt 2, security P2-1).
+    ///
+    /// Config-mutation actions (`POST /api/reload`, `PUT /api/config`,
+    /// allowlist add/remove, upstream add/remove, packs enable/disable/update)
+    /// previously left NO trace in the event store — `GET /api/events` showed
+    /// only dataplane `proxy` events while the whole live config could be
+    /// swapped with a single authenticated call. These events close that gap.
+    ///
+    /// * `action` — the honest action name (e.g. `config-reload`,
+    ///   `config-update`, `allowlist-add`); it lands in `flags` so the
+    ///   existing `--by flag` stats and the events feed group it.
+    /// * `detail` — optional non-secret metadata (a pack name, an upstream
+    ///   name). **NEVER** a token, a raw allowlist value or a fingerprint:
+    ///   this event must stay secret-free end-to-end.
+    /// * `mode` — the operation mode of the daemon at mutation time.
+    ///
+    /// The event carries no findings, so `counts`/`hashed_values` are empty
+    /// and the severity is `info`-grade (`low` in the finding scale).
+    #[must_use]
+    pub fn control_plane(mode: &str, action: &str, detail: &str) -> Self {
+        let now = chrono::Utc::now();
+        let mut flags = vec![action.to_string()];
+        if !detail.is_empty() {
+            flags.push(detail.to_string());
+        }
+        Self {
+            id: format!("evt_{}", uuid::Uuid::new_v4().to_string().replace('-', "")),
+            ts: now.to_rfc3339(),
+            mode: mode.to_string(),
+            tool: "control-plane".to_string(),
+            provider: "control".to_string(),
+            flags,
+            counts: HashMap::new(),
+            action_taken: "audit".to_string(),
+            hashed_values: Vec::new(),
+            severity: Severity::Low.to_string(),
+            ts_unix: now.timestamp(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +205,34 @@ mod tests {
         let event = AuditEvent::from_findings(&[], Action::Allow, "local", "t", "p");
         assert!(!event.ts.is_empty());
         assert!(event.ts_unix > 0);
+    }
+
+    /// F6.B attempt 2 (security P2-1): control-plane events carry the honest
+    /// action name and stay secret-free (no counts, no hashed values, empty
+    /// findings surface). The `no_raw_values` contract must also hold.
+    #[test]
+    fn control_plane_event_is_honest_and_secret_free() {
+        let event = AuditEvent::control_plane("enforce", "config-reload", "");
+        assert_eq!(event.tool, "control-plane");
+        assert_eq!(event.provider, "control");
+        assert_eq!(event.action_taken, "audit");
+        assert_eq!(event.flags, vec!["config-reload".to_string()]);
+        assert!(event.counts.is_empty());
+        assert!(event.hashed_values.is_empty());
+        assert_eq!(event.severity, "low");
+        assert_eq!(event.mode, "enforce");
+        assert!(event.id.starts_with("evt_"));
+
+        // The detail lands as a second flag (only when non-empty).
+        let detailed = AuditEvent::control_plane("shadow", "pack-enable", "e2e-pack");
+        assert_eq!(detailed.flags, vec!["pack-enable".to_string(), "e2e-pack".to_string()]);
+
+        // No raw secret may ever survive serialization.
+        let secret = "sk-super-secret-raw-value-000111";
+        let leaky = AuditEvent::control_plane("local", "allowlist-add", "");
+        assert!(
+            leaky.no_raw_values(&[secret]),
+            "control-plane events must stay secret-free"
+        );
     }
 }

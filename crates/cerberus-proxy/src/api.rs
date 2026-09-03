@@ -122,6 +122,14 @@ pub const ADMIN_TOKEN_MIN_BYTES: usize = 24;
 /// Maximum body limit for the `/api/*` control-plane routes (1 MiB,
 /// review v4 #4). The data-plane limit (`max_body_bytes`) applies separately
 /// and is not touched.
+///
+/// KNOWN LIMIT (F6.B attempt 2, security P3-2 — documented, by design): the
+/// build plan's "100 KB scan budget" describes the scan BUDGET SHAPE (how
+/// much text a dry-run may cost), while `POST /api/scan` here is bounded by
+/// this shared 1 MiB CONTROL-PLANE limit like every other `/api/*` body.
+/// Empirically bounded either way (10 MB → 413; 954 KB → ~38 ms linear
+/// scan); a scan-specific cap would be a behavior change and stays out of
+/// this fix (see evidence pack, attempt 2).
 const CONTROL_PLANE_MAX_BYTES: usize = MAX_PACK_BODY_BYTES;
 
 /// Shared context for the API.
@@ -656,6 +664,9 @@ async fn handle_pack_mode(ctx: &ApiContext, kind: PackKind) -> Result<Response<F
         ));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    // `Update` is a config mutation (verify + hot-reload) and gets an audit
+    // event; List is read-only.
+    let is_update = matches!(kind, PackKind::Update);
     let cmd = match kind {
         PackKind::List => PackCommand::List { reply: reply_tx },
         PackKind::Rollback => PackCommand::Rollback { reply: reply_tx },
@@ -668,10 +679,17 @@ async fn handle_pack_mode(ctx: &ApiContext, kind: PackKind) -> Result<Response<F
         ));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
-        Ok(Ok(Ok(text))) => Ok(json_response(
-            StatusCode::OK,
-            &format!(r#"{{"status":"ok","message":{text:?}}}"#),
-        )),
+        Ok(Ok(Ok(text))) => {
+            if is_update {
+                // Audit the applied mutation (F6.B attempt 2, security P2-1).
+                let mode = live_operation_mode(ctx);
+                audit_config_mutation(ctx, &mode, "pack-update", "").await;
+            }
+            Ok(json_response(
+                StatusCode::OK,
+                &format!(r#"{{"status":"ok","message":{text:?}}}"#),
+            ))
+        }
         Ok(Ok(Err(e))) => Ok(json_response(StatusCode::BAD_REQUEST, &format!(r#"{{"error":{e:?}}}"#))),
         Ok(Err(_)) => Ok(json_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -707,6 +725,7 @@ async fn apply_pack_enable_disable(ctx: &ApiContext, body_bytes: &[u8], enable: 
         );
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let pack_name = parsed.name.clone();
     let cmd = if enable {
         PackCommand::Enable {
             name: parsed.name,
@@ -725,7 +744,14 @@ async fn apply_pack_enable_disable(ctx: &ApiContext, body_bytes: &[u8], enable: 
         );
     }
     match reply_rx.await {
-        Ok(Ok(message)) => json_response(StatusCode::OK, &format!(r#"{{"status":"ok","message":{message:?}}}"#)),
+        Ok(Ok(message)) => {
+            // Audit the applied mutation (F6.B attempt 2, security P2-1):
+            // the pack name is manifest metadata, never a secret.
+            let mode = live_operation_mode(ctx);
+            let action = if enable { "pack-enable" } else { "pack-disable" };
+            audit_config_mutation(ctx, &mode, action, &pack_name).await;
+            json_response(StatusCode::OK, &format!(r#"{{"status":"ok","message":{message:?}}}"#))
+        }
         Ok(Err(e)) => json_response(StatusCode::BAD_REQUEST, &format!(r#"{{"error":{e:?}}}"#)),
         Err(_) => json_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -842,7 +868,13 @@ fn apply_reload(ctx: &ApiContext) -> Response<Full<Bytes>> {
 }
 
 async fn handle_reload(ctx: &ApiContext) -> Result<Response<Full<Bytes>>, String> {
-    Ok(apply_reload(ctx))
+    let resp = apply_reload(ctx);
+    // Audit ONLY the applied mutations (a 400 left the live config intact).
+    if resp.status() == StatusCode::OK {
+        let mode = live_operation_mode(ctx);
+        audit_config_mutation(ctx, &mode, "config-reload", "").await;
+    }
+    Ok(resp)
 }
 
 /// Core of `POST /api/scan` (F6.B, Appendix B B.4 — dashboard "Test
@@ -1064,7 +1096,10 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for PatchField<T> {
 ///
 /// - `admin_token` absent ⇒ the live token is preserved (it never has to
 ///   be resent, and `GET` does not reveal it). Explicit `null` ⇒ it is
-///   deleted.
+///   deleted **at the DTO level only**: `handle_put_config` REJECTS the
+///   patch with 400 when the live config has a token (anti-lockout, F6.B
+///   attempt 2 finding F1 — removal must never close/persist a closed
+///   control plane). Changing to a DIFFERENT token stays allowed.
 /// - `admin_token_configured` is accepted (so a GET→modify→PUT cycle from
 ///   the client does not fail) but it is READ-ONLY: it is ignored
 ///   completely, it cannot enable or disable authentication.
@@ -1306,26 +1341,55 @@ async fn handle_put_config(ctx: &ApiContext, body: hyper::body::Incoming) -> Res
     // released until publishing (or aborting): nobody cuts in midway, and the
     // order is validate → persist → publish. Transactional from the in-memory
     // perspective: if validation or disk fail, the live config did not change.
-    let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    let candidate = patch.apply(&live);
+    // The guard is scoped LEXICALLY (block) so the future stays `Send` — the
+    // audit emission below awaits AFTER the lock is released.
+    let (requires_restart, mode_now) = {
+        let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
+        let candidate = patch.apply(&live);
 
-    // Exposure revalidation BEFORE persisting/mutating (review v6.1).
-    if let Err(e) = validate_control_plane_exposure(&candidate) {
-        return Ok(invalid_config_response(&e));
-    }
-    // Persistence first: if the YAML cannot be written, we publish nothing
-    // (before, it was applied in memory and diverged from disk).
-    if let Err(e) = persist_config(ctx, &candidate) {
-        return Ok(persist_failed_response(&e));
-    }
+        // Anti-lockout (F6.B attempt 2, finding F1 — the SAME invariant
+        // `apply_reload` already enforces): a running daemon booted with an
+        // admin token; a PUT that would REMOVE it (explicit
+        // `"admin_token":null`) closes every `/api/*` route mid-session
+        // (all 401, including for the operator who just sent the PUT), and
+        // because the candidate is persisted the closure would survive
+        // `cerberus restart` — recovery would require a hand edit of the
+        // YAML. Reject BEFORE persisting or publishing: the live config and
+        // the on-disk file keep the old token. Changing the token to a
+        // DIFFERENT value stays allowed and applies immediately (documented
+        // rotation semantics, live-verified).
+        if live.admin_token.is_some() && candidate.admin_token.is_none() {
+            return Ok(invalid_config_response(
+                "config update would remove the admin token and CLOSE the control plane (fail-closed); \
+                 omit admin_token to keep it or PUT a new value to rotate it",
+            ));
+        }
 
-    // Review v6 F6: if `listen` changed, the LIVE socket cannot rebind;
-    // we return `requires_restart:true` so the UI warns that the new listen
-    // applies on the NEXT startup (the `listen` is already persisted).
-    let requires_restart = live.listen != candidate.listen;
-    // Publish: write the SAME config the hot path reads (hot-reload, P0-5).
-    *live = candidate;
-    drop(live);
+        // Exposure revalidation BEFORE persisting/mutating (review v6.1).
+        if let Err(e) = validate_control_plane_exposure(&candidate) {
+            return Ok(invalid_config_response(&e));
+        }
+        // Persistence first: if the YAML cannot be written, we publish
+        // nothing (before, it was applied in memory and diverged from disk).
+        if let Err(e) = persist_config(ctx, &candidate) {
+            return Ok(persist_failed_response(&e));
+        }
+
+        // Review v6 F6: if `listen` changed, the LIVE socket cannot rebind;
+        // we return `requires_restart:true` so the UI warns that the new
+        // listen applies on the NEXT startup (the `listen` is already
+        // persisted).
+        let requires_restart = live.listen != candidate.listen;
+        let mode_now = format!("{:?}", candidate.mode).to_lowercase();
+        // Publish: write the SAME config the hot path reads (hot-reload, P0-5).
+        *live = candidate;
+        (requires_restart, mode_now)
+    };
+
+    // Audit the applied mutation (F6.B attempt 2, security P2-1). The body
+    // is NEVER echoed (it may carry the rotated token) — only the honest
+    // action name.
+    audit_config_mutation(ctx, &mode_now, "config-update", "").await;
 
     let message = if requires_restart {
         r#"{"status":"ok","requires_restart":true,"message":"config updated (listen change applies on next restart)"}"#
@@ -1459,27 +1523,36 @@ async fn handle_post_upstreams(ctx: &ApiContext, body: hyper::body::Incoming) ->
     }
 
     // Same transaction as PUT /api/config (review v6.1): candidate →
-    // validate → persist → publish, with the write lock held.
-    let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    let mut candidate = live.clone();
-    candidate.upstreams.insert(
-        payload.name.clone(),
-        UpstreamConfig {
-            url: payload.url.clone(),
-            path_prefix: None,
-            auth_header: payload.auth_header.unwrap_or_else(|| "authorization".to_string()),
-            mode: payload.mode,
-            expected_auth: None,
-        },
-    );
-    if let Err(e) = validate_control_plane_exposure(&candidate) {
-        return Ok(invalid_config_response(&e));
-    }
-    if let Err(e) = persist_config(ctx, &candidate) {
-        return Ok(persist_failed_response(&e));
-    }
-    *live = candidate;
-    drop(live);
+    // validate → persist → publish, with the write lock held (scoped
+    // LEXICALLY — the audit emission awaits after the lock is released).
+    let (mode_now, saved_name) = {
+        let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
+        let mut candidate = live.clone();
+        candidate.upstreams.insert(
+            payload.name.clone(),
+            UpstreamConfig {
+                url: payload.url.clone(),
+                path_prefix: None,
+                auth_header: payload.auth_header.unwrap_or_else(|| "authorization".to_string()),
+                mode: payload.mode,
+                expected_auth: None,
+            },
+        );
+        if let Err(e) = validate_control_plane_exposure(&candidate) {
+            return Ok(invalid_config_response(&e));
+        }
+        if let Err(e) = persist_config(ctx, &candidate) {
+            return Ok(persist_failed_response(&e));
+        }
+        let mode_now = format!("{:?}", candidate.mode).to_lowercase();
+        *live = candidate;
+        (mode_now, payload.name.clone())
+    };
+
+    // Audit the applied mutation (F6.B attempt 2, security P2-1). The name
+    // is operator-chosen metadata, not a secret; the URL/auth are NOT
+    // echoed.
+    audit_config_mutation(ctx, &mode_now, "upstream-add", &saved_name).await;
 
     Ok(json_response(
         StatusCode::OK,
@@ -1495,29 +1568,37 @@ async fn handle_post_upstreams(ctx: &ApiContext, body: hyper::body::Incoming) ->
 async fn handle_delete_upstream(ctx: &ApiContext, name: &str) -> Result<Response<Full<Bytes>>, String> {
     // Same transaction as PUT /api/config (review v6.1). The guards are
     // evaluated on the candidate; the live config only changes at the end.
-    let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    if live.upstreams.contains_key(name) && live.upstreams.len() <= 1 {
-        return Ok(json_response(
-            StatusCode::BAD_REQUEST,
-            &format!(r#"{{"error":"cannot remove the last upstream","name":{name:?}}}"#),
-        ));
-    }
-    let mut candidate = live.clone();
-    if candidate.upstreams.remove(name).is_none() {
-        return Ok(json_response(
-            StatusCode::NOT_FOUND,
-            &format!(r#"{{"error":"upstream not found","name":{name:?}}}"#),
-        ));
-    }
-    if let Err(e) = persist_config(ctx, &candidate) {
-        return Ok(persist_failed_response(&e));
-    }
-    *live = candidate;
-    drop(live);
+    // The write guard is scoped LEXICALLY (the audit emission below awaits
+    // after the lock is released).
+    let (mode_now, removed) = {
+        let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
+        if live.upstreams.contains_key(name) && live.upstreams.len() <= 1 {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"cannot remove the last upstream","name":{name:?}}}"#),
+            ));
+        }
+        let mut candidate = live.clone();
+        if candidate.upstreams.remove(name).is_none() {
+            return Ok(json_response(
+                StatusCode::NOT_FOUND,
+                &format!(r#"{{"error":"upstream not found","name":{name:?}}}"#),
+            ));
+        }
+        if let Err(e) = persist_config(ctx, &candidate) {
+            return Ok(persist_failed_response(&e));
+        }
+        let mode_now = format!("{:?}", candidate.mode).to_lowercase();
+        *live = candidate;
+        (mode_now, name.to_string())
+    };
+
+    // Audit the applied mutation (F6.B attempt 2, security P2-1).
+    audit_config_mutation(ctx, &mode_now, "upstream-remove", &removed).await;
 
     Ok(json_response(
         StatusCode::OK,
-        &format!(r#"{{"status":"ok","deleted":{name:?}}}"#),
+        &format!(r#"{{"status":"ok","deleted":{removed:?}}}"#),
     ))
 }
 
@@ -1809,7 +1890,15 @@ async fn handle_post_allowlist(ctx: &ApiContext, body: hyper::body::Incoming) ->
             ));
         }
     };
-    Ok(apply_allowlist_add(ctx, &body_bytes))
+    let resp = apply_allowlist_add(ctx, &body_bytes);
+    // Audit the applied mutation (F6.B attempt 2, security P2-1). The event
+    // carries NO fingerprint: the raw value is already HMAC'd for the
+    // config; the audit trail needs only the honest action name.
+    if resp.status() == StatusCode::OK {
+        let mode = live_operation_mode(ctx);
+        audit_config_mutation(ctx, &mode, "allowlist-add", "").await;
+    }
+    Ok(resp)
 }
 
 /// `POST /api/break-glass` — issue a one-shot bypass token (F2.3/R9-8).
@@ -1966,7 +2055,14 @@ async fn handle_delete_allowlist(
             ));
         }
     };
-    Ok(apply_allowlist_remove(ctx, &body_bytes))
+    let resp = apply_allowlist_remove(ctx, &body_bytes);
+    // Audit the applied mutation (F6.B attempt 2, security P2-1); NO
+    // fingerprint in the event (honest action name only).
+    if resp.status() == StatusCode::OK {
+        let mode = live_operation_mode(ctx);
+        audit_config_mutation(ctx, &mode, "allowlist-remove", "").await;
+    }
+    Ok(resp)
 }
 
 /// Core of `DELETE /api/allowlist` (testable without a socket).
@@ -2292,6 +2388,27 @@ pub async fn record_event(ctx: &ApiContext, event: AuditEvent) {
     if let Some(ref store) = ctx.store {
         store.write_event_async(event).await;
     }
+}
+
+/// Audit a successful control-plane CONFIG MUTATION (F6.B attempt 2,
+/// security P2-1): emit the event (visible via `GET /api/events`) AND a tee
+/// log line. Reload used to swap the whole live config with zero trace; the
+/// same gap covered config PUT, allowlist CRUD, upstream CRUD and the pack
+/// mutations.
+///
+/// `mode` = the live operation mode at mutation time; `detail` = optional
+/// non-secret metadata (a pack/upstream name). NEVER a token, a raw
+/// allowlist value or a fingerprint — the event must stay secret-free.
+async fn audit_config_mutation(ctx: &ApiContext, mode: &str, action: &str, detail: &str) {
+    tracing::info!(action = %action, detail = %detail, "control-plane config mutation applied");
+    let event = AuditEvent::control_plane(mode, action, detail);
+    record_event(ctx, event).await;
+}
+
+/// Live operation mode as a lowercase string (the event `mode` field).
+fn live_operation_mode(ctx: &ApiContext) -> String {
+    let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+    format!("{:?}", live.mode).to_lowercase()
 }
 
 /// Extract the provider from the request path.

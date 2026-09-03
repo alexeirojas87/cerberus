@@ -191,3 +191,222 @@ clap wiring, help text, tests (unit, harness e2e against the real proxy, and
 CLI-via-API e2e through the real binary) and user-guide documentation; the
 parity matrix is complete with per-row test citations and an explicitly
 CI-runnable parity test; the full builder matrix is green.
+
+## FIX attempt 2 (commit on `r9-f6b-attempt2`, candidate base cb36c8a)
+
+Attempt 1 (079ebf8) returned FIX: correctness lens FAIL (1×P1 + P2s), security
+lens PASS with remediate-before-gate P2s. This pass closes every listed item;
+nothing else moved (no threshold changes, no scope beyond the findings, F6.A
+behavior untouched).
+
+### Root cause → fix → test, per item
+
+**F1 (P1, blocking) — PUT /api/config accepted `admin_token:null`, closed the
+control plane and persisted the closure.**
+Root cause: the anti-lockout guard existed only in `apply_reload`
+(`live.admin_token.is_some() && candidate.admin_token.is_none()` → 400);
+`handle_put_config` resolved an explicit null via `PatchField::Clear` straight
+to a persisted candidate (R9-5 fail-closed then closes every `/api/*` route,
+including for the operator who sent the PUT; the on-disk `admin_token: null`
+survives restart).
+Fix: `crates/cerberus-proxy/src/api.rs:1350-1366` — the SAME invariant inside
+`handle_put_config`'s transactional block, evaluated AFTER the candidate is
+computed and BEFORE exposure validation/persist/publish (so nothing is
+written when rejected). Error names the escape hatches honestly ("omit
+admin_token to keep it or PUT a new value to rotate it"). Token CHANGE stays
+allowed and applies immediately (rotation semantics unchanged — live-verified
+below). The write-guard is scoped lexically so the audit emission awaits only
+after the lock is released.
+Tests: `f6b_api_surface::put_config_rejects_admin_token_removal_anti_lockout`
+(spawned real proxy: null → 400; old token still 200 on /api/config; /health
+200; on-disk YAML still carries the old token; rotation → 200 with old 401 /
+new 200 immediately; no token value in the audit trail) + LIVE battery below.
+
+**F2 (P2) — the parity test validated against `known_api_routes()`, a
+hand-maintained duplicate of the router (mutation-proven green with a removed
+router arm).**
+Root cause: `every_daemon_backed_cli_command_maps_to_a_real_api_route`
+asserted `is_known_api_route(row)`, i.e. table-vs-table — the router was not
+consulted.
+Fix: the parity test now dispatches all 24 CLI rows through the REAL router of
+a spawned proxy over HTTP (`crates/cerberus/src/main.rs:651-694` module const
+table, `:852-971` test): every row's request is engineered to reach its
+handler (pre-seeded upstreams/allowlist fingerprint/audit key, bodies for the
+mutating rows), so a bare router `404 {"error":"not found"}` is the only way
+to fail — an authenticated `/api/not-a-route` canary first proves that 404
+shape is real. A second, reverse test protects the table itself:
+`f6b_api_surface::route_table_matches_the_router`
+(`crates/cerberus-proxy/tests/f6b_api_surface.rs:875-950`) iterates
+`known_api_routes()` and requires every entry to dispatch non-404.
+Mutation proof (attempt-1's mutation A, re-run on this candidate): with
+`("POST", "/api/reload") => Ok(not_found())` substituted for the dispatch arm
+(a temporary local edit, REVERTED immediately — commit is clean):
+- parity test → FAILED: "parity: CLI 'reload' maps to POST /api/reload, which
+  the ROUTER does not serve (bare 404 — the dispatch arm is missing)";
+- route_table_matches_the_router → FAILED: "route table claims POST
+  /api/reload but the ROUTER does not serve it".
+After revert both are green again (1/1 and 10/10).
+
+**F3 (P2) — the real packs enable/disable success path had no executing test.**
+Root cause: `f6b_api_surface::pack_enable_disable_update_reach_the_worker`
+stubs the worker with a channel echo; `PackManager::set_active` is reached
+only by the real daemon arms, which nothing executed.
+Fix: NEW binary e2e `crates/cerberus/tests/pack_enable_disable_worker_e2e.rs`
+— spawns the REAL `cerberus start` daemon (signed Pro license + pack trust
+root via the same env wiring the product resolves), then drives over HTTP:
+install (activates; worker arm → manifest+engine) → `/api/scan` DETECTS the
+pack marker → disable (ungated) → scan does NOT detect → enable (Pro gate
+passes) → scan DETECTS again → the mutations are audited on the real daemon
+via `/api/events` (pack-enable/pack-disable). This exercises the full
+composed path API → PackCommand → worker arm → `set_active` →
+`snapshot_engine` → engine rebase → live scan. Result: 1 passed (~1.2 s).
+
+**F4 (informational)** — documented here: (a) `packs update` fetch-registry
+→ F7 `auto-update` (command does verify+hot-reload today, disclosed in
+--help); (b) Appendix B's "every command has its equivalent in the dashboard"
+preamble vs the §4.6-scoped control list — the matrix states its reading
+openly and marks absences N1–N3 instead of inventing UI (orchestrator
+awareness item, plan-text tension stands); (c) the config parser's silent
+unknown-top-level-key laxity is pre-existing schema behavior outside this
+unit's diff (validate correctly rejects the documented failure classes).
+
+**Security P2-1 — control-plane mutations were unaudited.**
+Root cause: reload/config/allowlist/upstream mutations swapped live state
+with zero event-store and (for reload/config/allowlist/upstream) zero tee-log
+trace; `GET /api/events` showed only dataplane `proxy` events.
+Fix: `AuditEvent::control_plane(mode, action, detail)`
+(`crates/cerberus-store/src/event.rs:108-146` — honest action name in
+`flags`, `tool: "control-plane"`, `provider: "control"`, `action_taken:
+"audit"`, empty `counts`/`hashed_values`) + `audit_config_mutation`
+(`crates/cerberus-proxy/src/api.rs:2397-2410` — event + `tracing::info!` tee
+line) emitted on SUCCESS only, at: reload → `config-reload` (api.rs:875),
+config PUT → `config-update` (api.rs:1392), allowlist add/remove →
+`allowlist-add`/`allowlist-remove` (api.rs:1899/2063), upstream add/remove →
+`upstream-add`/`upstream-remove` (api.rs:1555/1597), packs enable/disable →
+`pack-enable`/`pack-disable` (api.rs:752), packs update → `pack-update`
+(api.rs:686). NO secrets in payloads: no tokens, no raw values, no
+fingerprints (detail carries only pack/upstream names).
+Tests: `f6b_api_surface::config_mutations_emit_audit_events_visible_via_api`
+(all five action families visible via /api/events, secret-free), the extended
+worker-stub test (pack action names), the worker e2e (in vivo on the real
+daemon), `cerberus-store` `control_plane_event_is_honest_and_secret_free`, and
+the LIVE battery below.
+
+**Security P2-2 — flaky `login_verifies_and_installs_signed_license`.**
+Root cause: `temp_home()` derived directory names from nanosecond timestamps;
+two tests landing on the same clock tick shared a home, and a sibling's
+`remove_dir_all(&home)` deleted the login test's live home mid-run (the
+observed "installed then dest missing" signature).
+Fix: all THREE copies of the helper (`crates/cerberus/src/cli_surface.rs:984`,
+`cli_api.rs:304`, `cli_pack.rs:204`) now build `prefix-tag-pid-nanos-SEQ`
+names with a monotonically increasing `AtomicU64` — unique per CALL,
+independent of clock granularity; each test still rmtree's only its own home.
+Tests: login test green ×3 consecutive runs (below) plus every temp_home
+consumer in the workspace run (862/0).
+
+**Security P3-1 — log tee file created 0644.**
+Fix: `crates/cerberus-proxy/src/log.rs:348-364` — `open_log_file()` creates
+with `mode(0o600)` at creation (unix; append keeps an existing file's mode),
+used by `TeeSink::open` and the rotation path. Content discipline unchanged
+(designed secret-free; 0600 is defense-in-depth matching the config-write
+rule). Test: `log.rs:693 tee_file_is_created_0600` (created mode asserted
+0600, append keeps it) + LIVE `stat` on a real daemon's tee: `-rw-------`.
+
+**Security P3-2 — scan cap is the shared 1 MiB control-plane limit, not the
+plan's 100 KB scan budget shape.**
+Documented at `crates/cerberus-proxy/src/api.rs:126-135` (`KNOWN LIMIT`
+comment on `CONTROL_PLANE_MAX_BYTES`): the plan's 100 KB describes the scan
+BUDGET SHAPE; the API cap is the shared control-plane limit (10 MB → 413 in
+ms; 954 KB → tens of ms linear). No behavior change — a scan-specific cap
+would move behavior and stays out of this fix.
+
+### LIVE acceptance battery (release binary, isolated HOME, port 18947/18949)
+
+- F1: `PUT /api/config {"admin_token":null}` with the valid token → **HTTP
+  400** `{"status":"error","error":"config update would remove the admin
+  token and CLOSE the control plane (fail-closed); ..."}`; immediately after,
+  `GET /api/config` with the SAME token → **200**, `/health` → **200**, and
+  the on-disk YAML still contains the original `admin_token` line (grep = 1).
+  Rotation: `PUT {"admin_token":"<new>"}` → **200**; old token → **401**;
+  new token → **200** (rotation NOT broken).
+- P2-1: after `POST /api/reload` (200), `PUT /api/config` (200), allowlist
+  add/remove (200/200), upstream add/remove (200/200) — `GET
+  /api/events?tool=control-plane` lists **config-reload, config-update,
+  allowlist-add, allowlist-remove, upstream-add, upstream-remove** with
+  `tool=control-plane`, `action_taken=audit`; serialized events contain NO
+  raw canary, NO `hmac:` fingerprint, NO token (python check: all False).
+- P3-1: `stat` on the daemon's tee file → `-rw-------` (0600).
+
+### Verification matrix (attempt 2, all run in the isolated worktree)
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | 0, clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0, "No issues found" |
+| `cargo test --workspace --all-targets` (debug) | **862 passed / 0 failed** (856 attempt-1 + 3 f6b + 1 worker e2e + 1 event + 1 log-mode; login test green ×3) |
+| `cargo test -p cerberus-packs --test production_pack_pr` | **19/19** |
+| `cargo test --release --test redos_fuzz -- --test-threads=1` | **11/11** (`tests/redos_fuzz.rs` untouched — 0-byte diff) |
+| `cargo test --release --test load_test -- --test-threads=1` | **14/14** incl. the honest HTTP round-trip gate |
+| `cargo test -p cerberus-proxy --test smoke_harness` | **69/69** |
+| `cargo test -p cerberus-proxy --test f6b_api_surface` | **10/10** (7 attempt-1 + 3 new) |
+| `cargo test -p cerberus --test cli_surface_via_api` | **11/11** |
+| `cargo test -p cerberus --test pack_enable_disable_worker_e2e` | **1/1** (real-daemon worker round trip) |
+| `bash tests/smoke-test.sh` (release binary) | **17 PASS / 0 FAIL** |
+| `git diff --check` | clean |
+| Mutation A (temporary, reverted) | parity test + table↔router test both FAIL on the removed reload arm (proof above) |
+| `login_verifies_and_installs_signed_license` ×3 | 3× `ok. 1 passed` |
+
+### Frozen SHA-256 (files touched by attempt 2, at commit time)
+
+```
+87b13acc46e27ea2e26b2d876ef1f9d8c3fb212807fecad2c06b0504ad2d633b  crates/cerberus-proxy/src/api.rs
+fa7ed2f67ef3599acdef99e9b1a4e282ed4de13578c4d4eb18f0d7c02c7c315a  crates/cerberus-store/src/event.rs
+91ca5af3f29f2b5a0b42ea822c09058b82aa2744ab25338391c7dd115a95b167  crates/cerberus-proxy/src/log.rs
+acde20ce13770041257398db8fd424107e5a77a1e4b85128335f38b54e24a2ae  crates/cerberus-proxy/tests/f6b_api_surface.rs
+1a5135b5c40036c56404e64b0c10b85387597cda3c7bb2494233a14de5382bbc  crates/cerberus/src/main.rs
+3d53830f58a7c8bb2c284e9e25b52d12e3e4723977c14a26e9137a7f1b5103cd  crates/cerberus/src/cli_surface.rs
+526ca2c4f7cb3e5cb840c836b238d1a6f5366b68071a57333f0cfc16271536f3  crates/cerberus/src/cli_api.rs
+50a78de18214f489e2efb1ceb1ba1d124f3c88f09b2bf19eb917bf935e1b71a6  crates/cerberus/src/cli_pack.rs
+a4efee9cd13c7c3d3c5af8d3197940673b303b536f77092f1d75e2ea2eda4f7f  crates/cerberus/tests/pack_enable_disable_worker_e2e.rs
+e37c532d308faa8ccf63d0e51f98f1860ea8e0466637d313e54ab4429a6a6bf0  evidence/r0/smoke-test/smoke-run-20260902-203022.log (smoke-gate run artifact; gitignored per .gitignore:25, hash recorded here for the panel)
+```
+(`tests/redos_fuzz.rs` remains byte-untouched; the attempt-1 frozen hashes of
+untouched files still apply; this pack file itself is finalized at commit.)
+
+### Builder verdict (attempt 2)
+
+**Returns to VERIFY.** Every attempt-1 finding is closed with a file:line fix
+and an executing test: the anti-lockout invariant now holds on BOTH config
+write paths (reload + PUT) with rotation intact (live-verified); the parity
+test and the table cross-check both consult the REAL router (mutation-proven
+red→green); the packs enable/disable success path runs end-to-end through the
+real daemon worker; config mutations are audited with honest, secret-free
+events visible via /api/events (live-verified); the flaky login test's cause
+is removed at the helper level (stable ×3); the tee file is created 0600; the
+scan-cap divergence is documented. Full builder matrix green (862/0 debug,
+19/19, 11/11 redos, 14/14 load, 69/69 harness, 10/10 + 11/11 + 1/1 new
+suites, 17/17 smoke, fmt/clippy/diff-check clean).
+
+### Risks for re-verification
+
+- **R1 (new audit events change the /api/events surface)**: control-plane
+  events now appear next to dataplane `proxy` events (`tool=control-plane`).
+  Consumers filtering by tool/provider are unaffected (verified: provider
+  filters, smoke script's non-empty check, existing event assertions are
+  membership-based). Dashboards that assumed only `proxy` events will now
+  also show audit rows — intended behavior, but the panel should confirm it
+  reads as a feature.
+- **R2 (PUT transaction restructure)**: `handle_put_config`'s lock is now
+  scoped in a block (Send-ness for the audit await). Semantics preserved
+  (validate → persist → publish order unchanged, guards unchanged); the
+  f6b reload/config suites + smoke cover it, but the panel should note the
+  restructure when reviewing api.rs.
+- **R3 (worker e2e environment sensitivity)**: the packs round-trip spawns a
+  real daemon (free-port bind race, 90 s health deadline). It passed in
+  ~1.2 s locally; on a saturated CI runner the deadline margin is the only
+  fragile spot — a timeout failure there is infra, not product.
+- **R4 (pack-update now emits `pack-update` events only on success)** —
+  install/rollback remain un-audited event-store-wise (they tee log lines);
+  the remediation list named enable/disable/update only. If the panel wants
+  install/rollback events too, that is a two-line follow-up in the same
+  helper.

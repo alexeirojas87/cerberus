@@ -339,12 +339,34 @@ struct TeeSink {
     cap: u64,
 }
 
+/// The log file is created with mode **0600** (F6.B attempt 2, security
+/// P3-1): the tee is designed secret-free (flags/categories/keyed hashes
+/// only), but the repo's credential-file discipline for everything under
+/// `.cerberus/` is 0600 — defense-in-depth, same rule as the config writes.
+/// `mode()` only applies AT CREATION on unix; appends to an existing file
+/// keep its mode (a pre-existing file is not silently re-chowned).
+fn open_log_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new().create(true).append(true).open(path)
+    }
+}
+
 impl TeeSink {
     /// Build the sink for the requested tee path (console-only file sink if
     /// the file cannot be opened). Reads the current size so rotation
     /// resumes at the right threshold.
     fn open(path: &std::path::Path) -> Self {
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
+        let file = open_log_file(path).ok();
         let size = file.as_ref().and_then(|f| f.metadata().ok()).map_or(0, |m| m.len());
         Self {
             console: Box::new(io::stdout()),
@@ -367,7 +389,7 @@ impl TeeSink {
         let _ = self.file.take(); // close before renaming
         let rotated = path.with_extension("log.1");
         let _ = std::fs::rename(&path, &rotated);
-        self.file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+        self.file = open_log_file(&path).ok();
         self.size = 0;
     }
 }
@@ -660,6 +682,35 @@ mod tests {
         io::Write::write_all(&mut sink, b"rotation-trigger\n").expect("write");
         assert!(sink.size < LOG_FILE_MAX_BYTES, "rotation resets the counter");
         assert!(path.with_extension("log.1").exists(), "rotated file exists");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F6.B attempt 2 (security P3-1): the tee file is CREATED 0600 — the
+    /// same credential-file discipline as the config writes (defense in
+    /// depth; the content is designed secret-free).
+    #[cfg(unix)]
+    #[test]
+    fn tee_file_is_created_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus-log-mode-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("cerberus.log");
+        {
+            let _file = open_log_file(&path).expect("create tee file");
+        }
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the tee file must be created 0600, got {mode:o}");
+        // Appending to the existing file must not change its mode.
+        {
+            let _file = open_log_file(&path).expect("append");
+        }
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "append keeps the mode, got {mode:o}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

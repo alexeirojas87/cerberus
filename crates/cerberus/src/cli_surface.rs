@@ -982,11 +982,23 @@ mod tests {
     // ── agents ──
 
     fn temp_home(tag: &str) -> std::path::PathBuf {
+        // F6.B attempt 2 (security P2-2 — flaky login test): pure
+        // nanosecond-timestamp names can COLLIDE when two tests land on the
+        // same clock tick; a sibling's `remove_dir_all` then deletes a live
+        // home mid-run (the exact login failure signature). pid + a
+        // monotonically increasing counter makes the dir unique per CALL,
+        // independent of clock granularity (nanos kept for cross-process
+        // uniqueness against stale dirs).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "cerberus-cli-surface-{tag}-{}",
+            "cerberus-cli-surface-{tag}-{}-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
+                .map_or(0, |d| d.as_nanos()),
+            seq
         ));
         std::fs::create_dir_all(dir.join(".cerberus")).expect("mkdir");
         std::fs::create_dir_all(dir.join("Cerberus")).expect("mkdir win");

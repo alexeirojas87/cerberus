@@ -643,6 +643,43 @@ fn print_result(result: Result<String, String>, what: &str) -> ExitCode {
 mod cli_tests {
     use super::*;
 
+    /// (CLI label, method, endpoint) — one row per daemon-backed Appendix B
+    /// command (the parity test walks ALL of them through the live router).
+    /// A module-level CONST on purpose: the row `"/api/upstreams/{name}"` is
+    /// a route template, not a format string (clippy nursery only exempts
+    /// const context), and the table doubles as the row documentation.
+    const DAEMON_BACKED: &[(&str, &str, &str)] = &[
+        ("mode show", "GET", "/api/config"),
+        ("mode set", "PUT", "/api/config"),
+        ("allow-once", "POST", "/api/break-glass"),
+        ("providers", "GET", "/api/upstreams"),
+        ("add-provider", "POST", "/api/upstreams"),
+        ("remove-provider", "DELETE", "/api/upstreams/{name}"),
+        ("packs list", "GET", "/api/packs"),
+        ("packs install", "POST", "/api/packs/install"),
+        ("packs rollback", "POST", "/api/packs/rollback"),
+        ("packs enable", "POST", "/api/packs/enable"),
+        ("packs disable", "POST", "/api/packs/disable"),
+        ("packs update", "POST", "/api/packs/update"),
+        ("category set", "PUT", "/api/policy"),
+        ("rules list", "GET", "/api/policy"),
+        ("rules add", "PUT", "/api/policy"),
+        ("rules set", "PUT", "/api/policy"),
+        ("allowlist add", "POST", "/api/allowlist"),
+        ("allowlist list", "GET", "/api/allowlist"),
+        ("allowlist remove", "DELETE", "/api/allowlist"),
+        ("events", "GET", "/api/events"),
+        ("stats", "GET", "/api/stats"),
+        ("config show (dashboard view)", "GET", "/api/config"),
+        ("reload", "POST", "/api/reload"),
+        ("dashboard", "GET", "/ui"),
+    ];
+
+    /// Token ≥ 24 bytes wired into the parity proxy (auth on).
+    const PARITY_TOKEN: &str = "parity-router-dispatch-token-0123456789";
+    /// Installation key wired into the parity proxy (allowlist add is keyed).
+    const PARITY_KEY: &[u8] = b"parity-installation-key-0123456789abcdef";
+
     #[test]
     fn mitm_enable_requires_an_explicit_host() {
         assert!(Cli::try_parse_from(["cerberus", "mitm", "enable"]).is_err());
@@ -797,43 +834,133 @@ mod cli_tests {
 
     /// THE PARITY TEST (CI-runnable, fix-plan F6.4 / acceptance #2): every
     /// Appendix B command that needs the daemon maps to an endpoint that
-    /// EXISTS in the control-plane route table (`known_api_routes`). The
-    /// full API→CLI→dashboard matrix lives in `evidence/f6/parity-matrix.md`;
-    /// this test keeps the CLI↔API legs of every row honest.
-    #[test]
-    fn every_daemon_backed_cli_command_maps_to_a_real_api_route() {
-        // (CLI label, method, endpoint) — one row per daemon-backed command.
-        let daemon_backed: &[(&str, &str, &str)] = &[
-            ("mode show", "GET", "/api/config"),
-            ("mode set", "PUT", "/api/config"),
-            ("allow-once", "POST", "/api/break-glass"),
-            ("providers", "GET", "/api/upstreams"),
-            ("add-provider", "POST", "/api/upstreams"),
-            ("remove-provider", "DELETE", "/api/upstreams/{name}"),
-            ("packs list", "GET", "/api/packs"),
-            ("packs install", "POST", "/api/packs/install"),
-            ("packs rollback", "POST", "/api/packs/rollback"),
-            ("packs enable", "POST", "/api/packs/enable"),
-            ("packs disable", "POST", "/api/packs/disable"),
-            ("packs update", "POST", "/api/packs/update"),
-            ("category set", "PUT", "/api/policy"),
-            ("rules list", "GET", "/api/policy"),
-            ("rules add", "PUT", "/api/policy"),
-            ("rules set", "PUT", "/api/policy"),
-            ("allowlist add", "POST", "/api/allowlist"),
-            ("allowlist list", "GET", "/api/allowlist"),
-            ("allowlist remove", "DELETE", "/api/allowlist"),
-            ("events", "GET", "/api/events"),
-            ("stats", "GET", "/api/stats"),
-            ("config show (dashboard view)", "GET", "/api/config"),
-            ("reload", "POST", "/api/reload"),
-            ("dashboard", "GET", "/ui"),
-        ];
-        for (label, method, path) in daemon_backed {
-            assert!(
-                cerberus_proxy::api::is_known_api_route(method, path),
-                "parity: CLI '{label}' maps to {method} {path}, which is NOT in the route table"
+    /// the REAL ROUTER actually serves. The full API→CLI→dashboard matrix
+    /// lives in `evidence/f6/parity-matrix.md`; this test keeps the CLI↔API
+    /// legs of every row honest.
+    ///
+    /// F6.B attempt 2 (finding F2): the old form validated the rows against
+    /// `known_api_routes()` — a hand-maintained copy of the router kept in
+    /// sync only by a doc comment — and a mutation that REMOVED a router arm
+    /// left this test green (proven by the attempt-1 reviewer). The rows are
+    /// now dispatched through the live `handle_api_request` dispatch of a
+    /// real spawned proxy: a missing arm answers the router's bare
+    /// `404 {"error":"not found"}` and FAILS this test. Each row's request
+    /// is engineered to hit the handler (pre-seeded resources), so any
+    /// non-404 status (200/302/400/503) proves the arm exists.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // the row table + wiring live together on purpose
+    async fn every_daemon_backed_cli_command_maps_to_a_real_api_route() {
+        use std::collections::HashMap;
+
+        // Build a REAL proxy context (same wiring the daemon uses): token
+        // auth on, installation key (allowlist add is keyed), two upstreams
+        // so the DELETE row removes a real resource, and an allowlist
+        // fingerprint pre-seeded for the remove row.
+        let mut upstreams = HashMap::new();
+        for name in ["openai", "anthropic"] {
+            upstreams.insert(
+                name.to_string(),
+                cerberus_proxy::config::UpstreamConfig {
+                    url: format!("https://api.{name}.com"),
+                    path_prefix: None,
+                    auth_header: "authorization".to_string(),
+                    mode: None,
+                    expected_auth: None,
+                },
             );
         }
+        let mut config = cerberus_proxy::config::ProxyConfig {
+            upstreams,
+            admin_token: Some(PARITY_TOKEN.to_string()),
+            ..cerberus_proxy::config::ProxyConfig::default()
+        };
+        // The fingerprint shape the allowlist routes accept/return.
+        config.policy.allowlist.push(format!("hmac:{}", "a".repeat(64)));
+        let shared = std::sync::Arc::new(std::sync::RwLock::new(config));
+        let api = cerberus_proxy::api::ApiContext::new(shared.clone()).with_audit_hash_key(PARITY_KEY.to_vec());
+        let ctx = std::sync::Arc::new(cerberus_proxy::proxy::ProxyContext {
+            config: shared,
+            engine: std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(
+                cerberus_engine::engine::EngineBuilder::new(&[])
+                    .build()
+                    .expect("engine"),
+            ))),
+            redact_options: cerberus_engine::redact::RedactOptions::default(),
+            api,
+            last_upstream: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        });
+        let (addr, handle) = cerberus_proxy::proxy::spawn_proxy(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), ctx)
+            .await
+            .expect("spawn parity proxy");
+        let base = format!("http://{addr}");
+
+        let client = reqwest::Client::new();
+        // The {name} placeholder of the upstream DELETE row resolves to a
+        // REAL seeded upstream so the handler (not the router) answers.
+        let route_for = |_method: &str, path: &str| path.replace("{name}", "openai");
+        let body_for = |method: &str, path: &str| -> Option<String> {
+            match (method, path) {
+                ("PUT", "/api/config" | "/api/policy") => Some("{}".to_string()),
+                ("POST", "/api/break-glass") => Some(r#"{"reason":"parity probe"}"#.to_string()),
+                ("POST", "/api/upstreams") => Some(r#"{"name":"openai","url":"https://api.openai.com"}"#.to_string()),
+                ("POST", "/api/allowlist") => Some(r#"{"value":"parity-canary"}"#.to_string()),
+                ("DELETE", "/api/allowlist") => Some(format!(r#"{{"value":"hmac:{}"}}"#, "a".repeat(64))),
+                ("POST", "/api/packs/enable" | "/api/packs/disable") => Some(r#"{"name":"parity-pack"}"#.to_string()),
+                _ => None,
+            }
+        };
+
+        // Control canary FIRST: the router DOES answer bare 404 for unknown
+        // routes — so a removed arm below cannot hide behind "any status".
+        // (Authenticated: the auth gate 401s an unauthenticated request
+        // BEFORE dispatch reaches the match.)
+        let resp = client
+            .get(format!("{base}/api/not-a-route"))
+            .header("x-cerberus-admin-token", PARITY_TOKEN)
+            .send()
+            .await
+            .expect("canary");
+        assert_eq!(resp.status(), 404, "unknown route must 404");
+        let canary_body = resp.text().await.expect("canary body");
+        assert_eq!(
+            canary_body, r#"{"error":"not found"}"#,
+            "the canary must be the ROUTER 404 (not a handler 404)"
+        );
+
+        for (label, method, path) in DAEMON_BACKED {
+            let url = format!("{base}{}", route_for(method, path));
+            let req = match *method {
+                "GET" => client.get(&url),
+                "PUT" => client.put(&url),
+                "POST" => client.post(&url),
+                "DELETE" => client.delete(&url),
+                other => panic!("parity row {label}: unknown method {other}"),
+            };
+            let req = if let Some(body) = body_for(method, path) {
+                req.header("content-type", "application/json").body(body)
+            } else {
+                req
+            };
+            let resp = req
+                .header("x-cerberus-admin-token", PARITY_TOKEN)
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("parity row {label}: request failed: {e}"));
+            let status = resp.status();
+            assert_ne!(
+                status,
+                reqwest::StatusCode::NOT_FOUND,
+                "parity: CLI '{label}' maps to {method} {path}, which the ROUTER does not serve \
+                 (bare 404 — the dispatch arm is missing)"
+            );
+            assert!(
+                status.is_success()
+                    || status.is_redirection()
+                    || status == reqwest::StatusCode::BAD_REQUEST
+                    || status == reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "parity: CLI '{label}' → {method} {path} answered {status}, expected a handler status"
+            );
+        }
+        handle.abort();
     }
 }

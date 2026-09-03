@@ -302,11 +302,20 @@ pub(crate) mod tests {
     pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn temp_home(tag: &str) -> std::path::PathBuf {
+        // F6.B attempt 2 (security P2-2): unique per CALL — pid + monotonic
+        // counter, immune to nanosecond-timestamp collisions between two
+        // tests on the same clock tick (a sibling's remove_dir_all could
+        // otherwise delete a live home mid-run).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "cerberus-cli-api-{tag}-{}",
+            "cerberus-cli-api-{tag}-{}-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
+                .map_or(0, |d| d.as_nanos()),
+            seq
         ));
         // Create both the unix config dir (.cerberus) and the Windows config
         // dir (Cerberus) so config_dir() resolves correctly on either platform.

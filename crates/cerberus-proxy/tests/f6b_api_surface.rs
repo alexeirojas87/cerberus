@@ -357,6 +357,25 @@ async fn pack_enable_disable_update_reach_the_worker() {
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["message"], "2/2 verified", "{body}");
 
+    // F6.B attempt 2 (security P2-1): the successful mutations are AUDITED —
+    // the events feed shows the honest action names with tool
+    // `control-plane`.
+    let events: serde_json::Value = client
+        .get(format!("http://{addr}/api/events?tool=control-plane"))
+        .send()
+        .await
+        .expect("events")
+        .json()
+        .await
+        .expect("json");
+    let events_str = events.to_string();
+    for action in ["pack-enable", "pack-disable", "pack-update"] {
+        assert!(
+            events_str.contains(action),
+            "the {action} mutation must be audited: {events_str}"
+        );
+    }
+
     // Bad body → 400 (worker never sees it).
     let resp = client
         .post(format!("http://{addr}/api/packs/enable"))
@@ -614,4 +633,318 @@ fn sample_event(tool: &str, provider: &str, flag: &str, action: &str) -> cerberu
     .expect("clock fits i64");
     e.ts_unix = now;
     e
+}
+
+/// ── F1 anti-lockout on PUT /api/config (attempt 2, LIVE) ─────────────────
+/// `POST /api/reload` already refuses to remove the admin token (attempt 1
+/// verified); the sibling route `PUT /api/config` had NO such guard: an
+/// explicit `"admin_token":null` answered 200, closed every `/api/*` route,
+/// AND persisted `admin_token:null` (the closure survived restart). The fix
+/// rejects the PUT 400 BEFORE persist/publish; token CHANGE stays allowed.
+#[tokio::test]
+async fn put_config_rejects_admin_token_removal_anti_lockout() {
+    const ROTATED: &str = "rotated-parity-token-0123456789abcdef";
+    let dir = std::env::temp_dir().join(format!(
+        "cerberus-f6b-putlock-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let config_path = dir.join("config.yaml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "listen: 127.0.0.1:8787\nmode: enforce\nadmin_token: {HARNESS_ADMIN_TOKEN}\nupstreams:\n  openai:\n    url: https://api.openai.com\n"
+        ),
+    )
+    .expect("write");
+
+    let ctx = make_ctx_with_config_path(openai_rule(), OperationMode::Enforce, config_path.clone());
+    let (addr, handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+
+    // 1. The attempt-1 repro: explicit null with a VALID token must now 400.
+    let resp = client
+        .put(format!("http://{addr}/api/config"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+        .body(r#"{"admin_token":null}"#)
+        .send()
+        .await
+        .expect("put null");
+    assert_eq!(resp.status(), 400, "token removal via PUT must be rejected");
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("CLOSE the control plane"), "anti-lockout error: {body}");
+
+    // 2. The plane STAYS UP with the OLD token: config reads 200, the data
+    //    plane health reads 200.
+    let resp = client
+        .get(format!("http://{addr}/api/config"))
+        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("get config");
+    assert_eq!(resp.status(), 200, "the old token must still authenticate");
+    let resp = client
+        .get(format!("http://{addr}/health"))
+        .send()
+        .await
+        .expect("health");
+    assert_eq!(resp.status(), 200, "data plane still healthy");
+
+    // 3. `admin_token: null` was NEVER persisted — the on-disk file is
+    //    byte-for-byte the old one (the rejection happens before persist).
+    let disk = std::fs::read_to_string(&config_path).expect("read disk config");
+    assert!(
+        disk.contains(&format!("admin_token: {HARNESS_ADMIN_TOKEN}")),
+        "on-disk config must keep the old token: {disk}"
+    );
+
+    // 4. Token CHANGE via PUT remains allowed (documented rotation
+    //    semantics — the anti-lockout must not break rotation).
+    let resp = client
+        .put(format!("http://{addr}/api/config"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+        .body(format!(r#"{{"admin_token":"{ROTATED}"}}"#))
+        .send()
+        .await
+        .expect("put rotation");
+    assert_eq!(
+        resp.status(),
+        200,
+        "token rotation must stay allowed (the anti-lockout rejects removal only)"
+    );
+
+    // 5. The rotation applies immediately: the OLD token is now 401 and the
+    //    new token authenticates.
+    let resp = client
+        .get(format!("http://{addr}/api/config"))
+        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("get config (old token)");
+    assert_eq!(resp.status(), 401, "the old token must be retired");
+    let resp = client
+        .get(format!("http://{addr}/api/config"))
+        .header("x-cerberus-admin-token", ROTATED)
+        .send()
+        .await
+        .expect("get config (new token)");
+    assert_eq!(resp.status(), 200, "the new token must authenticate");
+
+    // 6. No auth event leak: the rotated token value must not appear in the
+    //    audit trail either (the config-update event carries no body echo).
+    let events = client
+        .get(format!("http://{addr}/api/events?tool=control-plane"))
+        .header("x-cerberus-admin-token", ROTATED)
+        .send()
+        .await
+        .expect("events")
+        .text()
+        .await
+        .expect("events body");
+    assert!(events.contains("config-update"), "rotation is audited: {events}");
+    assert!(
+        !events.contains(ROTATED),
+        "the token value must never be audited: {events}"
+    );
+    assert!(
+        !events.contains(HARNESS_ADMIN_TOKEN),
+        "no old token in events: {events}"
+    );
+
+    handle.abort();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// ── Security P2-1 (attempt 2): config mutations are AUDITED ──────────────
+/// Reload used to swap the whole live config with zero trace (only
+/// dataplane `proxy` events appeared). Every successful config-mutation
+/// action must now be reconstructable from `GET /api/events`.
+#[tokio::test]
+async fn config_mutations_emit_audit_events_visible_via_api() {
+    let dir = std::env::temp_dir().join(format!(
+        "cerberus-f6b-audit-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let config_path = dir.join("config.yaml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "listen: 127.0.0.1:8787\nmode: shadow\nadmin_token: {HARNESS_ADMIN_TOKEN}\nupstreams:\n  openai:\n    url: https://api.openai.com\n"
+        ),
+    )
+    .expect("write");
+
+    let ctx = make_ctx_with_config_path(openai_rule(), OperationMode::Enforce, config_path.clone());
+    let (addr, handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = api_client();
+
+    // Five mutations across the audited surface: reload, config PUT,
+    // allowlist add, upstream add, upstream remove.
+    let resp = client
+        .post(format!("http://{addr}/api/reload"))
+        .send()
+        .await
+        .expect("reload");
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .put(format!("http://{addr}/api/config"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("config put");
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .post(format!("http://{addr}/api/allowlist"))
+        .header("content-type", "application/json")
+        .body(r#"{"value":"audit-canary-raw"}"#)
+        .send()
+        .await
+        .expect("allowlist add");
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .post(format!("http://{addr}/api/upstreams"))
+        .header("content-type", "application/json")
+        .body(r#"{"name":"anthropic","url":"https://api.anthropic.com"}"#)
+        .send()
+        .await
+        .expect("upstream add");
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .delete(format!("http://{addr}/api/upstreams/anthropic"))
+        .send()
+        .await
+        .expect("upstream remove");
+    assert_eq!(resp.status(), 200);
+
+    // Every action name is visible via /api/events, honest, and secret-free.
+    let events: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/api/events?tool=control-plane"))
+        .send()
+        .await
+        .expect("events")
+        .json()
+        .await
+        .expect("json");
+    let serialized = serde_json::to_string(&events).expect("serialize");
+    for action in [
+        "config-reload",
+        "config-update",
+        "allowlist-add",
+        "upstream-add",
+        "upstream-remove",
+    ] {
+        assert!(
+            events
+                .iter()
+                .any(|e| e["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == action))),
+            "the {action} mutation must be audited: {serialized}"
+        );
+    }
+    for e in &events {
+        assert_eq!(e["tool"], "control-plane");
+        assert_eq!(e["action_taken"], "audit");
+        assert!(
+            e["hashed_values"].as_array().is_some_and(std::vec::Vec::is_empty),
+            "control-plane events carry no hashes: {e}"
+        );
+    }
+    // NO secrets in the audit trail: not the raw allowlist canary, not the
+    // admin token, not even the fingerprint (honest action names only).
+    assert!(
+        !serialized.contains("audit-canary-raw"),
+        "raw value leaked: {serialized}"
+    );
+    assert!(!serialized.contains(HARNESS_ADMIN_TOKEN), "token leaked: {serialized}");
+    assert!(
+        !serialized.contains("hmac:"),
+        "no fingerprints in audit events: {serialized}"
+    );
+
+    handle.abort();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// ── F2 table↔router cross-check (attempt 2, LIVE) ───────────────────────
+/// `known_api_routes()` is a hand-maintained copy of the dispatch match
+/// ("keep in sync" by comment). The attempt-1 reviewer mutation-proved the
+/// parity test green with a REMOVED router arm. This test iterates the
+/// TABLE itself and dispatches every entry through the REAL router over
+/// HTTP: a table entry whose dispatch arm is missing answers the router's
+/// bare `404 {"error":"not found"}` and FAILS here. (The CLI parity test in
+/// `crates/cerberus/src/main.rs` performs the same live dispatch for its 24
+/// CLI rows — removal fails BOTH.)
+#[tokio::test]
+async fn route_table_matches_the_router() {
+    let ctx = make_ctx(openai_rule(), OperationMode::Enforce);
+    let (addr, handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = api_client();
+
+    // Control canary: the router DOES answer the bare 404 for unknown
+    // routes (authenticated — the auth gate 401s an unauthenticated request
+    // BEFORE dispatch, so the canary carries the token), so the table check
+    // below cannot pass vacuously.
+    let resp = client
+        .get(format!("{base}/api/not-a-route"))
+        .send()
+        .await
+        .expect("canary");
+    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.text().await.expect("body"), r#"{"error":"not found"}"#);
+
+    for (method, path) in cerberus_proxy::api::known_api_routes() {
+        let url_path = path.replace("{name}", "default");
+        let url = format!("{base}{url_path}");
+        let request = match *method {
+            "GET" => client.get(&url),
+            "PUT" => client.put(&url).header("content-type", "application/json").body("{}"),
+            "POST" => {
+                let body = if *path == "/api/allowlist" {
+                    r#"{"value":"parity-canary"}"#.to_string()
+                } else if *path == "/api/upstreams" {
+                    r#"{"name":"extra","url":"https://api.extra.com"}"#.to_string()
+                } else if *path == "/api/break-glass" {
+                    r#"{"reason":"parity probe"}"#.to_string()
+                } else if *path == "/api/scan" {
+                    r#"{"text":"hello"}"#.to_string()
+                } else if *path == "/api/packs/enable" || *path == "/api/packs/disable" {
+                    r#"{"name":"parity-pack"}"#.to_string()
+                } else {
+                    String::new()
+                };
+                client.post(&url).header("content-type", "application/json").body(body)
+            }
+            "DELETE" => {
+                let body = if *path == "/api/allowlist" {
+                    r#"{"value":"parity-canary"}"#.to_string() // the POST row above added it
+                } else {
+                    String::new()
+                };
+                client
+                    .delete(&url)
+                    .header("content-type", "application/json")
+                    .body(body)
+            }
+            other => panic!("unknown method {other} in the route table"),
+        };
+        let resp = request
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch {method} {path}: {e}"));
+        let status = resp.status();
+        assert_ne!(
+            status,
+            reqwest::StatusCode::NOT_FOUND,
+            "route table claims {method} {path} but the ROUTER does not serve it"
+        );
+    }
+    handle.abort();
 }
