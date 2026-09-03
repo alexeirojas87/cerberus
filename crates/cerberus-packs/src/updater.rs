@@ -703,14 +703,17 @@ impl PackManager {
         let root = self.effective_trust_root();
         let mut results: Vec<(String, bool)> = Vec::new();
         for (key, installed) in &state.installed {
+            let (name, ver) = parse_versioned_key(key);
             let ok = match (&root, &installed.signature_hex, &installed.signer_public_key_hex) {
-                (Some(expected), Some(sig), Some(signer)) => {
-                    let signed = SignedRulePack {
-                        pack_json: installed.pack_json.clone(),
-                        signature_hex: sig.clone(),
-                        signer_public_key_hex: signer.clone(),
-                    };
-                    signed.verify_with_trusted_root(expected).is_ok()
+                (Some(expected), Some(_sig), Some(_signer)) => {
+                    // F7 re-verification P2: verify the DISK bytes — the same
+                    // source `rebuild_active_set` uses — so the operator
+                    // report matches the rebuild outcome. Verifying the
+                    // in-memory copy masked out-of-band disk tampering (the
+                    // report said "verified" while the rebuild deactivated).
+                    // Disk file missing: nothing to verify — unverified.
+                    load_signed_from_dir(&self.pack_dir, &name, &ver)
+                        .is_some_and(|signed| signed.verify_with_trusted_root(expected).is_ok())
                 }
                 // No trust root / unsigned pack: without a root there is
                 // nothing to verify AGAINST — the pack is inactive anyway
@@ -718,7 +721,6 @@ impl PackManager {
                 _ => false,
             };
             if !ok {
-                let (name, ver) = parse_versioned_key(key);
                 deactivate_pack(&mut manifest, &name, &ver);
             }
             results.push((key.clone(), ok));
@@ -1013,9 +1015,7 @@ fn rebuild_active_set(
         let pack = match signed.extract_with_root(root) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(
-                    "packs: active pack {name}@{ver} FAILED signature verification on boot; deactivating: {e}"
-                );
+                tracing::warn!("packs: active pack {name}@{ver} FAILED signature verification; deactivating: {e}");
                 deactivate_pack(manifest, &name, &ver);
                 changed = true;
                 continue;

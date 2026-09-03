@@ -1064,10 +1064,13 @@ fn console_style(text: &str, color: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     /// Guard to serialize tests that mutate `std::env` (process-global).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// SHARED with `cli_api`'s tests: two separate mutexes over the same
+    /// process-global env raced (license tests, F7 re-verification P1) and
+    /// made the workspace suite nondeterministic (2/5 exit-101). One lock,
+    /// one discipline.
+    use crate::cli_api::tests::ENV_LOCK;
 
     // ── R9-7 (F6.3): legacy raw allowlist migration at boot ──
 
