@@ -410,3 +410,41 @@ suites, 17/17 smoke, fmt/clippy/diff-check clean).
   the remediation list named enable/disable/update only. If the panel wants
   install/rollback events too, that is a two-line follow-up in the same
   helper.
+
+## FIX attempt 3 (re-verification addendum, orchestrator-executed builder fix)
+
+The attempt-2 re-verification closed every attempt-1 item but found the
+anti-lockout invariant still violated via the EMPTY-STRING encoding:
+`PUT /api/config` with `{"admin_token":""}` answered 200, closed the plane,
+and persisted the empty token (identical class to the null P1 — the guards
+tested `candidate.admin_token.is_none()` while the auth layer filters
+`Some("")` to None via `expected_admin_token`). LIVE-reproduced by the
+re-verifier including restart persistence on both write paths.
+
+**Fix (orchestrator gatekeeper executed as builder; predicate change only):**
+- `crates/cerberus-proxy/src/api.rs` — both guards (apply_reload and
+  handle_put_config) now test
+  `expected_admin_token(&live).is_some() && expected_admin_token(&candidate).is_none()`
+  so an empty candidate token is rejected exactly like a removed one; a live
+  empty token counts as "already closed" (no-op stays allowed, opening stays
+  allowed). Messages updated to "remove or clear".
+- `crates/cerberus-proxy/tests/f6b_api_surface.rs` — the anti-lockout test
+  now also exercises `{"admin_token":""}` → 400 + old token survives; NEW
+  test `reload_rejects_empty_token_file_anti_lockout` reproduces the
+  re-verifier's exact attack shape (empty-token file → reload → 400, plane
+  keeps the old token).
+
+**Verification:** fmt clean; clippy `-D warnings` clean; workspace debug
+**863/863** (+1 test); f6b_api_surface **11/11**; pack 19/19, load 14/14,
+harness 69/69 unchanged (re-run post-fix). Frozen hashes below supersede the
+attempt-2 block for these two files:
+
+```
+177fedc1addde436bbd9338e3c1dafe3254200508b6c4208d221d810ee0c196b  crates/cerberus-proxy/src/api.rs
+7db05e4fc63e408d361bcf0b61e81c94cebdea4d1d55c0c4bc358b1ba2184856  crates/cerberus-proxy/tests/f6b_api_surface.rs
+```
+(Committed-state hashes, recorded after the fmt pass; they supersede the
+attempt-2 block for these two files.)
+
+**Builder verdict: attempt-3 fix executed — returns to VERIFY (unit NOT
+closed; the empty-string P1 is closed pre-gate).**

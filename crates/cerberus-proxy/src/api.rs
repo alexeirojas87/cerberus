@@ -830,10 +830,15 @@ fn apply_reload(ctx: &ApiContext) -> Response<Full<Bytes>> {
     // config).
     {
         let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
-        if live.admin_token.is_some() && candidate.admin_token.is_none() {
+        // Use the auth-layer's token semantics (expected_admin_token filters
+        // Some("") to None): an EMPTY token in the candidate would close the
+        // plane exactly like a removed one (re-verification finding, F6.B
+        // attempt 2). A live empty token means "already closed" — no-op
+        // reloads stay allowed, opening stays allowed.
+        if expected_admin_token(&live).is_some() && expected_admin_token(&candidate).is_none() {
             return invalid_config_response(
-                "reload would remove the admin token and CLOSE the control plane (fail-closed); \
-                 keep admin_token in the file or restart the daemon",
+                "reload would remove or clear the admin token and CLOSE the control plane \
+                 (fail-closed); keep a non-empty admin_token in the file or restart the daemon",
             );
         }
     }
@@ -1358,10 +1363,16 @@ async fn handle_put_config(ctx: &ApiContext, body: hyper::body::Incoming) -> Res
         // the on-disk file keep the old token. Changing the token to a
         // DIFFERENT value stays allowed and applies immediately (documented
         // rotation semantics, live-verified).
-        if live.admin_token.is_some() && candidate.admin_token.is_none() {
+        // Same auth-layer semantics as the reload guard: an EMPTY token in
+        // the candidate closes the plane exactly like a removed one
+        // (re-verification finding, F6.B attempt 2). A live empty token
+        // means "already closed" — no-op PUTs stay allowed, opening stays
+        // allowed.
+        if expected_admin_token(&live).is_some() && expected_admin_token(&candidate).is_none() {
             return Ok(invalid_config_response(
-                "config update would remove the admin token and CLOSE the control plane (fail-closed); \
-                 omit admin_token to keep it or PUT a new value to rotate it",
+                "config update would remove or clear the admin token and CLOSE the control plane \
+                 (fail-closed); omit admin_token to keep it or PUT a new non-empty value to \
+                 rotate it",
             ));
         }
 

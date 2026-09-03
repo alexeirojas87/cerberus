@@ -635,12 +635,74 @@ fn sample_event(tool: &str, provider: &str, flag: &str, action: &str) -> cerberu
     e
 }
 
+/// ── Re-verification addendum: reload guard vs EMPTY on-disk token ────────
+/// The reload guard must treat an EMPTY on-disk token exactly like a removed
+/// one (same re-verification finding): the guard reads the FILE candidate,
+/// so a config rewritten to `admin_token: ''` must be refused with 400 and
+/// the live plane must keep authenticating with the old token.
+#[tokio::test]
+async fn reload_rejects_empty_token_file_anti_lockout() {
+    let dir = std::env::temp_dir().join(format!(
+        "cerberus-f6b-reloadlock-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let config_path = dir.join("config.yaml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "listen: 127.0.0.1:8787\nmode: enforce\nadmin_token: {HARNESS_ADMIN_TOKEN}\nupstreams:\n  openai:\n    url: https://api.openai.com\n"
+        ),
+    )
+    .expect("write");
+
+    let ctx = make_ctx_with_config_path(openai_rule(), OperationMode::Enforce, config_path.clone());
+    let (addr, handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = reqwest::Client::new();
+
+    // Rewrite the on-disk file with an EMPTY token (operator hand-edit class)
+    // and attempt a reload: the guard must refuse before swapping the live
+    // config.
+    std::fs::write(
+        &config_path,
+        "listen: 127.0.0.1:8787\nmode: enforce\nadmin_token: ''\nupstreams:\n  openai:\n    url: https://api.openai.com\n",
+    )
+    .expect("write empty-token config");
+    let resp = client
+        .post(format!("http://{addr}/api/reload"))
+        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("reload with empty-token file");
+    assert_eq!(resp.status(), 400, "empty-token file reload must be rejected");
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("CLOSE the control plane"), "anti-lockout error: {body}");
+
+    // The live plane keeps the OLD token (the reload never applied).
+    let resp = client
+        .get(format!("http://{addr}/api/config"))
+        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("get config after refused reload");
+    assert_eq!(
+        resp.status(),
+        200,
+        "the old token must still authenticate after refusal"
+    );
+
+    let _ = handle;
+}
+
 /// ── F1 anti-lockout on PUT /api/config (attempt 2, LIVE) ─────────────────
 /// `POST /api/reload` already refuses to remove the admin token (attempt 1
 /// verified); the sibling route `PUT /api/config` had NO such guard: an
 /// explicit `"admin_token":null` answered 200, closed every `/api/*` route,
 /// AND persisted `admin_token:null` (the closure survived restart). The fix
 /// rejects the PUT 400 BEFORE persist/publish; token CHANGE stays allowed.
+/// Re-verification addendum: the EMPTY-STRING encoding is rejected too.
 #[tokio::test]
 async fn put_config_rejects_admin_token_removal_anti_lockout() {
     const ROTATED: &str = "rotated-parity-token-0123456789abcdef";
@@ -699,6 +761,32 @@ async fn put_config_rejects_admin_token_removal_anti_lockout() {
     assert!(
         disk.contains(&format!("admin_token: {HARNESS_ADMIN_TOKEN}")),
         "on-disk config must keep the old token: {disk}"
+    );
+
+    // 3b. The re-verification finding: the EMPTY-STRING encoding must be
+    //     rejected exactly like null — the auth layer filters Some("") to
+    //     None, so an empty token closes the plane just the same.
+    let resp = client
+        .put(format!("http://{addr}/api/config"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+        .body(r#"{"admin_token":""}"#)
+        .send()
+        .await
+        .expect("put empty token");
+    assert_eq!(resp.status(), 400, "empty-token CLEAR via PUT must be rejected");
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("CLOSE the control plane"), "anti-lockout error: {body}");
+    let resp = client
+        .get(format!("http://{addr}/api/config"))
+        .header("x-cerberus-admin-token", HARNESS_ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("get config after empty attempt");
+    assert_eq!(
+        resp.status(),
+        200,
+        "the old token must survive the empty-string attempt"
     );
 
     // 4. Token CHANGE via PUT remains allowed (documented rotation
