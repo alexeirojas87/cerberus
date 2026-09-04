@@ -232,7 +232,27 @@ F6 opens; F6–F9 remain under Review 9 containment.
   harness 69/69, live token-shape closure (5/5 → 400), containment intact.
   Evidence: `evidence/review9/f6-integrator-check.md`.
 
-F7 opens; F7–F9 remain under Review 9 containment.
+- **F7 pack-format / pack-signing / auto-update re-verification: CLOSED/PASS
+  (2026-09-03, round 3 after 2 documented fix rounds).** Round 1 found 1×P1
+  (split ENV_LOCK mutexes over the same process-global env → nondeterministic
+  workspace suite, 2/5 exit-101) + 1×P2 (packs update verified in-memory
+  bytes while the rebuild read disk → dishonest operator report). Attempt 1
+  fixed the lock (shared `cli_api::tests::ENV_LOCK`; 5×865/865) but the
+  verifier caught that its disk-verification fix parsed `name@ver` against a
+  name-keyed map (regression: healthy packs reported "0/1 verified;
+  DEACTIVATED"). Attempt 2 aligned `verify_installed` with
+  `manifest.versions_by_pack[name].active` (the rebuild's own source) and
+  added the missing coverage. Round 3: PASS with zero findings — signing at
+  boot, no-trust-root fail-closed, rollback integrity, Pro gate, wire v2,
+  honest packs-update contract live both directions, determinism 4×865/865.
+  Evidence: `evidence/f7/r9-reverification.md` (rounds 1–3 + both fixes).
+
+- **F7 phase gate: CLOSED (2026-09-03, owner sign-off).** Evidence:
+  `evidence/f7/r9-reverification.md`; candidate `738da62` on
+  `r9-remediation` (pushed). R2-3 (dual trust-root test locks) registered as
+  non-blocking follow-up.
+
+F8 opens; F8–F9 remain under Review 9 containment.
 
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
