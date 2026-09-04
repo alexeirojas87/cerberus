@@ -283,3 +283,167 @@ ENV_LOCK P1 if it ever bites).
 **Verification:** clippy `--workspace --all-targets -D warnings` exit 0
 (un-piped); workspace 865/865 ×3 consecutive (the round-2 flake signature is
 gone); focused tests 2/2.
+
+## Round 3 — re-verification
+
+- **Candidate:** commit `4d0a4eeb89891333f006d2e87feee53ab1325edd` on branch
+  `r9-remediation` (parent `bf5e1ba`; the FIX attempt 2 commit)
+- **Worktree:** `/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/f7-reverify3`
+  (detached HEAD at `4d0a4ee`; `git status --short` empty before and after —
+  reviewer made no code/test/threshold edits anywhere)
+- **Date:** 2026-09-04 (America/New_York, live session)
+- **Host:** macOS (Darwin 25.5.0, arm64) · rustc 1.97.1 (8bab26f4f) / cargo 1.97.1
+- **Reviewer:** independent adversarial re-verifier (round 3, no builder overlap);
+  every command below executed verbatim from the worktree, exit codes captured live
+- **Scope:** empirically confirm the two attempt-2 claims (R2-1 vault-hex fix,
+  R2-2 name@ver keying fix + real coverage) + full round-2 battery re-run
+
+### Environment caveat (build env, not code)
+
+The worktree carried residual build state from an earlier partial session.
+The FIRST full-suite attempt exited 101 with a **build** failure before any
+test ran: `error: couldn't read …/target/debug/build/libsqlite3-sys-…/out/bindgen.rs`
+(stale cached build-script output for the fresh worktree path). Fix was
+`cargo clean -p libsqlite3-sys` (a build-cache op, not a code/test edit);
+the immediate re-run was green. Same artifact re-surfaced in the release
+profile and was resolved identically before the release binary was used.
+The existing `target/release/cerberus` binary pre-dated this session and was
+**rebuilt fresh** (timestamp Sep 4 18:07) before any live battery work.
+
+### Commands run (verbatim, exit codes live)
+
+| # | Command (cwd = worktree unless noted) | Exit | Result |
+|---|---|---|---|
+| 1 | `shasum -a 256 crates/cerberus-packs/src/updater.rs crates/cerberus-engine/src/vault.rs` + `git show 4d0a4ee:<same>` \| `shasum -a 256` | 0 | `6e16e066…4e3cc3` (updater.rs) / `c811a95a…2313ae1` (vault.rs) — **identical to commit blobs** ✅ |
+| 2 | `rtk cargo test --workspace --all-targets` (run 1/3, after the caveat clean) | **0** | `865 passed (29 suites, 55.19s)` |
+| 3 | `rtk cargo test --workspace --all-targets` (run 2/3) | **0** | `865 passed (29 suites, 56.02s)` |
+| 4 | `rtk cargo test --workspace --all-targets` (run 3/3) | **0** | `865 passed (29 suites, 56.27s)` |
+| 5 | `cargo test --workspace --all-targets` (run 4, **raw, un-piped** for explicit proof) | **0** | awk over `^test result`: **passed=865 failed=0**; `grep -c "^test result"` = 29 suites; 0 FAILED |
+| 6 | `rtk cargo test -p cerberus-engine reversible_redaction_splices -- --test-threads=1` × 10 (loop) | 0 ×10 | **10/10** (logs `f7r3-vault-1..10.log`) |
+| 7 | `rtk proxy cargo test -p cerberus-packs --lib verify_installed_reports_disk_state_honestly -- --nocapture` | 0 | **1 passed**; 68 filtered (69 lib tests total → 88 with the 19 PR suite) |
+| 8 | `cargo build --release -p cerberus` (after caveat clean) | 0 | fresh release binary |
+| 9–24 | Live daemon battery (below) | — | see per-attack results |
+| 25 | `rtk cargo test -p cerberus-packs --all-targets` | 0 | **88 passed (2 suites, 0.25s)** = 69 lib + 19 (was 87, +1 the new coverage test) |
+| 26 | `rtk proxy cargo test -p cerberus-packs --test production_pack_pr -- --test-threads=1` | 0 | **19 passed; 0 failed** (0.43s) |
+| 27 | `rtk proxy cargo test -p cerberus --test pack_cli_e2e --test pack_cli_via_api` | 0 | **3/3 + 4/4** |
+| 28 | `rtk proxy cargo test -p cerberus-proxy --test smoke_harness` | 0 | **69/69** |
+| 29 | `cargo fmt --all -- --check` | 0 | clean |
+| 30 | `cargo clippy --workspace --all-targets -- -D warnings` (**un-piped**, explicit `$?`) | **0** | zero warnings |
+| 31 | `git diff --check` / `git status --short` | 0 / empty | reviewer made no modifications |
+| 32 | `pkill -f "cerberus start"`; `pgrep -f "cerberus start" \| wc -l` | — | **0** daemons remaining |
+
+### R2-2 closure — live battery (fresh release binary, isolated HOMEs, real daemons)
+
+Fixtures: throwaway generator `f7r3-fixtures` (path-dep on the **worktree's**
+`cerberus-packs`/`cerberus-engine`), harness key seeds `[7u8;32]` license /
+`[9u8;32]` pack (roots `ea4a6c63…d22c` / `fd172438…f618` — identical to rounds
+1–2), pack `f7r3-pack` v1/v2 with markers `F7R3MARKERV1SIGNALQ/Z`. Daemons:
+Pro license via `CERBERUS_LICENSE_PUBLIC_KEY`+`CERBERUS_LICENSE_PATH`, trust
+root via `CERBERUS_PACK_TRUST_ROOT`, dead-sink upstream `CERBERUS_UPSTREAM_URL=http://127.0.0.1:9`.
+
+| # | Attack | Result | Evidence |
+|---|---|---|---|
+| L0 | Boot Pro+root (18799), CLI `pack install` v1 → 16 rules; `POST /api/scan` `{"text":"f7r3 key with F7R3MARKERV1SIGNALQ inside"}` | ✅ | `pack installed (hot-reload): engine now has 16 rules`; `flags: {'pack.f7r3.marker_v1': 1}`, `action: block` |
+| **P3-A (R2-2 positive)** | **HEALTHY session-installed pack + `cerberus packs update`** | ✅ **CLOSED** | `packs update: 1/1 signatures verified; engine hot-reloaded with 16 rules` — **the exact response round 2 proved unreachable at `bf5e1ba`**; pack stays active (manifest `f7r3-pack@1.0.0: true`, `versions_by_pack.active: "1.0.0"`) and detection returns (`marker_v1`, block) |
+| **P3-B (R2-2 positive, boot-loaded)** | restart daemon → healthy pack loaded at boot → `packs update` | ✅ CLOSED | `1 packs installed` at boot; `packs update: 1/1 signatures verified; engine hot-reloaded with 16 rules`; scan `marker_v1` block; manifest active+clean |
+| **P3-C (tamper)** | flip 1 byte inside the signed pattern on disk out-of-band (`Q`→`R`, JSON valid) → `packs update` | ✅ CLOSED | `packs update: 0/1 signatures verified; DEACTIVATED after failed verification: f7r3-pack; engine hot-reloaded with 15 rules` — honest report, matches the action taken |
+| P3-C follow-up | post-tamper dataplane + persistence + reboot | ✅ | scan of ORIGINAL marker `{}` allow; scan of TAMPERED marker `{}` allow; manifest persisted `"f7r3-pack@1.0.0": false`, `active: ""`; restart → `0 packs installed` (no resurrection) |
+| L1 (boot-tamper) | reinstall healthy → tamper disk → RESTART (boot-time verify, no update) | ✅ | `WARN packs: active pack f7r3-pack@1.0.0 FAILED signature verification; deactivating: signature verification failed: signature error: Verification equation was not satisfied`; `0 packs installed`; 15 base rules; manifest persisted inactive; WARN flow-agnostic (no "on boot" claim) |
+| L2b | active manifest, restart **without** `CERBERUS_PACK_TRUST_ROOT` (Pro intact) | ✅ | `tier=pro state=valid` in log; `WARN packs: boot without trust root; loading NO packs (fail-closed)` + `WARN packs: no effective trust root (Free tier or root missing) — base engine, zero packs`; `0 packs installed` |
+| L3a | install v1 → install v2 → `pack rollback` | ✅ | pre-rollback scan V1 `{}` / V2 `marker_v2:1`; post-rollback V1 `marker_v1:1` / V2 `{}`; manifest `{"…@2.0.0": false, "…@1.0.0": true}`, `versions_by_pack.active: "1.0.0"` |
+| L3b | tamper v1 disk file (rollback target) → `pack rollback` | ✅ | `rollback executed (hot-reload): engine now has 15 rules`; V1/V2/tampered all `{}`; both versions persisted inactive; no resurrection |
+| L4 | Pro gate: Free tier (`tier=free` confirmed) + trust root, API | ✅ | install/rollback/update/enable all `400 {"error":"pack … aborted via control plane: rule packs require a Pro license (open-core). Visit 'cerberus license'."}`; Pro positives demonstrated live (L0/P3-A/P3-B + enable) |
+| L6 | Wire v2 shape attacks vs `POST /api/packs/install` | ✅ | `{"path":…}` → 400 `install by path retired (wire v1)…`; `wire_version:1` → 400 `unsupported wire version: 1 (this binary speaks v2)`; `wire_version:3` → 400; `origin_name:"../evil/pack.json"` → 400 `origin_name must be a basename without path separators` |
+| ADV (adversarial edge probed by round 3) | `packs disable` → `packs update` on the DISABLED pack (manifest `versions_by_pack.active: ""`) → `packs enable` | ✅ no defect | update reports neutral `0/0 signatures verified; engine hot-reloaded with 15 rules`, manifest **untouched, no garbage `name@` entry** (disabled pack is dropped from the installed map, so the `Some("")→deactivate_pack` path never fires); enable → 16 rules, detection returns |
+
+### No-garbage-manifest check (criterion 3)
+
+Every manifest snapshot in the battery (home A healthy/update/tamper/boot-tamper,
+home B rollback chain, disabled+re-enabled) was inspected raw: keys are only
+`f7r3-pack@1.0.0` / `f7r3-pack@2.0.0` — **zero empty-version `name@` entries**
+(`grep -c '@":'` style check = 0). The round-2 manifest pollution is gone.
+
+### Code-semantics audit (round-3 additions)
+
+- **R2-1 fix shape:** test payload secrets are now `SECRET_ONE`/`SECRET_TWO`
+  (uppercase + underscore — impossible in the hex token alphabet
+  `[0-9a-f]`), spans adjusted `5..15`/`21..31` to exactly cover them; the
+  `!out.contains(…)` assertion is meaningful again (verified `vault.rs` = commit blob).
+- **R2-2 fix shape:** `verify_installed` (updater.rs:703–733) keys `installed`
+  entries by NAME; the version resolves from
+  `manifest.versions_by_pack[name].active` — the SAME pointer
+  `rebuild_active_set` loads — then verifies the DISK bytes via
+  `load_signed_from_dir`. Deactivation only fires `if let Some(ver) = active_ver`
+  (a name absent from the manifest can no longer produce a garbage
+  `deactivate_pack(name, "")`). The new test pins the full contract:
+  healthy→TRUE+active; tampered→FALSE+deactivated; persists across reopen.
+  Both claims verified against the commit blobs, not the report.
+
+### Per-criterion verdicts (round 3)
+
+| Criterion | Verdict | Notes |
+|---|---|---|
+| Hash check `updater.rs` + `vault.rs` vs commit | ✅ PASS | `6e16e066…` / `c811a95a…` = blobs exactly |
+| Workspace suite ×3 865/865 exit 0 | ✅ **PASS** | 3/3 rtk runs + raw 4th run (29 suites, 865 passed, 0 failed, exit 0); build-env caveat above (resolved with `cargo clean -p libsqlite3-sys`, not an edit) |
+| Vault test ×10 isolated loop | ✅ PASS | 10/10 exit 0 |
+| `verify_installed_reports_disk_state_honestly` | ✅ PASS | 1/1 green (real `install → verify → tamper → verify → persist` coverage) |
+| F6.B update POSITIVE, session-installed (round-2 unreachable) | ✅ PASS | `1/1 signatures verified` + stays active + detecting (P3-A) |
+| F6.B update POSITIVE, boot-loaded (round-2 unreachable) | ✅ PASS | `1/1 signatures verified` (P3-B) |
+| Tampered-pack honest report | ✅ PASS | `0/1 verified; DEACTIVATED after failed verification: f7r3-pack` + dataplane clean + persisted (P3-C) |
+| No-garbage-manifest | ✅ PASS | 0 empty-version entries in every snapshot |
+| Boot-tamper (restart path) | ✅ PASS | L1 |
+| No-trust-root fail-closed | ✅ PASS | L2b |
+| Rollback integrity (v2→v1, tampered target, no resurrection) | ✅ PASS | L3a/L3b |
+| Pro gate (Free refused API; Pro allowed) | ✅ PASS | L4 + positives |
+| Wire v2 ({path}/v1/v3/traversal rejected) | ✅ PASS | L6 |
+| Disabled-pack update edge (round-3 adversarial probe) | ✅ PASS | ADV — neutral 0/0, manifest untouched, no garbage |
+| `cerberus-packs --all-targets` (88) | ✅ PASS | 69 lib + 19, exit 0 |
+| `production_pack_pr --test-threads=1` (19/19) | ✅ PASS | exit 0 |
+| Pack CLI e2e (3/3 + 4/4) | ✅ PASS | exit 0 |
+| smoke harness (69/69) | ✅ PASS | exit 0 |
+| fmt / clippy -D warnings (un-piped) / git diff --check | ✅ PASS | exits 0 / 0 / 0 |
+| Daemons terminated, no listeners remain | ✅ PASS | pgrep count 0 after battery |
+
+### P1/P2 closure outcomes (round 3)
+
+- **R2-1 (vault test hex-substring flake): CLOSED.** Root cause addressed at
+  the source (secrets the hex alphabet cannot produce, spans exact). Empirical:
+  10/10 isolated loop (round 2: 5/100 intrinsic failures) + 4/4 consecutive
+  full-workspace runs 865/865 exit 0 (round 2: 2/3 with exit-101 on this test).
+  Expected per-run failure probability from this test is now ~0 (token
+  alphabet `[0-9a-f]` cannot spell `SECRET_ONE`/`SECRET_TWO`).
+- **R2-2 (P1, attempt-1 name@ver keying regression): CLOSED.** Version now
+  resolves from `versions_by_pack[name].active` (the rebuild's own source).
+  Live-verified in BOTH round-2 broken variants: healthy session-installed AND
+  boot-loaded packs report `1/1 signatures verified` with pack staying active
+  and detecting — the F6.B positive contract is restored. Tampered disk bytes
+  report `0/1 verified; DEACTIVATED after failed verification` honestly, with
+  deactivation persisted and no resurrection. Manifest pollution gone. Real
+  coverage added and green (the round-2 zero-coverage gap is closed).
+- **R2-3 (P2, pre-existing dual trust-root locks in the packs-crate lib test
+  binary): REGISTERED, NOT FIXED (as declared in attempt 2).** Same hazard
+  class if it ever bites; empirically silent today (10/10 packs-crate-adjacent
+  loops green; every workspace run green). Non-blocking.
+
+### Findings (round 3)
+
+**None.** No P0, no P1, no P2 found. The one build-environment hiccup
+(stale `libsqlite3-sys` bindgen artifact in the fresh worktree) is not a code
+defect and was resolved without any repo modification. No product-code
+fail-open was found in any live attack; fail-closed held in every tamper /
+no-root / Free configuration, and every operator report now matches the
+action taken.
+
+### Final verdict (round 3)
+
+**PASS** — per §8B: every mandatory criterion is green with live evidence:
+(a) determinism restored and proven 4×865/865 consecutive (3 rtk + 1 raw) with
+the R2-1 flake signature empirically gone (10/10 loop); (b) the R2-2 fix is
+effective and honest in BOTH live variants round 2 proved broken, with the
+round-2 unreachable F6.B update-positive contract restored live, tampered
+flows honest, zero manifest garbage, and real regression coverage shipped;
+(c) the full round-2 battery re-passed (88 packs suite, 19/19 PR, 3+4 CLI e2e,
+69/69 smoke, boot-tamper, no-trust-root, rollback, Pro gate, wire v2, fmt,
+clippy un-piped, diff-check, hash check). R2-3 remains registered (declared,
+pre-existing, non-blocking). The reviewer made no modifications to the main
+repo except this report file; all daemons terminated.
