@@ -28,7 +28,9 @@ tar xzf "%{SOURCE0}" -C %{_builddir}/%{name}
 # Pre-compiled static binary: nothing to build.
 
 %install
-install -D -m 0755 "%{_builddir}/%{name}/cerberus" "%{buildroot}%{_bindir}/cerberus"
+# Portable: mkdir + plain install (BSD install lacks GNU's -D; works on both).
+mkdir -p "%{buildroot}%{_bindir}"
+install -m 0755 "%{_builddir}/%{name}/cerberus" "%{buildroot}%{_bindir}/cerberus"
 
 %files
 %{_bindir}/cerberus
@@ -47,6 +49,6 @@ fi
 %{_bindir}/cerberus stop >/dev/null 2>&1 || true
 
 %changelog
-* Thu Aug 21 2026 Cerberus <maintainers@cerberus.dev> - {{VERSION}}-1
+* Fri Aug 21 2026 Cerberus <maintainers@cerberus.dev> - {{VERSION}}-1
 - Release {{VERSION}}.
 - Binary packaging (tar.gz) with post/preun samples.

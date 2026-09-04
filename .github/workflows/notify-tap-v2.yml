@@ -1,0 +1,67 @@
+name: notify-tap-v2 (R9-4 tap update PR)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review 9 remediation — F8.3 / R9-4: the Homebrew tap can never lag.
+#
+# Replaces the frozen `.github/workflows/notify-tap.yml` (repository_dispatch
+# into a tap that never updated; tap lagged v0.1.2 — fix-plan §0.2). This
+# workflow, on every published release, opens a PR against the tap repo with
+# the NEW formula carrying the REAL sha256 values read from the release's
+# verified SHA256SUMS. The tap PR is reviewable; if it is not merged the tap
+# lags visibly, but the flow is guaranteed to start — no silent skip.
+#
+# Fail-closed: if TAP_PR_TOKEN is missing the job FAILS (the tap lag must be
+# visible, never skipped).
+#
+# ── G0/F8 CONTAINMENT ─────────────────────────────────────────────────────────
+# INERT: every job guarded by `if: ${{ false }}` under the NEW
+# `review9_f8_pending` guard. Flip live only after the F8 gate PASS Evidence
+# Pack + owner sign-off (evidence/f8/r9-release-and-tap.md).
+# ─────────────────────────────────────────────────────────────────────────────
+
+"on":
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  open-tap-pr:
+    name: open tap update PR with real release sha256
+    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
+    runs-on: ubuntu-latest
+    env:
+      TAP_REPO: alexeirojas87/homebrew-cerberus
+      TAP_PR_TOKEN: ${{ secrets.TAP_PR_TOKEN }}
+    steps:
+      - name: Fail-closed precheck — tap token must exist
+        run: |
+          : "${TAP_PR_TOKEN:?FAIL: TAP_PR_TOKEN secret missing — the tap update cannot be authenticated; failing so the tap lag is visible (R9-4)}"
+
+      - name: Checkout the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Download the release SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          gh release download "$TAG" --pattern "SHA256SUMS" --output dist-SHA256SUMS
+          [ -s dist-SHA256SUMS ] || { echo "FAIL: release has no SHA256SUMS asset" >&2; exit 1; }
+          cat dist-SHA256SUMS
+
+      - name: Open the tap update PR (formula + real sha256)
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          ./tools/release/publish_tap_pr.sh \
+            --version "${VERSION#v}" \
+            --sums dist-SHA256SUMS \
+            --tap-repo "$TAP_REPO"
