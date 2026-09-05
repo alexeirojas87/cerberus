@@ -1,14 +1,16 @@
 # Evidence Pack — Gauntlet v6.1: closed adversarial loop with Codex + OpenCode
 
-> **CURRENT RELEASE GATE: FAIL — REVIEW 9 CONTAINMENT ACTIVE (2026-08-26).**
-> The prior F1–F9 PASS/closure claims in this index are **SUPERSEDED AND
-> INVALIDATED BY REVIEW 9** as current gate evidence. They remain below only as
-> immutable history; they must not be cited to publish, release, or claim GA
-> readiness. See `evidence/review9/gauntlet-findings.md` and the G0 containment
-> record at `evidence/review9/g0-containment.md`.
-> G0 also requires both GitHub workflows that can publish or notify distribution
-> (`release.yml` and `notify-tap.yml`) to remain disabled remotely until their
-> inert replacements are merged.
+> **CURRENT RELEASE GATE: GA-READY — REVIEW 9 REMEDIATION COMPLETE (2026-09-05,
+> owner sign-off).** The F1–F9 invalidation below is now fully re-verified:
+> every R9 finding (R9-1..R9-20) plus the registered R9-21 was repaired and
+> re-closed under the §8B loop across phases F1–F9 (this file's phase-gate
+> entries below, 2026-08-31 → 2026-09-05). The G0 containment remains
+> ACTIVE until the owner performs the lift: flip the `review9_f8_pending`
+> guards in `release-v2.yml` / `version-bump-v2.yml` / `notify-tap-v2.yml`,
+> merge `r9-remediation` to main, and cut the first tag through the new
+> PR-based release flow. Until that lift, the frozen
+> `release.yml`/`notify-tap.yml` stay inert and the historical
+> F1–F9 PASS claims below remain superseded by the new evidence chain.
 
 ## Review 9 invalidation register
 
@@ -284,6 +286,42 @@ F8 opens; F8–F9 remain under Review 9 containment.
 F9 opens — the final gauntlet (security review, ReDoS fuzz, honest load
 test, failsafe, docs) including the registered R9-21 repair; F9 under
 Review 9 containment until its gate + GA sign-off.
+
+- **F9.A JSON key-name context asymmetry (R9-21): CLOSED/PASS (2026-09-04,
+  attempt 1 built inline; round-2 verification PASS).** The decision view
+  for JSON bodies is now the flat-text scan ("all textual content", §4.2)
+  UNION one authoritative per-leaf scan — the SAME pass the redaction
+  splices (the F3.1/F3.2 one-scan-pass model extended); unspliceable
+  cross-leaf redact findings fail closed; the allowlist is authoritative on
+  every surface. adv5b closed live (block 403 / redact, never 200-raw);
+  adv5 documented as regex-boundary semantics (no divergence). 868/0 debug,
+  honest gate p99 1.219 ms, fingerprint unchanged. Round-1's reviewer
+  fabricated its evidence table and self-retracted — preserved as
+  `evidence/review9/f9a-attempt1-verification-VOID.md`; the round-2 battery
+  ran inline with provenance. Evidence: `evidence/f9/r9-json-key-context.md`,
+  `evidence/review9/f9a-attempt1-verification-r2.md`.
+
+- **F9 final gauntlet: CLOSED/PASS (2026-09-05, owner sign-off — GA-ready).**
+  - security-review: 133 live cross-phase attacks (break-glass scope
+    escapes, allowlist 3-surface consistency, vault×bypass interplay,
+    120-request adversarial flood) — zero raw secrets across upstream/
+    logs/SQLite/events API; R9-5/R9-7/R9-16 re-attacked live and holding;
+    all 7 residual follow-ups confirmed documented
+    (`evidence/f9/security-review-r9.md`).
+  - redos-fuzz 11/11 · load-test 14/14 (honest HTTP gate p99 0.84–1.73 ms
+    across rounds vs strict 5.0 ms; fingerprint unchanged) · failsafe
+    fail-policy matrix re-verified · docs synced through F5/F6.
+  - **F9 phase gate: CLOSED (owner sign-off 2026-09-05).** Evidence:
+    `evidence/f9/integration-gate-r9.md`. The Review 9 invalidation
+    register is fully re-verified; GA readiness declared. The G0 lift
+    (workflow flip, merge to main, first PR-based tag release) is an owner
+    action, gated on nothing further.
+
+  Process notes preserved: one reviewer fabrication + self-retraction
+  (VOID record); ~7 sub-agent transport failures covered by inline
+  orchestrator batteries with explicit provenance; one mid-build file
+  corruption recovered via git. All phase gates carry owner sign-offs
+  (2026-08-31 → 2026-09-05).
 
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
