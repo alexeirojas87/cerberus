@@ -690,4 +690,111 @@ mod tests {
         secret.wipe();
         assert_eq!(secret.expose(), "", "buffer overwritten with zeroes");
     }
+
+    // ─── F4 (Req A2): JSON-aware unredaction ────────────────────────────
+
+    /// F4-roundtrip: a secret containing `"`, `\` and a real newline, echoed
+    /// inside a JSON string, must come back as valid JSON holding the EXACT
+    /// original secret.
+    #[test]
+    fn f4_roundtrip_json_string_restores_secret_exactly() {
+        let vault = Vault::new();
+        let secret = "quote\" back\\slash\nnewline\ttab";
+        let token = vault.store("flag.f4", secret);
+        let body = format!("{{\"answer\": \"{token}\"}}");
+        let out = vault.unredact(body.as_bytes());
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&out).expect("response must stay valid JSON");
+        assert_eq!(
+            parsed["answer"].as_str(),
+            Some(secret),
+            "exact original secret restored"
+        );
+        assert!(vault.is_empty(), "entry consumed by the JSON path");
+    }
+
+    /// F4: a token that replaced a JSON object KEY is restored with the same
+    /// JSON-aware escaping as a value-position token (parity).
+    #[test]
+    fn f4_token_in_object_key_restored_with_value_parity() {
+        let vault = Vault::new();
+        let secret = "sk\"key";
+        let token = vault.store("flag.f4key", secret);
+        let body = format!("{{\"{token}\": 1}}");
+        let out = vault.unredact(body.as_bytes());
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&out).expect("key splice must stay valid JSON");
+        let obj = parsed.as_object().expect("object shape preserved");
+        assert_eq!(obj.len(), 1, "no extra keys");
+        assert!(obj.contains_key(secret), "token in KEY position restored");
+    }
+
+    /// F4: plain and escape-heavy secrets in one body are both restored
+    /// exactly; repeated occurrences of one token are all spliced.
+    #[test]
+    fn f4_mixed_plain_and_escaped_secrets_both_restored() {
+        let vault = Vault::new();
+        let escaped = "with\"quote\\and\nnewline";
+        let plain = "plain-secret-ZZYXW";
+        let t1 = vault.store("f.esc", escaped);
+        let t2 = vault.store("f.plain", plain);
+        let body = format!("{{\"a\": \"{t1}\", \"b\": \"{t2}\", \"c\": \"{t1}\"}}");
+        let out = vault.unredact(body.as_bytes());
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&out).expect("valid JSON after splice");
+        assert_eq!(parsed["a"].as_str(), Some(escaped));
+        assert_eq!(parsed["b"].as_str(), Some(plain));
+        assert_eq!(parsed["c"].as_str(), Some(escaped), "repeated token restored");
+        assert!(vault.is_empty(), "each entry consumed once despite repeats");
+    }
+
+    /// F4-neutral: token-free JSON is byte-identical, and an UNKNOWN token in
+    /// a JSON string is untouched without burning any entry.
+    #[test]
+    fn f4_token_free_json_byte_identical_unknown_token_no_burn() {
+        let vault = Vault::new();
+        let _ = vault.store("flag.x", SECRET);
+        let body = br#"{"msg": "line\nbreak", "q": "\"quoted\"", "n": 1.10}"#;
+        assert_eq!(
+            vault.unredact(body),
+            body.to_vec(),
+            "token-free JSON byte-identical"
+        );
+        let unknown = format!("{{\"k\": \"[VAULT:{}]\"}}", "0".repeat(32));
+        let out = vault.unredact(unknown.as_bytes());
+        assert_eq!(out, unknown.as_bytes(), "unknown token untouched");
+        assert_eq!(vault.len(), 1, "unknown token must not burn entries");
+    }
+
+    /// F4: a non-JSON body keeps the raw substitution path — the secret is
+    /// spliced unescaped (and consumed), exactly as before F4.
+    #[test]
+    fn f4_non_json_body_keeps_raw_substitution_path() {
+        let vault = Vault::new();
+        let secret = "raw \"secret\" \\value";
+        let token = vault.store("flag.raw", secret);
+        let body = format!("plain text {token} trailing");
+        let out = String::from_utf8(vault.unredact(body.as_bytes())).expect("utf8");
+        assert!(out.contains(secret), "raw path splices the unescaped secret");
+        assert!(vault.is_empty(), "raw path still consumes");
+    }
+
+    /// F4: consume-once on the JSON path — a second redeem request with the
+    /// same token must not restore anything.
+    #[test]
+    fn f4_json_consume_once_second_request_no_restore() {
+        let vault = Vault::new();
+        let token = vault.store("flag.once", SECRET);
+        let body = format!("{{\"k\": \"{token}\"}}");
+        let first = vault.unredact(body.as_bytes());
+        let first_parsed: serde_json::Value =
+            serde_json::from_slice(&first).expect("first response valid JSON");
+        assert_eq!(first_parsed["k"].as_str(), Some(SECRET), "first redeem restores");
+        let second = String::from_utf8(vault.unredact(body.as_bytes())).expect("utf8");
+        assert!(
+            second.contains(&token.to_string()),
+            "second redeem must NOT restore (consume-once)"
+        );
+        assert!(vault.is_empty(), "nothing left to burn");
+    }
 }
