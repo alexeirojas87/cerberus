@@ -254,6 +254,37 @@ F6 opens; F6–F9 remain under Review 9 containment.
 
 F8 opens; F8–F9 remain under Review 9 containment.
 
+- **F8 release architecture + tap + packaging (R9-3/R9-4/R9-15): CLOSED/PASS
+  (2026-09-03, attempt 2 after one verification FAIL).** Replacement
+  workflows (`release-v2.yml`, `version-bump-v2.yml`, `notify-tap-v2.yml`)
+  inert under the `review9_f8_pending` guard: version bump opens a PR (no
+  workflow writes to main), publish runs on tags of MERGED commits only
+  (`verify_tag_merge.sh` — 8/8 attack vectors refused, unmerged/cherry-pick
+  tags fail closed), tap PR automation with real SHA256SUMS (fail-closed
+  without `TAP_PR_TOKEN`), REAL clean-install `brew install` gate passed
+  (isolated prefix, real sha, `brew test`), deb/rpm built by the workflow
+  with mandatory GPG, winget real `InstallerSha256` fail-closed, signing
+  mandatory with no unsigned fallback, actionlint installed and clean
+  (G0 residual closed). Attempt 1 failed verification with a P0 (the
+  release-assembly dataflow dead-ended before `gh release create`: sums
+  never merged for deb/rpm, merge-multiple collisions, upload-glob misses,
+  asset-pattern omissions) — attempt 2 rebuilt the canonical SHA256SUMS
+  assembly with a committed simulation proving the exact 17-asset list,
+  both-directions fail-closed, independently re-verified. Evidence:
+  `evidence/f8/r9-release-and-tap.md`,
+  `evidence/review9/f8-attempt1-verification.md`.
+
+- **F8 phase gate: CLOSED (2026-09-03, owner sign-off).** The G0 containment
+  lift (flipping the replacement workflows live) is an owner action gated on
+  the F9 close + remediation-branch merge. Frozen workflows remain
+  byte-untouched. P2 notes: identical-duplicate-lines gate hardening
+  suggestion; real-runner-only behaviors (Windows quirks, real rpm build,
+  notarization secrets) documented as post-lift validation items.
+
+F9 opens — the final gauntlet (security review, ReDoS fuzz, honest load
+test, failsafe, docs) including the registered R9-21 repair; F9 under
+Review 9 containment until its gate + GA sign-off.
+
 - **Final recheck date:** 2026-08-21 (America/New_York)
 - **Checkout:** `HEAD 09612f2142b8ab4e7655da6682231b2548e78bef` + current working tree, uncommitted
 - **Orchestration:** Orca Run `run_a64b51716aba`; workers exclusively **Codex** and **OpenCode**. No Claude was used in the v6.1 review/fix/recheck.
