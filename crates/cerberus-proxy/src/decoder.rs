@@ -260,7 +260,10 @@ fn part_is_textual(content_type: Option<&[u8]>) -> bool {
 /// [`MAX_MULTIPART_REGIONS`] parts; beyond that it returns `None` so the
 /// caller falls back to whole-text scanning. Robustness (F3.1 adversarial
 /// cases): a delimiter only counts at the start of the body or after a line
-/// break (`\r\n` or `\n`); transport padding is tolerated; a truncated body
+/// break (`\r\n` or `\n`) AND its suffix must end a delimiter line (fix F1:
+/// CRLF/LF, transport padding, or the closing `--`; a junk suffix is payload
+/// text — the token stays in the part and the body continues to be scanned);
+/// transport padding is tolerated; a truncated body
 /// (no closing delimiter) yields the parts found so far with the last
 /// payload running to EOF; a body with no delimiter at all returns `None`
 /// (whole-text fallback). Never panics.
@@ -387,20 +390,61 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Option<(Vec<TextRegion>, usiz
 }
 
 /// Position of the next delimiter occurrence at/after `from` that starts the
-/// body or a line (`\r\n` or `\n` before it). Linear scan with a first-byte
-/// probe (bounded, no `windows()` quadratic blow-up on adversarial bodies).
+/// body or a line (`\r\n` or `\n` before it) AND carries a legal suffix (fix
+/// F1: the bytes after the token must end a delimiter line — CRLF/LF,
+/// transport padding, or the closing `--`; anything else is payload text).
+/// Linear scan with a first-byte probe (bounded, no `windows()` quadratic
+/// blow-up on adversarial bodies). An invalid-suffix token is skipped and the
+/// scan continues (`i += 1`): the token stays inside the current part's
+/// payload, which continues to be scanned.
 fn find_delimiter(body: &[u8], delim: &[u8], from: usize) -> Option<usize> {
     let mut i = from;
     while i + delim.len() <= body.len() {
         if body[i] == delim[0] && body[i..i + delim.len()] == *delim {
-            // Delimiter validity: start of body or preceded by a line break.
-            if i == 0 || body[i - 1] == b'\n' {
+            // Delimiter validity: start of body or preceded by a line break,
+            // plus the F1 suffix validation.
+            if (i == 0 || body[i - 1] == b'\n') && delimiter_suffix_is_valid(body, i + delim.len())
+            {
                 return Some(i);
             }
         }
         i += 1;
     }
     None
+}
+
+/// F1 suffix validation (design verdict table, RFC 2046 §6.4): is the text
+/// right after a `--boundary` token a legal ending for a delimiter line?
+///
+/// | suffix                            | verdict |
+/// |-----------------------------------|---------|
+/// | CRLF / LF                         | VALID open (LF: documented leniency beyond strict RFC 2046) |
+/// | LWSP* then CRLF / LF              | VALID open + transport padding |
+/// | `--` then LWSP* then CRLF/LF/EOF  | VALID close |
+/// | `--` then EOF                     | VALID close (documented leniency) |
+/// | LWSP* then EOF (open)             | INVALID → whole-text over-scan fallback (fail-safe, never under-scan) |
+/// | any other byte                    | INVALID → payload text, keep scanning |
+fn delimiter_suffix_is_valid(body: &[u8], p: usize) -> bool {
+    if p >= body.len() {
+        // Open delimiter at EOF (no `--`, no line break): not a delimiter
+        // line. The whole-text fallback over-scans, so nothing escapes.
+        return false;
+    }
+    if body[p] == b'-' && p + 1 < body.len() && body[p + 1] == b'-' {
+        // Close delimiter: `--` then LWSP* then CRLF/LF/EOF.
+        let after = skip_transport_padding(body, p + 2);
+        return after >= body.len() || body[after] == b'\r' || body[after] == b'\n';
+    }
+    // Open delimiter: LWSP* then CRLF or LF.
+    let after = skip_transport_padding(body, p);
+    if after >= body.len() {
+        // LWSP* then EOF on an open delimiter → invalid (over-scan fallback).
+        return false;
+    }
+    if body[after] == b'\n' {
+        return true;
+    }
+    body[after] == b'\r' && after + 1 < body.len() && body[after + 1] == b'\n'
 }
 
 /// Skip RFC 2046 transport padding (SP / HTAB) after a delimiter.
@@ -1011,5 +1055,119 @@ mod tests {
         let body = Bytes::from(body);
         let decoded = decode_mp(&body);
         assert!(decoded.text.contains("CHUNK-CROSSING-SECRET-VALUE-42"));
+    }
+
+    // ── F1 (r9-remediation): delimiter suffix validation ──
+
+    #[test]
+    fn f1_delimiter_suffix_matrix() {
+        // Table-driven per the design verdict table (RFC 2046 §6.4): the
+        // bytes right after a `--boundary` token decide whether the token is
+        // a delimiter line. A junk suffix is payload text: the token must
+        // NOT match and the scan must continue to the next legal token.
+        let delim = format!("--{B}");
+        let delim = delim.as_bytes();
+        // Offset of the LATER legal token in the junk-suffix cases: the scan
+        // skips the invalid token and keeps going (never abandons the body).
+        let next = |junk_line: &str| junk_line.len();
+        let open = format!("--{B}");
+        let cases: Vec<(&str, String, Option<usize>)> = vec![
+            // VALID open: CRLF.
+            ("F1-valid: CRLF open", format!("{open}\r\nX"), Some(0)),
+            // VALID open + transport padding (LWSP* then CRLF / LF).
+            ("F1-legit: LWSP-tolerant open (CRLF)", format!("{open} \t \r\nX"), Some(0)),
+            ("F1-legit: LWSP-tolerant open (LF)", format!("{open}\t\nX"), Some(0)),
+            // VALID close: `--` then CRLF / LWSP* then CRLF / EOF variants.
+            ("F1-valid: CRLF close", format!("{open}--\r\nX"), Some(0)),
+            ("F1-legit: LWSP-tolerant close", format!("{open}--  \t\r\n"), Some(0)),
+            (
+                // Close delimiter whose line break is missing because the
+                // body ends there: kept for LF-era senders.
+                "F1-valid: EOF-after-close (documented leniency beyond strict RFC 2046)",
+                format!("{open}--"),
+                Some(0),
+            ),
+            ("F1-valid: close + LWSP + EOF", format!("{open}--  "), Some(0)),
+            (
+                // Bare LF instead of CRLF after an open delimiter: kept so
+                // LF-only bodies still parse (pre-existing leniency).
+                "F1-valid: LF open (documented leniency beyond strict RFC 2046)",
+                format!("{open}\nX"),
+                Some(0),
+            ),
+            // INVALID suffixes: NOT delimiters; the scan continues (i += 1)
+            // and finds the next legal token.
+            (
+                "F1-defect-pin: junk suffix",
+                format!("{open}junk\r\n{open}\r\nX"),
+                Some(next(&format!("{open}junk\r\n"))),
+            ),
+            (
+                "F1-defect-pin: close-junk `--B--junk`",
+                format!("{open}--junk\r\n{open}\r\nX"),
+                Some(next(&format!("{open}--junk\r\n"))),
+            ),
+            (
+                "F1-defect-pin: LWSP then junk",
+                format!("{open} x\r\n{open}\r\n"),
+                Some(next(&format!("{open} x\r\n"))),
+            ),
+            (
+                "F1-defect-pin: single dash then CRLF",
+                format!("{open}-\r\n{open}\r\n"),
+                Some(next(&format!("{open}-\r\n"))),
+            ),
+            // INVALID, fail-safe direction: an OPEN delimiter with no line
+            // break (LWSP* then EOF, or bare EOF) must not match — the
+            // whole-text over-scan fallback takes over (never under-scan).
+            ("F1-fail-safe: LWSP then EOF (open)", format!("{open}   "), None),
+            ("F1-fail-safe: bare EOF after open", open.clone(), None),
+        ];
+        for (label, body, expected) in cases {
+            let body = body.into_bytes();
+            assert_eq!(
+                find_delimiter(&body, delim, 0),
+                expected,
+                "{label}: body {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn f1_junk_close_boundary_stays_in_payload_no_epilogue_misread() {
+        // F1-defect-pin (parse level): a line-start `--B--junk` token is NOT
+        // a delimiter. It stays inside the part payload and the body after
+        // it continues to be scanned as payload — the close branch must not
+        // misread it (no premature end, no bogus epilogue region).
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{B}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+        body.extend_from_slice(b"before junk\r\n");
+        body.extend_from_slice(format!("--{B}--junk\r\n").as_bytes());
+        body.extend_from_slice(b"secret after junk\r\n");
+        body.extend_from_slice(format!("--{B}--\r\n").as_bytes());
+        let body = Bytes::from(body);
+        let decoded = decode_mp(&body);
+        assert_eq!(decoded.content_type, ContentType::Multipart);
+        let regions = decoded.multipart.expect("regions");
+        let kinds: Vec<RegionKind> = regions.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![RegionKind::PartHeaders, RegionKind::Payload],
+            "junk close must not end the part structure (no epilogue): {kinds:?}"
+        );
+        let payload = regions
+            .iter()
+            .find(|r| r.kind == RegionKind::Payload)
+            .expect("payload");
+        let text = region_text(&body, std::slice::from_ref(payload))[0].clone();
+        assert!(
+            text.contains(&format!("--{B}--junk")),
+            "junk token stays in the payload: {text:?}"
+        );
+        assert!(
+            text.contains("secret after junk"),
+            "body after the junk token is still scanned payload: {text:?}"
+        );
     }
 }

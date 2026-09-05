@@ -3224,6 +3224,83 @@ async fn a1_yaml_config_drives_the_proxy_end_to_end() {
     mock_handle.abort();
 }
 
+/// ── F1 (r9-remediation): a line-start junk close-delimiter stays part
+/// payload — no epilogue misread ──
+///
+/// The binary part AFTER the junk line is the discriminator: a misread close
+/// would swallow it into a scanned TEXT (epilogue) region, where the redact
+/// marker planted inside gets spliced and corrupts the bytes; a correctly
+/// parsed binary part is preserved byte-exact (binary payloads are never
+/// scanned, §4.2 trade-off).
+#[tokio::test]
+async fn f1_junk_close_boundary_stays_in_part_payload_no_epilogue_misread() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_redact_rule(cerberus_engine::rule::Severity::High)],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = api_client();
+
+    // Binary payload with a planted redact-marker: under the misread it is
+    // scanned as epilogue text and spliced (corruption); under the fix the
+    // whole part is preserved byte-exact.
+    let mut binary = b"\x00\x01REDACTSECRET2abcdefghijkl\xfe\xff".to_vec();
+    binary.extend((0u8..=255).cycle().take(64));
+
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--FB1\r\n");
+    body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+    body.extend_from_slice(b"part one payload\r\n");
+    body.extend_from_slice(b"--FB1--junk\r\n"); // line-start junk close → NOT a delimiter (F1)
+    body.extend_from_slice(b"--FB1\r\n");
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(&binary);
+    body.extend_from_slice(b"\r\n--FB1--\r\n");
+
+    let r = client
+        .post(format!("http://{addr}/v1/x"))
+        .header("content-type", "multipart/form-data; boundary=FB1")
+        .body(body)
+        .send()
+        .await
+        .expect("multipart junk-boundary request");
+    assert_eq!(
+        r.status(),
+        200,
+        "junk boundary must not abort the scan (got {})",
+        r.status()
+    );
+
+    let forwarded = captured.lock().unwrap().clone();
+    assert!(!forwarded.is_empty(), "request must be forwarded");
+    let body_start = forwarded
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("captured headers")
+        + 4;
+    let fwd_body = &forwarded[body_start..];
+    let marker = b"audio/wav\r\n\r\n";
+    let bin_pos = fwd_body
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("binary part content-type preserved");
+    let bin_start = bin_pos + marker.len();
+    assert_eq!(
+        &fwd_body[bin_start..bin_start + binary.len()],
+        &binary[..],
+        "binary part after the junk boundary must be byte-exact (no epilogue misread)"
+    );
+    let fwd_text = String::from_utf8_lossy(fwd_body);
+    assert!(
+        fwd_text.contains("--FB1--junk"),
+        "the junk token stays in the part payload: {fwd_text}"
+    );
+    assert!(fwd_text.contains("--FB1--"), "the real close delimiter survives");
+    mock_handle.abort();
+}
+
 /// ── R9-13 unit-level: the decoder is reachable from the pipeline path with
 /// the same `DecodedBody` contract (single parse; regions recorded — since
 /// the attempt-2 fix they cover payloads, part headers, preamble and
