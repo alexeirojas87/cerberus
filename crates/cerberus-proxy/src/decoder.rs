@@ -403,8 +403,7 @@ fn find_delimiter(body: &[u8], delim: &[u8], from: usize) -> Option<usize> {
         if body[i] == delim[0] && body[i..i + delim.len()] == *delim {
             // Delimiter validity: start of body or preceded by a line break,
             // plus the F1 suffix validation.
-            if (i == 0 || body[i - 1] == b'\n') && delimiter_suffix_is_valid(body, i + delim.len())
-            {
+            if (i == 0 || body[i - 1] == b'\n') && delimiter_suffix_is_valid(body, i + delim.len()) {
                 return Some(i);
             }
         }
@@ -1075,7 +1074,11 @@ mod tests {
             // VALID open: CRLF.
             ("F1-valid: CRLF open", format!("{open}\r\nX"), Some(0)),
             // VALID open + transport padding (LWSP* then CRLF / LF).
-            ("F1-legit: LWSP-tolerant open (CRLF)", format!("{open} \t \r\nX"), Some(0)),
+            (
+                "F1-legit: LWSP-tolerant open (CRLF)",
+                format!("{open} \t \r\nX"),
+                Some(0),
+            ),
             ("F1-legit: LWSP-tolerant open (LF)", format!("{open}\t\nX"), Some(0)),
             // VALID close: `--` then CRLF / LWSP* then CRLF / EOF variants.
             ("F1-valid: CRLF close", format!("{open}--\r\nX"), Some(0)),
@@ -1121,15 +1124,11 @@ mod tests {
             // break (LWSP* then EOF, or bare EOF) must not match — the
             // whole-text over-scan fallback takes over (never under-scan).
             ("F1-fail-safe: LWSP then EOF (open)", format!("{open}   "), None),
-            ("F1-fail-safe: bare EOF after open", open.clone(), None),
+            ("F1-fail-safe: bare EOF after open", open, None),
         ];
         for (label, body, expected) in cases {
             let body = body.into_bytes();
-            assert_eq!(
-                find_delimiter(&body, delim, 0),
-                expected,
-                "{label}: body {body:?}"
-            );
+            assert_eq!(find_delimiter(&body, delim, 0), expected, "{label}: body {body:?}");
         }
     }
 
@@ -1156,10 +1155,7 @@ mod tests {
             vec![RegionKind::PartHeaders, RegionKind::Payload],
             "junk close must not end the part structure (no epilogue): {kinds:?}"
         );
-        let payload = regions
-            .iter()
-            .find(|r| r.kind == RegionKind::Payload)
-            .expect("payload");
+        let payload = regions.iter().find(|r| r.kind == RegionKind::Payload).expect("payload");
         let text = region_text(&body, std::slice::from_ref(payload))[0].clone();
         assert!(
             text.contains(&format!("--{B}--junk")),

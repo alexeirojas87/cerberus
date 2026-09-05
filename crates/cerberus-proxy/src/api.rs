@@ -3412,8 +3412,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("config.yaml");
-        std::fs::write(&path, "listen: 127.0.0.1:0\nmode: enforce\nupstreams: {}\n")
-            .expect("candidate config");
+        std::fs::write(&path, "listen: 127.0.0.1:0\nmode: enforce\nupstreams: {}\n").expect("candidate config");
 
         let mut live = ProxyConfig::default();
         live.upstreams
@@ -3451,10 +3450,8 @@ mod tests {
         .expect("candidate config");
 
         let mut live = ProxyConfig::default();
-        live.upstreams.insert(
-            "stale".to_string(),
-            f6_upstream("https://stale.example.com"),
-        );
+        live.upstreams
+            .insert("stale".to_string(), f6_upstream("https://stale.example.com"));
         let ctx = ApiContext::new(Arc::new(RwLock::new(live))).with_config_path(path);
 
         let resp = apply_reload(&ctx);
