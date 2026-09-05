@@ -423,7 +423,7 @@ fn find_delimiter(body: &[u8], delim: &[u8], from: usize) -> Option<usize> {
 /// | `--` then EOF                     | VALID close (documented leniency) |
 /// | LWSP* then EOF (open)             | INVALID → whole-text over-scan fallback (fail-safe, never under-scan) |
 /// | any other byte                    | INVALID → payload text, keep scanning |
-fn delimiter_suffix_is_valid(body: &[u8], p: usize) -> bool {
+const fn delimiter_suffix_is_valid(body: &[u8], p: usize) -> bool {
     if p >= body.len() {
         // Open delimiter at EOF (no `--`, no line break): not a delimiter
         // line. The whole-text fallback over-scans, so nothing escapes.
@@ -447,7 +447,7 @@ fn delimiter_suffix_is_valid(body: &[u8], p: usize) -> bool {
 }
 
 /// Skip RFC 2046 transport padding (SP / HTAB) after a delimiter.
-fn skip_transport_padding(body: &[u8], mut i: usize) -> usize {
+const fn skip_transport_padding(body: &[u8], mut i: usize) -> usize {
     while i < body.len() && (body[i] == b' ' || body[i] == b'\t') {
         i += 1;
     }
@@ -455,7 +455,7 @@ fn skip_transport_padding(body: &[u8], mut i: usize) -> usize {
 }
 
 /// Skip one line break after a delimiter, returning the part start.
-fn skip_line_break(body: &[u8], i: usize) -> usize {
+const fn skip_line_break(body: &[u8], i: usize) -> usize {
     if i < body.len() && body[i] == b'\r' && i + 1 < body.len() && body[i + 1] == b'\n' {
         return i + 2;
     }
@@ -467,7 +467,7 @@ fn skip_line_break(body: &[u8], i: usize) -> usize {
 
 /// Length in bytes of the line break that ends at `end` (the delimiter is at
 /// `end`): `\r\n` = 2, `\n` = 1, none = 0.
-fn strip_preceding_line_break(body: &[u8], end: usize) -> usize {
+const fn strip_preceding_line_break(body: &[u8], end: usize) -> usize {
     if end >= 2 && body[end - 2] == b'\r' && body[end - 1] == b'\n' {
         return end - 2;
     }

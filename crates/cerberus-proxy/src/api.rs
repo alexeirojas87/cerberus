@@ -2889,6 +2889,9 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod fixture");
         }
 
+        // `path` is reused by the unix mode-check below; on non-unix targets that
+        // use is cfg'd out and the clone is technically redundant (clippy 1.98).
+        #[allow(clippy::redundant_clone)]
         let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default()))).with_config_path(path.clone());
         persist_config(&ctx, &ProxyConfig::default()).expect("persist");
 
@@ -2921,6 +2924,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("tmpdir");
         let path = dir.join("config.yaml");
+        // `path` is reused by the unix mode-check below; on non-unix targets that
+        // use is cfg'd out and the clone is technically redundant (clippy 1.98).
+        #[allow(clippy::redundant_clone)]
         let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default()))).with_config_path(path.clone());
         persist_config(&ctx, &ProxyConfig::default()).expect("persist");
         #[cfg(unix)]
