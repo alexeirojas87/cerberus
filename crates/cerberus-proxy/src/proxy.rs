@@ -45,7 +45,10 @@ use crate::api::{self, ApiContext, ADMIN_TOKEN_HEADER};
 use crate::config::{FailPolicy, ProxyConfig};
 use crate::decoder::{decode, ContentType};
 use crate::health::{health_json, is_health_path};
-use crate::json_redact::{multipart_scan_output, redact_body_with_multipart_scan, scan_multipart_regions};
+use crate::json_redact::{
+    json_decision_output, multipart_scan_output, redact_body_with_scan, scan_json_leaves, scan_multipart_regions,
+    AuthoredScan,
+};
 use crate::log::{log_security_event, SecurityEvent};
 use crate::shadow;
 
@@ -761,12 +764,13 @@ pub(crate) async fn proxy_handler(
         cfg.policy.allowlist.clone()
     };
     let audit_key_for_allowlist = ctx.api.audit_hash_key().map(std::vec::Vec::from);
-    let (scan_result, multipart_scan) = if decode_failed {
+    let (scan_result, multipart_scan, json_scan) = if decode_failed {
         (
             ScanOutput {
                 findings: Vec::new(),
                 action_overall: cerberus_engine::rule::Action::Allow,
             },
+            None,
             None,
         )
     } else if decoded.content_type == ContentType::Multipart && decoded.multipart.is_some() {
@@ -777,12 +781,41 @@ pub(crate) async fn proxy_handler(
             &allowlist,
             audit_key_for_allowlist.as_deref(),
         );
-        (multipart_scan_output(&scan), Some(scan))
+        (multipart_scan_output(&scan), Some(scan), None)
+    } else if decoded.content_type == ContentType::Json {
+        if let Some(parsed) = decoded.parsed.as_ref() {
+            // Fix R9-21 (F9.A): the decision view for JSON bodies is the
+            // union of the flat-text scan ("all textual content", §4.2 —
+            // key names included) and the ONE authoritative per-leaf scan —
+            // the same pass the redaction splices from. Before this fix a
+            // leaf re-scan could fire a rule the decision never saw
+            // (keyword validated by the analyzer but missed by the flat
+            // same-line window): a critical match reached the fail-open
+            // branch under the default policy and the raw value was
+            // forwarded.
+            let json = scan_json_leaves(
+                &engine_snap,
+                &body_bytes,
+                parsed,
+                &allowlist,
+                audit_key_for_allowlist.as_deref(),
+            );
+            let mut s = engine_snap.scan(&decoded.text);
+            // Allowlist (false-positive triage) — applied in the real path (P0-5).
+            filter_with_allowlist(&allowlist, audit_key_for_allowlist.as_deref(), &decoded.text, &mut s);
+            (json_decision_output(s, &json), None, Some(json))
+        } else {
+            // Hand-built `DecodedBody` without a parsed tree: flat path
+            // (compat, identical to the pre-R9-21 behavior).
+            let mut s = engine_snap.scan(&decoded.text);
+            filter_with_allowlist(&allowlist, audit_key_for_allowlist.as_deref(), &decoded.text, &mut s);
+            (s, None, None)
+        }
     } else {
         let mut s = engine_snap.scan(&decoded.text);
         // Allowlist (false-positive triage) — applied in the real path (P0-5).
         filter_with_allowlist(&allowlist, audit_key_for_allowlist.as_deref(), &decoded.text, &mut s);
-        (s, None)
+        (s, None, None)
     };
 
     let mode_result = shadow::apply_mode(&scan_result, mode);
@@ -845,14 +878,18 @@ pub(crate) async fn proxy_handler(
     let final_bytes = if matches!(mode_result, shadow::ModeResult::Enforce { .. })
         && mode_result.action() == cerberus_engine::rule::Action::Redact
     {
-        let redaction = redact_body_with_multipart_scan(
+        let redaction = redact_body_with_scan(
             &engine_snap,
             &body_bytes,
             &decoded,
             &ctx.redact_options,
             &scan_result.findings,
             request_vault.as_ref(),
-            multipart_scan.as_ref(),
+            match (multipart_scan.as_ref(), json_scan.as_ref()) {
+                (Some(mp), _) => AuthoredScan::Multipart(mp),
+                (None, Some(js)) => AuthoredScan::Json(js),
+                (None, None) => AuthoredScan::None,
+            },
         );
         match decide_redact_result(redaction, fail_policy, &body_bytes, &scan_result.findings) {
             RedactDecision::Forward(b) => b,

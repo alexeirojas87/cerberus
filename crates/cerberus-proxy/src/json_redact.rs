@@ -32,7 +32,7 @@ use crate::decoder::{ContentType, DecodedBody, TextRegion};
 /// This is the 6-argument convenience form: on a multipart body it performs
 /// its own authoritative region scan (identical algorithm to the pipeline's,
 /// minus the allowlist — it can only over-redact, never under-redact). The
-/// PIPELINE must call [`redact_body_with_multipart_scan`] and pass the ONE
+/// PIPELINE must call [`redact_body_with_scan`] and pass the ONE
 /// scan pass the decision was made from, so the decision and the redaction
 /// can never disagree (fix F-1/P1-3, attempt 2).
 ///
@@ -48,7 +48,7 @@ pub fn redact_body(
     findings: &[Finding],
     vault: Option<&Vault>,
 ) -> Result<Vec<u8>, String> {
-    redact_body_with_multipart_scan(engine, body, decoded, opts, findings, vault, None)
+    redact_body_with_scan(engine, body, decoded, opts, findings, vault, AuthoredScan::None)
 }
 
 /// Pipeline entry: redact the body using the AUTHORITATIVE multipart scan
@@ -65,18 +65,48 @@ pub fn redact_body(
 ///
 /// Returns an error if the redaction itself fails internally (fail-policy
 /// decides at the caller: Open → forward original, Closed → reject).
-pub fn redact_body_with_multipart_scan(
+/// The ONE authoritative scan pass the pipeline's decision was made from,
+/// threaded into the redaction so the two can never disagree (fix F-1/P1-3
+/// attempt 2 for multipart; fix R9-21/F9.A for JSON). A body has exactly one
+/// content type, so the pass is one variant or none.
+#[derive(Debug, Clone, Copy)]
+pub enum AuthoredScan<'a> {
+    /// The per-region multipart scan.
+    Multipart(&'a MultipartScan),
+    /// The per-leaf JSON scan.
+    Json(&'a JsonScan),
+    /// No authored scan (compat fallback: the redaction self-scans,
+    /// identical to the pre-R9-21 behavior).
+    None,
+}
+
+/// Pipeline entry: redact the body using the ONE authoritative scan pass
+/// the pipeline's decision was made from (multipart per-region or JSON
+/// per-leaf — see [`AuthoredScan`]).
+///
+/// # Errors
+///
+/// Returns an error if the redaction itself fails internally (fail-policy
+/// decides at the caller: Open → forward original, Closed → reject).
+pub fn redact_body_with_scan(
     engine: &CompiledEngine,
     body: &Bytes,
     decoded: &DecodedBody,
     opts: &RedactOptions,
     findings: &[Finding],
     vault: Option<&Vault>,
-    multipart_scan: Option<&MultipartScan>,
+    scan: AuthoredScan<'_>,
 ) -> Result<Vec<u8>, String> {
+    let (multipart_scan, json_scan) = match scan {
+        AuthoredScan::Multipart(s) => (Some(s), None),
+        AuthoredScan::Json(s) => (None, Some(s)),
+        AuthoredScan::None => (None, None),
+    };
     // JSON path first; if the body is not valid JSON it falls back to the text fallback.
     if decoded.content_type == ContentType::Json {
-        if let Some(redacted) = redact_json(engine, body, decoded.parsed.as_ref(), opts, vault)? {
+        if let Some(redacted) =
+            redact_json_with_scan(engine, body, decoded.parsed.as_ref(), opts, vault, json_scan, findings)?
+        {
             return Ok(redacted);
         }
     }
@@ -197,6 +227,126 @@ pub fn multipart_scan_output(scan: &MultipartScan) -> ScanOutput {
     }
 }
 
+/// The ONE authoritative per-leaf scan of a JSON body (fix R9-21, F9.A).
+///
+/// Mirrors [`scan_multipart_regions`] for the JSON path: every string leaf is
+/// scanned IN ISOLATION with [`CompiledEngine::scan_with_context_analyzer`]
+/// against ONE [`ContextAnalyzer`] built over the full lossy body, and the
+/// allowlist is applied per leaf on the leaf-relative raw value. The union of
+/// the leaf findings feeds the pipeline's decision view; the per-leaf
+/// findings are what the redaction splices. Both come from THIS pass, so
+/// they can never disagree (the same one-scan-pass model F3.1/F3.2
+/// established for multipart).
+///
+/// Plan reading (§4.2, documented decision): detection covers "all textual
+/// content" — key names INCLUDED via the pipeline's flat-text scan; the
+/// leaf scans add context-validated matches on the values. Redaction splices
+/// only leaf substrings (in-place, structure-preserving); a decision finding
+/// that no leaf can carry (e.g. a multiline match spanning two leaves) cannot
+/// be redacted in place without corrupting the schema, so the redaction
+/// fails closed instead of silently forwarding it.
+#[derive(Debug, Clone)]
+pub struct JsonScan {
+    /// Post-allowlist findings per string leaf, in document walk order —
+    /// the same order the splice phase walks the tree. Offsets are
+    /// relative to each leaf's text.
+    pub findings: Vec<Vec<Finding>>,
+}
+
+/// Build the authoritative JSON leaf scan for one request.
+///
+/// `allowlist` is the operator allowlist as HMAC FINGERPRINTS (R9-7/F6.3);
+/// `key` is the installation audit-hash key (`None` = unkeyed test context:
+/// nothing is allowlisted, fail-closed).
+#[must_use]
+pub fn scan_json_leaves(
+    engine: &CompiledEngine,
+    body: &Bytes,
+    parsed: &serde_json::Value,
+    allowlist: &[String],
+    key: Option<&[u8]>,
+) -> JsonScan {
+    let body_text = String::from_utf8_lossy(body).into_owned();
+    let analyzer = ContextAnalyzer::new(&body_text);
+    let fingerprints: std::collections::HashSet<&str> = allowlist.iter().map(String::as_str).collect();
+    let mut texts: Vec<String> = Vec::new();
+    collect_string_leaves(parsed, &mut texts);
+    let mut per_leaf: Vec<Vec<Finding>> = Vec::with_capacity(texts.len());
+    // Dedup key includes the leaf index: offsets are leaf-relative, so
+    // identical (flag, start, end) in two leaves are two real matches.
+    let mut seen: std::collections::HashSet<(String, usize, usize, usize)> = std::collections::HashSet::new();
+    for (index, leaf) in texts.iter().enumerate() {
+        let found = engine.scan_with_context_analyzer(leaf, &analyzer);
+        let mut kept = Vec::new();
+        for f in found.findings {
+            let allowlisted = f
+                .end
+                .le(&leaf.len())
+                .then(|| leaf.get(f.start..f.end).map(str::trim))
+                .flatten()
+                .is_some_and(|raw| {
+                    key.is_some_and(|k| fingerprints.contains(crate::allowlist::fingerprint(k, raw).as_str()))
+                });
+            if !allowlisted && seen.insert((f.flag.clone(), index, f.start, f.end)) {
+                kept.push(f);
+            }
+        }
+        per_leaf.push(kept);
+    }
+    JsonScan { findings: per_leaf }
+}
+
+/// Collect every string leaf's text in document walk order (the same order
+/// both the scan and the splice phase use).
+fn collect_string_leaves(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) => out.push(s.clone()),
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                collect_string_leaves(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_k, v) in map {
+                collect_string_leaves(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The decision view for a JSON body: the flat-text scan (all textual
+/// content, §4.2 — key names included) UNION the authoritative leaf scan.
+///
+/// Leaf-only findings are appended deduped by `(flag, hashed_value)`; their
+/// spans are leaf-relative (documented artifact: flag/category/severity/
+/// action/hash are exact, only the span is not body-relative). The overall
+/// action is the precedence max across the union.
+#[must_use]
+pub fn json_decision_output(flat: ScanOutput, scan: &JsonScan) -> ScanOutput {
+    let mut findings = flat.findings;
+    let covered: std::collections::HashSet<(String, String)> = findings
+        .iter()
+        .map(|f| (f.flag.clone(), f.hashed_value.clone()))
+        .collect();
+    for leaf in &scan.findings {
+        for f in leaf {
+            if !covered.contains(&(f.flag.clone(), f.hashed_value.clone())) {
+                findings.push(f.clone());
+            }
+        }
+    }
+    let action_overall = findings
+        .iter()
+        .map(|f| f.action)
+        .max()
+        .unwrap_or(cerberus_engine::rule::Action::Allow);
+    ScanOutput {
+        findings,
+        action_overall,
+    }
+}
+
 /// Redact the scanned TEXT regions of a `multipart/form-data` body (R9-13).
 ///
 /// Each region is redacted with the findings of the AUTHORITATIVE scan pass
@@ -274,12 +424,14 @@ fn fallback_text(
 /// decoded by [`crate::decoder::decode`] on the scan path, so the body is
 /// parsed exactly once per request. `None` (hand-built `DecodedBody`) falls
 /// back to parsing here — same parser, same bytes, identical output.
-fn redact_json(
+fn redact_json_with_scan(
     engine: &CompiledEngine,
     body: &Bytes,
     parsed: Option<&serde_json::Value>,
     opts: &RedactOptions,
     vault: Option<&Vault>,
+    json_scan: Option<&JsonScan>,
+    decision_findings: &[Finding],
 ) -> Result<Option<Vec<u8>>, String> {
     let mut value: serde_json::Value = match parsed {
         // The decoded tree is borrowed by the caller; clone is an exact copy
@@ -293,34 +445,74 @@ fn redact_json(
     // The full body as context for keyword constraints.
     let body_text = String::from_utf8_lossy(body).to_string();
     let analyzer = ContextAnalyzer::new(&body_text);
-    redact_value(engine, &mut value, opts, &analyzer, vault)?;
+    // Fix R9-21 (fail-closed under-redaction): a decision finding with a
+    // Redact action that NO leaf scan produced (e.g. a multiline match
+    // spanning two leaves) cannot be redacted in place without corrupting
+    // the schema. The redaction must fail (the fail-policy decides at the
+    // caller) instead of silently forwarding it. Coverage is matched by
+    // (flag, hashed_value): the same pattern matching the same substring in
+    // a leaf and in the flat text share both.
+    if let Some(scan) = json_scan {
+        let covered: std::collections::HashSet<(&str, &str)> = scan
+            .findings
+            .iter()
+            .flatten()
+            .map(|f| (f.flag.as_str(), f.hashed_value.as_str()))
+            .collect();
+        let unspliceable = decision_findings
+            .iter()
+            .filter(|f| {
+                f.action == cerberus_engine::rule::Action::Redact
+                    && !covered.contains(&(f.flag.as_str(), f.hashed_value.as_str()))
+            })
+            .count();
+        if unspliceable > 0 {
+            return Err(format!(
+                "json redaction cannot be applied in-place for {unspliceable} structural finding(s)                  (no leaf carries them); fail-closed"
+            ));
+        }
+    }
+    splice_json_value(engine, &mut value, opts, &analyzer, vault, json_scan, &mut 0)?;
     serde_json::to_vec(&value)
         .map(Some)
         .map_err(|e| format!("json reserialize failed: {e}"))
 }
 
-fn redact_value(
+/// Splice phase: walk the tree in the SAME order `collect_string_leaves`
+/// walked it, consuming the pre-collected per-leaf findings (no scan of our
+/// own — fix R9-21: decision and redaction share ONE scan pass). With
+/// `json_scan: None` (compat fallback) the leaf is scanned here, identical
+/// to the pre-R9-21 behavior.
+fn splice_json_value(
     engine: &CompiledEngine,
     value: &mut serde_json::Value,
     opts: &RedactOptions,
     analyzer: &ContextAnalyzer<'_>,
     vault: Option<&Vault>,
+    scan: Option<&JsonScan>,
+    leaf_index: &mut usize,
 ) -> Result<(), String> {
     match value {
         serde_json::Value::String(s) => {
-            // scan_with_context: the contextKeywords can live in other
-            // fields of the JSON (review 2 regression, P0). The leaf is
-            // scanned with the full body as context.
-            let found = engine.scan_with_context_analyzer(s, analyzer);
-            if !found.findings.is_empty() {
+            let leaf_findings = scan.map_or_else(
+                // Compat path (hand-built DecodedBody / no scan passed):
+                // scan here exactly like the pre-R9-21 redact_value did.
+                || engine.scan_with_context_analyzer(s, analyzer).findings,
+                |scan| {
+                    let idx = *leaf_index;
+                    *leaf_index += 1;
+                    scan.findings.get(idx).cloned().unwrap_or_default()
+                },
+            );
+            if !leaf_findings.is_empty() {
                 let redacted = match vault {
                     // Reversible (opt-in): unique vault token per span, the
                     // original value goes into the request-scoped vault.
-                    Some(vault) => apply_redaction_reversible(s, &found.findings, vault)
+                    Some(vault) => apply_redaction_reversible(s, &leaf_findings, vault)
                         .map_err(|e| format!("leaf redaction failed: {e}"))?,
                     // Irreversible (default, closed decision §9 #4).
                     None => {
-                        apply_redaction(s, &found.findings, opts).map_err(|e| format!("leaf redaction failed: {e}"))?
+                        apply_redaction(s, &leaf_findings, opts).map_err(|e| format!("leaf redaction failed: {e}"))?
                     }
                 };
                 *s = redacted;
@@ -328,12 +520,12 @@ fn redact_value(
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                redact_value(engine, item, opts, analyzer, vault)?;
+                splice_json_value(engine, item, opts, analyzer, vault, scan, leaf_index)?;
             }
         }
         serde_json::Value::Object(map) => {
             for (_k, v) in map {
-                redact_value(engine, v, opts, analyzer, vault)?;
+                splice_json_value(engine, v, opts, analyzer, vault, scan, leaf_index)?;
             }
         }
         _ => {}
@@ -612,7 +804,7 @@ mod tests {
     fn multipart_authoritative_scan_is_the_single_consistent_model() {
         // FIX F-1/P1-3 (attempt 2): `scan_multipart_regions` is the ONE pass
         // that feeds both the decision (multipart_scan_output) and the
-        // redaction (redact_body_with_multipart_scan). The allowlist applied
+        // redaction (redact_body_with_scan). The allowlist applied
         // in that pass is authoritative end to end: an allowlisted value is
         // neither flagged nor redacted; a non-allowlisted one is both.
         let engine = engine();
@@ -634,14 +826,14 @@ mod tests {
         let view = multipart_scan_output(&scan);
         assert_eq!(view.findings.len(), 1, "one cross-part-context finding");
         assert_eq!(view.action_overall, cerberus_engine::rule::Action::Redact);
-        let out = redact_body_with_multipart_scan(
+        let out = redact_body_with_scan(
             &engine,
             &body,
             &decoded,
             &RedactOptions::default(),
             &[],
             None,
-            Some(&scan),
+            AuthoredScan::Multipart(&scan),
         )
         .expect("redact");
         assert!(!String::from_utf8_lossy(&out).contains(&key));
@@ -655,14 +847,14 @@ mod tests {
         let scan_allow = scan_multipart_regions(&engine, &body, regions, std::slice::from_ref(&fp), Some(fp_key));
         let view_allow = multipart_scan_output(&scan_allow);
         assert!(view_allow.findings.is_empty(), "allowlisted value must not be flagged");
-        let out_allow = redact_body_with_multipart_scan(
+        let out_allow = redact_body_with_scan(
             &engine,
             &body,
             &decoded,
             &RedactOptions::default(),
             &[],
             None,
-            Some(&scan_allow),
+            AuthoredScan::Multipart(&scan_allow),
         )
         .expect("redact");
         assert!(

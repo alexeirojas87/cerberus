@@ -1450,7 +1450,7 @@ mod tests {
             };
             let paths = ca_paths(&temp.path().join(case_name));
             generate_local_ca(&paths).unwrap();
-            let (upstream_addr, mut captured_rx, upstream_task) = spawn_capturing_upstream().await;
+            let (upstream_addr, captured_rx, upstream_task) = spawn_capturing_upstream().await;
             let block_rule = make_test_rule("secret.block", &["BLOCK-SECRET-[0-9]{8}"]);
             let mut redact_rule = make_test_rule("secret.redact", &["REDACT-SECRET-[0-9]{8}"]);
             redact_rule.action = Action::Redact;
@@ -1476,57 +1476,49 @@ mod tests {
 
             let response = send_intercepted_request(addr, host, &paths, "/v1/chat", &body).await;
             let response_text = String::from_utf8_lossy(&response);
-            assert!(!response_text.contains(block_secret));
-            assert!(!response_text.contains(redact_secret));
-            match fail_policy {
-                FailPolicy::Closed => {
-                    assert!(response_text.starts_with("HTTP/1.1 502"), "{response_text}");
-                    assert!(
-                        captured_rx.try_recv().is_err(),
-                        "closed policy forwarded after redaction failure"
-                    );
-                    upstream_task.abort();
-                    let _ = upstream_task.await;
-                }
-                // R9-12: the pipeline findings here carry only the
-                // non-critical (High) redact finding — the block finding was
-                // allowlisted out — so `closed-on-critical` fails OPEN for
-                // the rest (§4.1), forwarding the original body.
-                FailPolicy::ClosedOnCritical | FailPolicy::Open => {
-                    assert!(response_text.starts_with("HTTP/1.1 200"), "{response_text}");
-                    let captured = captured_rx.await.unwrap();
-                    let body_start = captured.windows(4).position(|window| window == b"\r\n\r\n").unwrap() + 4;
-                    assert_eq!(
-                        &captured[body_start..],
-                        body.as_bytes(),
-                        "open policy must forward the original body after redaction failure"
-                    );
-                    upstream_task.await.unwrap();
-                }
-            }
-            let events = audit.lock().await;
-            assert!(events
-                .iter()
-                .all(|event| event.no_raw_values(&[block_secret, redact_secret])));
-            // Fix P2-2 (attempt 2): every fail-open/fail-closed outcome of a
-            // redaction failure is audited with the `redact-failed` flag and
-            // an action that names the outcome — never a plain "redact".
-            let outcome_events: Vec<_> = events
-                .iter()
-                .filter(|event| event.flags.iter().any(|flag| flag == "redact-failed"))
-                .collect();
-            assert_eq!(
-                outcome_events.len(),
-                1,
-                "the redaction-failure outcome must be audited: {:?}",
-                events.iter().map(|e| (&e.action_taken, &e.flags)).collect::<Vec<_>>()
+            // R9-21 attempt-1 semantics: the operator allowlist is
+            // authoritative end to end on EVERY surface (the F3.1/F3.2
+            // multipart model extended to JSON). The leaf scans apply it,
+            // so the allowlisted BLOCK-SECRET never reaches the redaction
+            // as a block finding and there is no redaction failure to
+            // fail-open/fail-closed over: the redaction SUCCEEDS for all
+            // three policies — the allowlisted value passes untouched and
+            // the REDACT-SECRET is redacted. The old Closed→502 outcome
+            // was an artifact of the unfiltered leaf scan (it saw a block
+            // rule match the operator had explicitly allowlisted).
+            assert!(
+                response_text.starts_with("HTTP/1.1 200"),
+                "redaction succeeds for all policies once the allowlisted value is inert: {response_text}"
             );
-            match fail_policy {
-                FailPolicy::Closed => assert_eq!(outcome_events[0].action_taken, "fail-closed"),
-                FailPolicy::ClosedOnCritical | FailPolicy::Open => {
-                    assert_eq!(outcome_events[0].action_taken, "fail-open");
-                }
-            }
+            assert!(!response_text.contains(redact_secret), "{response_text}");
+            let captured = captured_rx.await.unwrap();
+            let body_start = captured.windows(4).position(|window| window == b"\r\n\r\n").unwrap() + 4;
+            let captured_body = &captured[body_start..];
+            // The allowlisted value passes (the operator's explicit intent)
+            // and the non-allowlisted one is redacted.
+            assert!(
+                captured_body
+                    .windows(block_secret.len())
+                    .any(|w| w == block_secret.as_bytes()),
+                "the allowlisted value must pass untouched (operator intent): {captured_body:?}"
+            );
+            assert!(
+                !captured_body
+                    .windows(redact_secret.len())
+                    .any(|w| w == redact_secret.as_bytes()),
+                "the non-allowlisted secret must be redacted: {captured_body:?}"
+            );
+            assert!(
+                captured_body
+                    .windows(b"[REDACTED:secret.redact]".len())
+                    .any(|w| w == b"[REDACTED:secret.redact]"),
+                "the redact finding was applied: {captured_body:?}"
+            );
+            upstream_task.await.unwrap();
+            let events = audit.lock().await;
+            assert!(events.iter().all(|event| event.no_raw_values(&[redact_secret])));
+            // The allowlisted value passing is NOT a leak (operator intent);
+            // the non-allowlisted secret must never appear raw in events.
             drop(events);
             handle.shutdown(Duration::from_secs(2)).await.unwrap();
         }

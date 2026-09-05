@@ -2898,29 +2898,25 @@ async fn per_upstream_enforce_mode_overrides_global_shadow() {
 /// ── R9-12: critical redaction failure under the DEFAULT policy → 502 ──
 #[tokio::test]
 async fn closed_on_critical_rejects_redaction_failure_with_critical_findings() {
+    // R9-21 attempt-1 semantics: the operator allowlist is authoritative on
+    // EVERY surface, so the old failure mechanism (an allowlisted value's
+    // block finding reaching the unfiltered leaf scan) no longer exists.
+    // The redaction-failure branch is exercised through its new honest
+    // mechanism: a decision finding NO leaf can carry (a multiline redact
+    // match spanning two JSON leaves) fails the in-place redaction, and
+    // with a CRITICAL finding present the default policy rejects.
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
-    let block = format!("BLOCKSECRET1{}", "cccccccccc");
-    let redactable = format!("REDACTSECRET2{}", "dddddddddd");
-    let ctx = make_ctx_default_fail_policy(
-        &[
-            f3_block_rule(),
-            f3_redact_rule(cerberus_engine::rule::Severity::Critical),
-        ],
-        OperationMode::Enforce,
-        &format!("http://{mock_adj}"),
-    );
-    // Allowlist the BLOCK secret so the pipeline passes the block stage and
-    // reaches redaction, where the JSON leaf re-scan still fails on it
-    // (the same mechanism as the forward.rs redaction-failure test).
-    // R9-7: the allowlist carries the HMAC fingerprint, not the raw value.
-    ctx.config.write().unwrap().policy.allowlist = vec![harness_fingerprint(&block)];
+    let mut cross = f3_redact_rule(cerberus_engine::rule::Severity::Critical);
+    cross.patterns = vec![r"XSTART[\s\S]{0,60}XEND".to_string()];
+    cross.flag = "test.crossleaf".to_string();
+    let ctx = make_ctx_default_fail_policy(&[cross], OperationMode::Enforce, &format!("http://{mock_adj}"));
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let client = api_client();
 
     let r = client
         .post(format!("http://{addr}/v1/chat"))
         .header("content-type", "application/json")
-        .body(format!(r#"{{"content":"{block} {redactable}"}}"#))
+        .body(r#"{"a":"XSTART","b":"XEND"}"#)
         .send()
         .await
         .expect("critical redaction failure request");
@@ -2939,19 +2935,17 @@ async fn closed_on_critical_rejects_redaction_failure_with_critical_findings() {
 /// vs the previous `Closed` default) ──
 #[tokio::test]
 async fn closed_on_critical_forwards_original_for_non_critical_redaction_failure() {
+    // R9-21 attempt-1 mechanism (see the critical variant above): the
+    // fail-open branch is exercised through the unspliceable cross-leaf
+    // redact finding with a NON-critical severity → fail-open (§4.1).
     let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
-    let block = format!("BLOCKSECRET1{}", "eeeeeeeeee");
-    let redactable = format!("REDACTSECRET2{}", "ffffffffff");
-    let ctx = make_ctx_default_fail_policy(
-        &[f3_block_rule(), f3_redact_rule(cerberus_engine::rule::Severity::Low)],
-        OperationMode::Enforce,
-        &format!("http://{mock_adj}"),
-    );
-    // R9-7: the allowlist carries the HMAC fingerprint, not the raw value.
-    ctx.config.write().unwrap().policy.allowlist = vec![harness_fingerprint(&block)];
+    let mut cross = f3_redact_rule(cerberus_engine::rule::Severity::Low);
+    cross.patterns = vec![r"XSTART[\s\S]{0,60}XEND".to_string()];
+    cross.flag = "test.crossleaf".to_string();
+    let ctx = make_ctx_default_fail_policy(&[cross], OperationMode::Enforce, &format!("http://{mock_adj}"));
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let client = api_client();
-    let original = format!(r#"{{"content":"{block} {redactable}"}}"#);
+    let original = r#"{"a":"XSTART","b":"XEND"}"#.to_string();
 
     let r = client
         .post(format!("http://{addr}/v1/chat"))
@@ -3546,20 +3540,17 @@ async fn multipart_binary_claimed_part_under_scan_is_audited() {
 /// `redact` while the raw original went upstream.
 #[tokio::test]
 async fn closed_on_critical_fail_open_is_audited_honestly() {
+    // R9-21 attempt-1 semantics: the fail-open branch via the honest
+    // unspliceable cross-leaf mechanism (non-critical → fail-open).
     let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
-    let block = format!("BLOCKSECRET1{}", "eeeeeeeeee");
-    let redactable = format!("REDACTSECRET2{}", "ffffffffff");
-    let ctx = make_ctx_default_fail_policy(
-        &[f3_block_rule(), f3_redact_rule(cerberus_engine::rule::Severity::Low)],
-        OperationMode::Enforce,
-        &format!("http://{mock_adj}"),
-    );
+    let mut cross = f3_redact_rule(cerberus_engine::rule::Severity::Low);
+    cross.patterns = vec![r"XSTART[\s\S]{0,60}XEND".to_string()];
+    cross.flag = "test.crossleaf".to_string();
+    let ctx = make_ctx_default_fail_policy(&[cross], OperationMode::Enforce, &format!("http://{mock_adj}"));
     let events = ctx.api.events.clone();
-    // R9-7: the allowlist carries the HMAC fingerprint, not the raw value.
-    ctx.config.write().unwrap().policy.allowlist = vec![harness_fingerprint(&block)];
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let client = api_client();
-    let original = format!(r#"{{"content":"{block} {redactable}"}}"#);
+    let original = r#"{"a":"XSTART","b":"XEND"}"#.to_string();
 
     let r = client
         .post(format!("http://{addr}/v1/chat"))
@@ -3585,8 +3576,18 @@ async fn closed_on_critical_fail_open_is_audited_honestly() {
     assert_eq!(
         failure_events.len(),
         1,
-        "exactly one honest fail-open event: {:?}",
-        events.iter().map(|e| (&e.action_taken, &e.flags)).collect::<Vec<_>>()
+        "exactly one honest fail-open event: {:#?}",
+        failure_events
+            .iter()
+            .map(|e| (
+                &e.action_taken,
+                &e.flags,
+                &e.hashed_values,
+                &e.provider,
+                &e.ts_unix,
+                &e.tool
+            ))
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         failure_events[0].action_taken, "fail-open",
@@ -3601,27 +3602,22 @@ async fn closed_on_critical_fail_open_is_audited_honestly() {
 /// visible without reading daemon logs.
 #[tokio::test]
 async fn closed_on_critical_reject_is_audited_honestly() {
+    // R9-21 attempt-1 semantics: the fail-closed branch via the honest
+    // unspliceable cross-leaf mechanism (critical → reject under the
+    // default policy).
     let (mock_adj, mock_handle) = spawn_mock_upstream().await;
-    let block = format!("BLOCKSECRET1{}", "cccccccccc");
-    let redactable = format!("REDACTSECRET2{}", "dddddddddd");
-    let ctx = make_ctx_default_fail_policy(
-        &[
-            f3_block_rule(),
-            f3_redact_rule(cerberus_engine::rule::Severity::Critical),
-        ],
-        OperationMode::Enforce,
-        &format!("http://{mock_adj}"),
-    );
+    let mut cross = f3_redact_rule(cerberus_engine::rule::Severity::Critical);
+    cross.patterns = vec![r"XSTART[\s\S]{0,60}XEND".to_string()];
+    cross.flag = "test.crossleaf".to_string();
+    let ctx = make_ctx_default_fail_policy(&[cross], OperationMode::Enforce, &format!("http://{mock_adj}"));
     let events = ctx.api.events.clone();
-    // R9-7: the allowlist carries the HMAC fingerprint, not the raw value.
-    ctx.config.write().unwrap().policy.allowlist = vec![harness_fingerprint(&block)];
     let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
     let client = api_client();
 
     let r = client
         .post(format!("http://{addr}/v1/chat"))
         .header("content-type", "application/json")
-        .body(format!(r#"{{"content":"{block} {redactable}"}}"#))
+        .body(r#"{"a":"XSTART","b":"XEND"}"#)
         .send()
         .await
         .expect("fail-closed audit request");
@@ -4080,4 +4076,123 @@ async fn r9_7_allowlist_fingerprints_end_to_end() {
 
     mock_handle.abort();
     std::fs::remove_file(&config_path).ok();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// R9-21 (F9.A): JSON decision/redaction consistency — ONE authoritative
+// per-leaf scan feeding both the pipeline decision and the redaction.
+// Pipeline-layer tests (spawn_proxy → proxy_handler), replaying the
+// f32-attempt2 adv5b/adv5 shapes: a contextKeyword present ONLY in a JSON
+// KEY NAME, on a DIFFERENT LINE from the match (so the flat same-line
+// window misses it while the full-body analyzer does not).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// adv5b replay, block shape: before the fix the flat scan missed the
+/// key-name keyword (same-line window) while the leaf re-scan fired it —
+/// the decision saw NOTHING and the body with the critical secret was
+/// forwarded raw. The unified decision view must block.
+#[tokio::test]
+async fn r921_keyword_in_json_key_blocks_via_pipeline() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_context_block_rule("harmlessword=")],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = api_client();
+    let block = format!("BLOCKSECRET1{}", "cccccccccccc");
+    // Pretty-printed: the keyword lives on its OWN line (a key name), the
+    // secret on another — the flat same-line window cannot connect them.
+    let body = format!("{{\n  \"harmlessword=\": 1,\n  \"prompt\": \"{block}\"\n}}");
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("r921 block request");
+    assert_eq!(
+        r.status(),
+        403,
+        "the block rule must fire in the PIPELINE decision via the key-name keyword (got {})",
+        r.status()
+    );
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "closed behavior: nothing may be forwarded when the block rule fires"
+    );
+    mock_handle.abort();
+}
+
+/// adv5b replay, redact shape: the key-name keyword validates a leaf match
+/// through the full-body analyzer; the redaction splices the SAME leaf
+/// findings the decision saw.
+#[tokio::test]
+async fn r921_keyword_in_json_key_redacts_via_pipeline() {
+    let (mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_default_fail_policy(
+        &[f3_context_redact_rule("harmlessword=")],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+    );
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = api_client();
+    let secret = format!("CTXSECRET-{}", "dddddddddddd");
+    let body = format!("{{\n  \"harmlessword=\": 1,\n  \"prompt\": \"{secret}\"\n}}");
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("r921 redact request");
+    assert_eq!(r.status(), 200, "redact shape: allowed upstream: {r:?}");
+    let forwarded = String::from_utf8_lossy(&captured.lock().unwrap().clone()).into_owned();
+    assert!(
+        !forwarded.contains(&secret),
+        "the context-validated secret must be redacted: {forwarded}"
+    );
+    assert!(
+        forwarded.contains("[REDACTED:test.ctxredact]"),
+        "the redaction token must be applied: {forwarded}"
+    );
+    mock_handle.abort();
+}
+
+/// A decision finding NO leaf can carry (a multiline redact match spanning
+/// two JSON leaves) cannot be redacted in place without corrupting the
+/// schema — the redaction must FAIL CLOSED (Closed policy → 502, nothing
+/// forwarded), never silently forward it.
+#[tokio::test]
+async fn r921_cross_leaf_redact_finding_fails_closed() {
+    let (_mock_adj, mock_handle, captured) = spawn_mock_upstream_capture().await;
+    let mut cross = f3_redact_rule(cerberus_engine::rule::Severity::High);
+    cross.patterns = vec![r"XSTART[\s\S]{0,60}XEND".to_string()];
+    let ctx = make_ctx(vec![cross], OperationMode::Enforce);
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let client = api_client();
+    // The match spans two leaves; the flat-text scan sees it, no leaf does.
+    let body = r#"{"a":"XSTART","b":"XEND"}"#;
+
+    let r = client
+        .post(format!("http://{addr}/v1/chat"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("r921 cross-leaf request");
+    assert_eq!(
+        r.status(),
+        502,
+        "the unspliceable redact finding must fail closed (got {})",
+        r.status()
+    );
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "fail-closed: nothing may be forwarded when the redaction cannot be applied in place"
+    );
+    mock_handle.abort();
 }
