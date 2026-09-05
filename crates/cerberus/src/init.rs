@@ -495,6 +495,9 @@ mod tests {
             std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).expect("chmod 644");
         }
 
+        // `report` is asserted in the unix block below (mode-truth check); on
+        // non-unix targets that use is cfg'd out (clippy/rustc -D warnings).
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let report = run_init(dir.to_str().expect("utf8")).expect("re-init");
 
         let yaml = std::fs::read_to_string(&config_path).expect("rewritten config");

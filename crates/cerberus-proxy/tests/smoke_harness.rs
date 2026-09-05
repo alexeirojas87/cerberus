@@ -1561,6 +1561,62 @@ async fn upstream_add_list_delete() {
 }
 
 #[tokio::test]
+async fn f5_custom_provider_routes_to_its_upstream_and_default_is_unchanged() {
+    // F5-route (r9-remediation): after `POST /api/upstreams {name}`, the
+    // advertised URL `/{name}/...` must reach THAT upstream (prefix
+    // stripped) — not 503 and not a silent misroute to the default
+    // upstream. F5-default: before any custom provider exists (and after
+    // the add) default routing is unchanged.
+    let (def_addr, def_handle, def_capture) = spawn_mock_upstream_capture().await;
+    let (proj_addr, proj_handle, proj_capture) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_with_url(Vec::new(), OperationMode::Enforce, &format!("http://{def_addr}"));
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = api_client();
+
+    // F5-default (GIVEN no custom provider): GET /test → default upstream.
+    client.get(format!("{base}/test")).send().await.expect("default get");
+    let hit = String::from_utf8_lossy(&def_capture.lock().unwrap()).to_string();
+    assert!(hit.starts_with("GET /test"), "default routing unchanged: {hit}");
+
+    // Register the custom provider — the same mutation the
+    // `cerberus add-provider` CLI performs via POST /api/upstreams.
+    let add = client
+        .post(format!("{base}/api/upstreams"))
+        .json(&serde_json::json!({ "name": "myproj", "url": format!("http://{proj_addr}") }))
+        .send()
+        .await
+        .expect("add upstream");
+    assert_eq!(add.status(), 200, "add must succeed");
+
+    // F5-route: GET /myproj/v1/models reaches the myproj upstream with the
+    // prefix stripped — never the default (no silent misroute), never 503.
+    let resp = client
+        .get(format!("{base}/myproj/v1/models"))
+        .send()
+        .await
+        .expect("routed get");
+    assert_eq!(resp.status(), 200, "custom route must reach its upstream");
+    let proj_hit = String::from_utf8_lossy(&proj_capture.lock().unwrap()).to_string();
+    assert!(
+        proj_hit.starts_with("GET /v1/models"),
+        "right upstream, prefix stripped: {proj_hit}"
+    );
+    let def_hit = String::from_utf8_lossy(&def_capture.lock().unwrap()).to_string();
+    assert!(!def_hit.contains("/myproj"), "no silent misroute to default: {def_hit}");
+
+    // F5-default (after the add): plain paths still route to default.
+    client.get(format!("{base}/test")).send().await.expect("default get 2");
+    let def_hit2 = String::from_utf8_lossy(&def_capture.lock().unwrap()).to_string();
+    assert!(
+        def_hit2.starts_with("GET /test"),
+        "default routing still unchanged: {def_hit2}"
+    );
+    def_handle.abort();
+    proj_handle.abort();
+}
+
+#[tokio::test]
 async fn upstream_requires_auth_when_token_set() {
     // Review v6 F6, requirement 5: upstream CRUD is part of the control plane
     // and MUST require auth when an admin token is configured.
@@ -2519,6 +2575,68 @@ async fn test_break_glass_wrong_provider_scope_rejected() {
         1,
         "token not consumed on scope mismatch"
     );
+    mock_handle.abort();
+}
+
+#[tokio::test]
+async fn f2_break_glass_header_without_admin_token_grants_no_bypass() {
+    // F2-no-bypass (r9-remediation): the exact header the allow-once CLI
+    // now prints (`X-Cerberus-Bypass: break-glass:<nonce>`) grants NO
+    // bypass when the request lacks `X-Cerberus-Admin-Token`: redemption
+    // must fail, the nonce must NOT be consumed from the ledger, and plain
+    // traffic must be unaffected. (F2-once / F2-replay are pinned with the
+    // admin token by `test_break_glass_one_shot_end_to_end` steps 2-5, 7.)
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let admin = "r9-test-admin-token-0123456789abcdef";
+    let ctx = make_ctx_r9(
+        &[block_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+        Some(admin),
+        false,
+    );
+    let ctx_clone = std::sync::Arc::clone(&ctx);
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = api_client();
+
+    // Issue a valid nonce (authenticated issue, as the CLI does).
+    let issued = client
+        .post(format!("{base}/api/break-glass"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-admin-token", admin)
+        .body(r#"{"reason":"f2 no-bypass","ttl_secs":60}"#)
+        .send()
+        .await
+        .expect("issue");
+    assert_eq!(issued.status(), 200);
+    let nonce = issued.json::<serde_json::Value>().await.expect("json")["nonce"]
+        .as_str()
+        .expect("nonce")
+        .to_string();
+
+    // The printed header WITHOUT the admin token → no bypass (403) and the
+    // nonce is NOT consumed (still redeemable later by an operator).
+    let refused = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-bypass", format!("break-glass:{nonce}"))
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("no admin token");
+    assert_eq!(refused.status(), 403, "no admin token → no bypass");
+    assert_eq!(ctx_clone.api.break_glass.len(), 1, "nonce NOT consumed");
+
+    // Plain traffic is unaffected: the block still applies as usual.
+    let plain = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("plain");
+    assert_eq!(plain.status(), 403, "plain traffic unchanged");
     mock_handle.abort();
 }
 
