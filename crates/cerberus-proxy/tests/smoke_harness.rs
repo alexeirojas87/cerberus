@@ -1561,6 +1561,62 @@ async fn upstream_add_list_delete() {
 }
 
 #[tokio::test]
+async fn f5_custom_provider_routes_to_its_upstream_and_default_is_unchanged() {
+    // F5-route (r9-remediation): after `POST /api/upstreams {name}`, the
+    // advertised URL `/{name}/...` must reach THAT upstream (prefix
+    // stripped) — not 503 and not a silent misroute to the default
+    // upstream. F5-default: before any custom provider exists (and after
+    // the add) default routing is unchanged.
+    let (def_addr, def_handle, def_capture) = spawn_mock_upstream_capture().await;
+    let (proj_addr, proj_handle, proj_capture) = spawn_mock_upstream_capture().await;
+    let ctx = make_ctx_with_url(Vec::new(), OperationMode::Enforce, &format!("http://{def_addr}"));
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = api_client();
+
+    // F5-default (GIVEN no custom provider): GET /test → default upstream.
+    client.get(format!("{base}/test")).send().await.expect("default get");
+    let hit = String::from_utf8_lossy(&def_capture.lock().unwrap()).to_string();
+    assert!(hit.starts_with("GET /test"), "default routing unchanged: {hit}");
+
+    // Register the custom provider — the same mutation the
+    // `cerberus add-provider` CLI performs via POST /api/upstreams.
+    let add = client
+        .post(format!("{base}/api/upstreams"))
+        .json(&serde_json::json!({ "name": "myproj", "url": format!("http://{proj_addr}") }))
+        .send()
+        .await
+        .expect("add upstream");
+    assert_eq!(add.status(), 200, "add must succeed");
+
+    // F5-route: GET /myproj/v1/models reaches the myproj upstream with the
+    // prefix stripped — never the default (no silent misroute), never 503.
+    let resp = client
+        .get(format!("{base}/myproj/v1/models"))
+        .send()
+        .await
+        .expect("routed get");
+    assert_eq!(resp.status(), 200, "custom route must reach its upstream");
+    let proj_hit = String::from_utf8_lossy(&proj_capture.lock().unwrap()).to_string();
+    assert!(
+        proj_hit.starts_with("GET /v1/models"),
+        "right upstream, prefix stripped: {proj_hit}"
+    );
+    let def_hit = String::from_utf8_lossy(&def_capture.lock().unwrap()).to_string();
+    assert!(!def_hit.contains("/myproj"), "no silent misroute to default: {def_hit}");
+
+    // F5-default (after the add): plain paths still route to default.
+    client.get(format!("{base}/test")).send().await.expect("default get 2");
+    let def_hit2 = String::from_utf8_lossy(&def_capture.lock().unwrap()).to_string();
+    assert!(
+        def_hit2.starts_with("GET /test"),
+        "default routing still unchanged: {def_hit2}"
+    );
+    def_handle.abort();
+    proj_handle.abort();
+}
+
+#[tokio::test]
 async fn upstream_requires_auth_when_token_set() {
     // Review v6 F6, requirement 5: upstream CRUD is part of the control plane
     // and MUST require auth when an admin token is configured.
