@@ -75,8 +75,25 @@ fi
 }
 command -v gh >/dev/null 2>&1 || { echo "FAIL: gh CLI required" >&2; exit 1; }
 
+# ── F8 attempt-2 fix (F8-V-4) ─────────────────────────────────────────────────
+# The token NEVER rides the clone URL (attempt 1 embedded it as
+# `x-access-token:<TOKEN>@github.com/...` — git redacts transport errors
+# today, but any future `set -x`/verbose transport logging would leak it).
+# Instead: an Authorization http.extraheader (the same mechanism
+# actions/checkout uses), tracing hard-disabled around every token touch,
+# and GH_TOKEN for the gh-mediated PR call.
+set +x   # GUARD: no xtrace while the token is in scope (this script never enables it)
+GIT_TERMINAL_PROMPT=0
+export GIT_TERMINAL_PROMPT
+GH_TOKEN="$TAP_PR_TOKEN"
+export GH_TOKEN
+
 TAP_DIR="$(mktemp -d)/tap"
-git clone --depth 1 "https://x-access-token:${TAP_PR_TOKEN}@github.com/${TAP_REPO}" "$TAP_DIR" \
+AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TAP_PR_TOKEN" | base64 | tr -d '\n')"
+git clone --depth 1 \
+  -c "http.https://github.com/.extraheader=${AUTH_HEADER}" \
+  -c credential.helper= \
+  "https://github.com/${TAP_REPO}" "$TAP_DIR" \
   || { echo "FAIL: could not clone tap repo $TAP_REPO" >&2; exit 1; }
 
 mkdir -p "$TAP_DIR/Formula"
@@ -95,7 +112,9 @@ git -c user.name="cerberus-release-bot" -c user.email="release@cerberus.dev" \
 
 Source: ${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-alexeirojas87/cerberus} release v${VERSION}
 Sums: SHA256SUMS of the published release artifacts (verified before generation)."
-git push -q origin "$BRANCH" || { echo "FAIL: push to tap branch failed" >&2; exit 1; }
+git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push -q origin "$BRANCH" \
+  || { echo "FAIL: push to tap branch failed" >&2; exit 1; }
+unset AUTH_HEADER   # token credential out of scope before the gh call
 
 gh pr create --repo "$TAP_REPO" \
   --head "$BRANCH" --base main \
