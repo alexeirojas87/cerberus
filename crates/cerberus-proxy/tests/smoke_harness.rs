@@ -2523,6 +2523,68 @@ async fn test_break_glass_wrong_provider_scope_rejected() {
 }
 
 #[tokio::test]
+async fn f2_break_glass_header_without_admin_token_grants_no_bypass() {
+    // F2-no-bypass (r9-remediation): the exact header the allow-once CLI
+    // now prints (`X-Cerberus-Bypass: break-glass:<nonce>`) grants NO
+    // bypass when the request lacks `X-Cerberus-Admin-Token`: redemption
+    // must fail, the nonce must NOT be consumed from the ledger, and plain
+    // traffic must be unaffected. (F2-once / F2-replay are pinned with the
+    // admin token by `test_break_glass_one_shot_end_to_end` steps 2-5, 7.)
+    let (mock_adj, mock_handle) = spawn_mock_upstream().await;
+    let admin = "r9-test-admin-token-0123456789abcdef";
+    let ctx = make_ctx_r9(
+        &[block_rule()],
+        OperationMode::Enforce,
+        &format!("http://{mock_adj}"),
+        Some(admin),
+        false,
+    );
+    let ctx_clone = std::sync::Arc::clone(&ctx);
+    let (addr, _handle) = spawn_proxy(local_addr(0), ctx).await.expect("spawn");
+    let base = format!("http://{addr}");
+    let client = api_client();
+
+    // Issue a valid nonce (authenticated issue, as the CLI does).
+    let issued = client
+        .post(format!("{base}/api/break-glass"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-admin-token", admin)
+        .body(r#"{"reason":"f2 no-bypass","ttl_secs":60}"#)
+        .send()
+        .await
+        .expect("issue");
+    assert_eq!(issued.status(), 200);
+    let nonce = issued.json::<serde_json::Value>().await.expect("json")["nonce"]
+        .as_str()
+        .expect("nonce")
+        .to_string();
+
+    // The printed header WITHOUT the admin token → no bypass (403) and the
+    // nonce is NOT consumed (still redeemable later by an operator).
+    let refused = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .header("x-cerberus-bypass", format!("break-glass:{nonce}"))
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("no admin token");
+    assert_eq!(refused.status(), 403, "no admin token → no bypass");
+    assert_eq!(ctx_clone.api.break_glass.len(), 1, "nonce NOT consumed");
+
+    // Plain traffic is unaffected: the block still applies as usual.
+    let plain = client
+        .post(format!("{base}/test"))
+        .header("content-type", "application/json")
+        .body(BLOCK_BODY)
+        .send()
+        .await
+        .expect("plain");
+    assert_eq!(plain.status(), 403, "plain traffic unchanged");
+    mock_handle.abort();
+}
+
+#[tokio::test]
 async fn test_reversible_vault_round_trip_request_scoped() {
     // F2.2 (R9-8): with `reversible_redaction` (opt-in) the upstream receives
     // a vault token (never the raw secret) and the response restores the
