@@ -35,4 +35,4 @@ Revert 2b54478 / c3f1dc9 / 1cda155 + this pack: tools/release/bump_version.sh + 
 
 ## Size note
 
-Net tree diff vs 88657d0: ~176 ins + 5 del = **181 lines before this pack (~208 total) vs 180 cap → size:exception recommended**. The design-mandated NEW harness (111 lines) is the F3/F11 runtime-evidence host; §8B pack + design-mandated inline F-justification comments add the rest. No golfing performed (no comments/tests/docs deleted to fit).
+Net tree diff vs 88657d0: 214 ins + 5 del = **181 lines before this pack (219 total) vs 180 cap → size:exception recommended**. The design-mandated NEW harness (135 lines) is the F3/F11 runtime-evidence host; §8B pack + design-mandated inline F-justification comments add the rest. No golfing performed (no comments/tests/docs deleted to fit).
