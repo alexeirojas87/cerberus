@@ -165,21 +165,26 @@ fn assert_plan_budgets(p50_ms: f64, p99_ms: f64, name: &str, plan_budget_ms: f64
         );
     } else {
         // CI runners shift even the median (owner-observed p50 1.389ms against
-        // the strict 1ms plan budget on a loaded macos runner), so on CI the
-        // p50 uses the contention bound; local release keeps it strict.
+        // the strict 1ms plan budget on a loaded macos runner), so on CI both
+        // statistics use the contention bound; local release keeps p50 strict
+        // and p99 at the documented 2x CI tolerance.
         let p50_budget = if running_on_ci() {
             plan_budget_ms * CI_CONTENTION_TOLERANCE
         } else {
             plan_budget_ms
+        };
+        let p99_budget = if running_on_ci() {
+            plan_budget_ms * CI_CONTENTION_TOLERANCE
+        } else {
+            plan_budget_ms * PLAN_CI_TOLERANCE
         };
         assert!(
             p50_ms < p50_budget,
             "{name}: release p50 {p50_ms:.3}ms exceeds plan budget {p50_budget}ms"
         );
         assert!(
-            p99_ms < plan_budget_ms * PLAN_CI_TOLERANCE,
-            "{name}: release p99 {p99_ms:.3}ms exceeds the documented CI-contention bound {}ms",
-            plan_budget_ms * PLAN_CI_TOLERANCE
+            p99_ms < p99_budget,
+            "{name}: release p99 {p99_ms:.3}ms exceeds the CI-contention bound {p99_budget}ms"
         );
     }
 }

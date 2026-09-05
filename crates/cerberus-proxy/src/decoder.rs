@@ -423,7 +423,7 @@ fn find_delimiter(body: &[u8], delim: &[u8], from: usize) -> Option<usize> {
 /// | `--` then EOF                     | VALID close (documented leniency) |
 /// | LWSP* then EOF (open)             | INVALID → whole-text over-scan fallback (fail-safe, never under-scan) |
 /// | any other byte                    | INVALID → payload text, keep scanning |
-fn delimiter_suffix_is_valid(body: &[u8], p: usize) -> bool {
+const fn delimiter_suffix_is_valid(body: &[u8], p: usize) -> bool {
     if p >= body.len() {
         // Open delimiter at EOF (no `--`, no line break): not a delimiter
         // line. The whole-text fallback over-scans, so nothing escapes.
