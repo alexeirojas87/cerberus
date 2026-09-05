@@ -173,8 +173,13 @@ pub(crate) async fn allow_once(reason: Option<String>) -> Result<String, String>
         .and_then(serde_json::Value::as_u64)
         .unwrap_or_default();
     let scope = resp.get("scope").and_then(|s| s.as_str()).unwrap_or("global");
+    // F2 (r9-remediation): the printed header must be the EXACT redeemable
+    // form — the data plane redeems ONLY `break-glass:<nonce>` via the
+    // ledger (proxy.rs BREAK_GLASS_PREFIX); a bare nonce falls into the
+    // replayable Legacy arm. The admin-token requirement is stated
+    // explicitly: without `X-Cerberus-Admin-Token` the bypass is refused.
     Ok(format!(
-        "break-glass issued: the NEXT matching send within {ttl}s is allowed (scope: {scope}).\nSend it with the header `X-Cerberus-Bypass: {nonce}`.\nThe reason is audited (hash only, never stored raw)."
+        "break-glass issued: the NEXT matching send within {ttl}s is allowed (scope: {scope}).\nSend it with the exact header `X-Cerberus-Bypass: break-glass:{nonce}`.\nThat request must also carry the header `X-Cerberus-Admin-Token` (the admin token of this Cerberus) — without it the bypass is refused.\nThe reason is audited (hash only, never stored raw)."
     ))
 }
 

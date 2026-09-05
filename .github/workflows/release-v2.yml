@@ -84,7 +84,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_os: linux
             artifact_arch: x86_64
-          - runner: ubuntu-latest
+          # F9: native ARM runner — no cross toolchain/linker/CC needed
+          # (cross toolchain is the documented fallback only).
+          - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact_os: linux
             artifact_arch: aarch64
@@ -247,6 +249,13 @@ jobs:
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
       GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
     steps:
+      # F8: build_deb.sh + `git archive HEAD` need the repo checked out at
+      # the tag; this job previously had NO checkout step at all.
+      - name: Checkout the TAG (build_deb.sh + git archive HEAD need the repo)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
       - name: Install packaging tools
         run: |
           sudo apt-get update -q

@@ -1521,6 +1521,21 @@ async fn handle_get_upstreams(ctx: &ApiContext) -> Result<Response<Full<Bytes>>,
     Ok(json_response(StatusCode::OK, format!("[{joined}]")))
 }
 
+/// F5 (r9-remediation): `add-provider` advertises `/{name}` as a local
+/// routable path, so the name must be a single path segment. Returns the
+/// 400 error message, or `None` when the shape is valid.
+fn upstream_name_shape_error(name: &str) -> Option<&'static str> {
+    if name.contains('/') {
+        Some("provider name must be a single path segment (no '/')")
+    } else if name.chars().any(char::is_whitespace) {
+        Some("provider name must not contain whitespace")
+    } else if name.contains('.') {
+        Some("provider name must not contain '.'")
+    } else {
+        None
+    }
+}
+
 /// Add/update an upstream. Hot mutation + YAML persistence (same policy as
 /// `PUT /api/config`, review v6 F6).
 async fn handle_post_upstreams(ctx: &ApiContext, body: hyper::body::Incoming) -> Result<Response<Full<Bytes>>, String> {
@@ -1551,7 +1566,15 @@ async fn handle_post_upstreams(ctx: &ApiContext, body: hyper::body::Incoming) ->
         return Ok(json_response(StatusCode::BAD_REQUEST, r#"{"error":"missing 'name'"}"#));
     }
     if payload.url.is_empty() {
-        return Ok(json_response(StatusCode::BAD_REQUEST, r#"{"error":"missing 'url'"}"#));
+        return Ok(json_response(StatusCode::BAD_REQUEST, r#"{"error":"missing 'url'}"#));
+    }
+    // F5 (r9-remediation): the CLI advertises `/{name}` as a routable path,
+    // so validate the shape BEFORE any mutation.
+    if let Some(msg) = upstream_name_shape_error(&payload.name) {
+        return Ok(json_response(
+            StatusCode::BAD_REQUEST,
+            &format!(r#"{{"error":"{msg}"}}"#),
+        ));
     }
 
     // Same transaction as PUT /api/config (review v6.1): candidate →
@@ -1564,7 +1587,10 @@ async fn handle_post_upstreams(ctx: &ApiContext, body: hyper::body::Incoming) ->
             payload.name.clone(),
             UpstreamConfig {
                 url: payload.url.clone(),
-                path_prefix: None,
+                // F5 (r9-remediation): register `/{name}` so the advertised
+                // provider URL is actually routable (resolve_route
+                // priority-1, longest-match first — proxy.rs:1243).
+                path_prefix: Some(format!("/{}", payload.name)),
                 auth_header: payload.auth_header.unwrap_or_else(|| "authorization".to_string()),
                 mode: payload.mode,
                 expected_auth: None,
@@ -2863,6 +2889,9 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod fixture");
         }
 
+        // `path` is reused by the unix mode-check below; on non-unix targets that
+        // use is cfg'd out and the clone is technically redundant (clippy 1.98).
+        #[allow(clippy::redundant_clone)]
         let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default()))).with_config_path(path.clone());
         persist_config(&ctx, &ProxyConfig::default()).expect("persist");
 
@@ -2895,6 +2924,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("tmpdir");
         let path = dir.join("config.yaml");
+        // `path` is reused by the unix mode-check below; on non-unix targets that
+        // use is cfg'd out and the clone is technically redundant (clippy 1.98).
+        #[allow(clippy::redundant_clone)]
         let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default()))).with_config_path(path.clone());
         persist_config(&ctx, &ProxyConfig::default()).expect("persist");
         #[cfg(unix)]
@@ -3398,6 +3430,25 @@ mod tests {
 
     fn f6_body(resp: Response<Full<Bytes>>) -> String {
         String::from_utf8_lossy(&resp.into_body().into_inner().expect("body")).into_owned()
+    }
+
+    // ── F5 (r9-remediation): add-provider name shape ──
+
+    #[test]
+    fn f5_provider_name_shape_rules_reject_non_segment_names() {
+        // F5: the CLI advertises `/{name}` as a routable path
+        // (provider_url), so the name must be a single path segment: no
+        // `/`, no whitespace, no `.` (which also blocks `..`). Valid
+        // segment names are accepted.
+        assert!(upstream_name_shape_error("myproj").is_none());
+        assert!(upstream_name_shape_error("my-proj_2").is_none());
+        assert_eq!(
+            upstream_name_shape_error("a/b"),
+            Some("provider name must be a single path segment (no '/')")
+        );
+        assert!(upstream_name_shape_error("a b").is_some(), "whitespace rejected");
+        assert!(upstream_name_shape_error("..").is_some(), "dot-dot rejected");
+        assert!(upstream_name_shape_error("v1.2").is_some(), "dots rejected");
     }
 
     #[test]
