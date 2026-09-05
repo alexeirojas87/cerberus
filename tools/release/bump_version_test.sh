@@ -101,10 +101,34 @@ f3_failure() {
   rm -rf "$dir"
 }
 
+# f11_case <label> <mode> <cargo-error-substring> [VAR=val ...] — the script
+# must fail LOUDLY: cargo's REAL error text reaches stderr (the old code
+# swallowed it with >/dev/null 2>&1) and the snapshot restore still runs.
+f11_case() {
+  local label="$1" mode="$2" errtext="$3"; shift 3
+  local dir toml lock ts ls; dir="$(make_fixture "$mode")"
+  toml="$dir/crates/cerberus/Cargo.toml"; lock="$dir/Cargo.lock"
+  ts="$(sha "$toml")"; ls="$(sha "$lock")"
+  run_dry "$dir" "$@"
+  needne "$label: dry-run exits nonzero" "$RC"
+  have "$errtext" "$(cat "$ERRFILE")" \
+    "$label: cargo's real error text visible on stderr (not swallowed)"
+  need "$label: TOML byte-identical after failure" "$(sha "$toml")" "$ts"
+  need "$label: Cargo.lock byte-identical after failure" "$(sha "$lock")" "$ls"
+  rm -rf "$dir"
+}
+
+f11_error() { f11_case "f11-error" broken "zz-r9f11-missing"; }
+f11_cold() {
+  f11_case "f11-cold" regdep "no matching package named" "CARGO_HOME=$(mktemp -d)"
+}
+
 main() {
   [ -f "$SCRIPT" ] || { echo "FAIL: script under test missing: $SCRIPT" >&2; exit 1; }
   f3_success
   f3_failure
+  f11_error
+  f11_cold
   printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
   [ "$FAIL" -eq 0 ]
 }

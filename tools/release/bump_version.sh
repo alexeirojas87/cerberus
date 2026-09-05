@@ -72,7 +72,9 @@ grep -q "^version = \"$NEW_VERSION\"" "$TOML" \
   || { echo "FAIL: Cargo.toml rewrite did not apply" >&2; exit 1; }
 
 # 2. Cargo.lock refresh (workspace member — offline, no network needed).
-cargo metadata --format-version 1 --offline >/dev/null 2>&1 \
+#    F11: stdout only goes to /dev/null; cargo's stderr stays visible so a
+#    failed refresh (cold registry, resolution error) shows the real cause.
+cargo metadata --format-version 1 --offline >/dev/null \
   || { echo "FAIL: cargo metadata could not refresh Cargo.lock" >&2; exit 1; }
 
 LOCK_VERSION="$(awk -v pkg='name = "cerberus"' '

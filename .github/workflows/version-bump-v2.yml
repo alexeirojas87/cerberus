@@ -60,6 +60,11 @@ jobs:
           ref: ${{ env.CERBERUS_DEFAULT_BRANCH }}
           fetch-depth: 0
 
+      # F11 (Req C5): cold registry — fetch dependencies ONLINE first so the
+      # script's `cargo metadata --offline` lockfile refresh can resolve.
+      - name: Fetch dependencies (cold-registry pre-fetch for offline refresh)
+        run: cargo fetch
+
       - name: Bump version (Cargo.toml + Cargo.lock)
         run: |
           ./tools/release/bump_version.sh "${{ inputs.version }}"
