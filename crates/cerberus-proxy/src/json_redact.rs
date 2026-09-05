@@ -208,10 +208,14 @@ pub fn scan_multipart_regions(
 #[must_use]
 pub fn multipart_scan_output(scan: &MultipartScan) -> ScanOutput {
     let mut findings: Vec<Finding> = Vec::new();
-    let mut seen: std::collections::HashSet<(String, usize, usize)> = std::collections::HashSet::new();
-    for region in &scan.findings {
+    // F7 fix: the dedup key includes the REGION INDEX (mirroring the
+    // authoritative scan at :176-178) — offsets are region-relative, so
+    // identical (flag, start, end) in two regions are two real matches.
+    // Within one region the dedup still holds (no double-counting).
+    let mut seen: std::collections::HashSet<(String, usize, usize, usize)> = std::collections::HashSet::new();
+    for (index, region) in scan.findings.iter().enumerate() {
         for f in region {
-            if seen.insert((f.flag.clone(), f.start, f.end)) {
+            if seen.insert((f.flag.clone(), index, f.start, f.end)) {
                 findings.push(f.clone());
             }
         }
@@ -979,5 +983,62 @@ mod tests {
             .unwrap();
         let bin_start = bin_pos + b"audio/wav\r\n\r\n".len();
         assert_eq!(&restored[bin_start..bin_start + 64], &binary[..]);
+    }
+
+    // ── F7 (r9-remediation): the output-view dedup key carries the region ──
+
+    fn f7_finding(flag: &str, start: usize, end: usize) -> Finding {
+        Finding {
+            flag: flag.to_string(),
+            category: cerberus_engine::rule::Category::Secrets,
+            severity: cerberus_engine::rule::Severity::High,
+            action: cerberus_engine::rule::Action::Redact,
+            start,
+            end,
+            hashed_value: "sha256:test".to_string(),
+        }
+    }
+
+    fn f7_region(start: usize, end: usize) -> TextRegion {
+        TextRegion {
+            start,
+            end,
+            kind: crate::decoder::RegionKind::Payload,
+        }
+    }
+
+    #[test]
+    fn f7_output_view_keeps_identical_offsets_from_two_regions() {
+        // F7-collision: offsets are REGION-RELATIVE, so identical
+        // (flag, start, end) in two different regions are two real matches
+        // and BOTH must appear in the audit/feedback view. The old 3-tuple
+        // key silently dropped the second region's finding (audit gap).
+        let scan = MultipartScan {
+            regions: vec![f7_region(0, 10), f7_region(20, 30)],
+            findings: vec![vec![f7_finding("f", 0, 5)], vec![f7_finding("f", 0, 5)]],
+        };
+        let out = multipart_scan_output(&scan);
+        assert_eq!(
+            out.findings.len(),
+            2,
+            "identical (flag,start,end) in two regions must BOTH be reported"
+        );
+    }
+
+    #[test]
+    fn f7_output_view_still_dedups_within_one_region() {
+        // F7-no-doublecount: one region per key — a repeated identical
+        // finding inside ONE region is still deduplicated (count unchanged),
+        // while the same offsets in ANOTHER region are kept.
+        let scan = MultipartScan {
+            regions: vec![f7_region(0, 10), f7_region(20, 30)],
+            findings: vec![
+                vec![f7_finding("f", 0, 5), f7_finding("f", 0, 5)],
+                vec![f7_finding("f", 0, 5)],
+            ],
+        };
+        let out = multipart_scan_output(&scan);
+        assert_eq!(out.findings.len(), 2, "1 from region 0 + 1 from region 1");
+        assert_eq!(out.action_overall, cerberus_engine::rule::Action::Redact);
     }
 }
