@@ -858,7 +858,12 @@ fn apply_reload(ctx: &ApiContext) -> Response<Full<Bytes>> {
     }
     let (published, mode) = {
         let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-        if live.upstreams.is_empty() && candidate.upstreams.is_empty() {
+        // F6 fix: the CANDIDATE map alone decides — a reload to zero
+        // upstreams is rejected even when the live map still has upstreams.
+        // The old `live.is_empty() && candidate.is_empty()` let
+        // `upstreams: {}` through and bricked traffic
+        // (UserAbsoluteUriRequired). Live config retained on rejection.
+        if candidate.upstreams.is_empty() {
             return invalid_config_response("reload would leave zero upstreams; fix the file first");
         }
         let compiled = match ctx.engine.as_ref() {
@@ -3377,5 +3382,86 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("nosniff")
         );
+    }
+
+    // ── F6 (r9-remediation): reload guard is candidate-independent ──
+
+    fn f6_upstream(url: &str) -> UpstreamConfig {
+        UpstreamConfig {
+            url: url.to_string(),
+            path_prefix: None,
+            auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
+        }
+    }
+
+    fn f6_body(resp: Response<Full<Bytes>>) -> String {
+        String::from_utf8_lossy(&resp.into_body().into_inner().expect("body")).into_owned()
+    }
+
+    #[test]
+    fn f6_reload_rejects_empty_candidate_upstreams_even_with_live_upstreams() {
+        // F6-reject: candidate upstreams `{}` must be rejected REGARDLESS of
+        // the live map. The old `live.is_empty() && candidate.is_empty()`
+        // guard let the swap through while the live map still had upstreams
+        // → the live config became zero-upstream and every data-plane
+        // request failed (UserAbsoluteUriRequired). Fail-closed: reject and
+        // RETAIN the live config (no brick).
+        let dir = std::env::temp_dir().join(format!("cerberus-f6-reject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "listen: 127.0.0.1:0\nmode: enforce\nupstreams: {}\n")
+            .expect("candidate config");
+
+        let mut live = ProxyConfig::default();
+        live.upstreams
+            .insert("openai".to_string(), f6_upstream("https://api.openai.com"));
+        let ctx = ApiContext::new(Arc::new(RwLock::new(live))).with_config_path(path);
+
+        let resp = apply_reload(&ctx);
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "empty candidate upstreams must be rejected"
+        );
+        assert!(
+            f6_body(resp).contains("zero upstreams"),
+            "the rejection must surface the upstream error"
+        );
+        // Live config RETAINED: the upstream map is untouched (no brick).
+        let after = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(after.upstreams.len(), 1, "live upstreams retained");
+        assert!(after.upstreams.contains_key("openai"), "no silent default");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn f6_reload_accepts_nonempty_candidate_upstreams() {
+        // F6-accept: a candidate with upstreams reloads as today.
+        let dir = std::env::temp_dir().join(format!("cerberus-f6-accept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.yaml");
+        std::fs::write(
+            &path,
+            "listen: 127.0.0.1:0\nmode: enforce\nupstreams:\n  openai:\n    url: https://api.openai.com\n",
+        )
+        .expect("candidate config");
+
+        let mut live = ProxyConfig::default();
+        live.upstreams.insert(
+            "stale".to_string(),
+            f6_upstream("https://stale.example.com"),
+        );
+        let ctx = ApiContext::new(Arc::new(RwLock::new(live))).with_config_path(path);
+
+        let resp = apply_reload(&ctx);
+        assert_eq!(resp.status(), StatusCode::OK, "non-empty candidate reloads");
+        let after = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(after.upstreams.len(), 1, "candidate applied");
+        assert!(after.upstreams.contains_key("openai"), "candidate applied");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
