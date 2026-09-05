@@ -38,4 +38,4 @@ export GITHUB_TOKEN=ghp_your_token_here
 For testing purposes only, do not use real data.
 The sample email user@example.com is an allowed test address.
 The test phone number 555-0199 is for documentation only.
-The credit card number 4111111111111111 is a well-known test number from Visa.
+The credit card number 4111 1111 1111 1111 is a well-known test number from Visa.

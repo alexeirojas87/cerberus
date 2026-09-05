@@ -1,0 +1,529 @@
+name: release-v2 (R9-3 architecture)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review 9 remediation — F8.1 / R9-3: release pipeline compatible with the
+# protected default branch. Replaces the frozen `.github/workflows/release.yml`
+# (which stays INERT with its `review9_release_freeze` guard untouched).
+#
+#   1. Version bumps NEVER happen here. Bumps go through `version-bump-v2.yml`,
+#      which opens a PR; a human merges it. Nothing writes to the default
+#      branch: the only writes are GitHub Release assets + workflow artifacts.
+#   2. This workflow triggers ONLY on `v*` tags, and the tag must point at a
+#      commit reachable from the default branch's merged history
+#      (tools/release/verify_tag_merge.sh — fail-closed).
+#   3. Every job checks out the tag/SHA of the event, never a mutable ref.
+#   4. Signing is MANDATORY with no unsigned fallback (R9-15): macOS
+#      codesign+notarize, Windows Authenticode, Linux detached GPG signatures
+#      on binaries and packages. A missing credential FAILS the run.
+#   5. SHA256SUMS is generated from the FINAL artifacts and re-verified
+#      (fail-closed) before publishing; the Homebrew formula and winget
+#      manifests are generated from those verified sums (R9-4 / R9-15).
+#   6. deb/rpm are really built from the published linux/x86_64 artifact.
+#   7. macOS matrix is Apple-Silicon-only per the closed owner decision in
+#      commit 161387a (chronic macos-13 Intel runner unavailability blocked
+#      releases; the plan requires macOS, not Intel specifically).
+#
+# ── G0/F8 CONTAINMENT ─────────────────────────────────────────────────────────
+# INERT: every job is guarded by `if: ${{ false }}` under the NEW
+# `review9_f8_pending` guard (distinct from the frozen workflows' guards).
+# It becomes live ONLY after the F8 gate has an independently reviewed PASS
+# Evidence Pack and the owner removes the guard lines, per
+# evidence/f8/r9-release-and-tap.md. Do not remove the guard before then.
+# ─────────────────────────────────────────────────────────────────────────────
+
+"on":
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # required for the gh release create step only
+
+env:
+  CERBERUS_DEFAULT_BRANCH: main
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ── R9-3 fail-closed verification of the tag ───────────────────────────────
+  verify-tag:
+    name: verify tag semver == Cargo.toml == lock && merged into default
+    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout full history with tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag (semver, version equality, merged ancestry)
+        run: |
+          tools/release/verify_tag_merge.sh "${GITHUB_REF_NAME}" \
+            --default-branch "${CERBERUS_DEFAULT_BRANCH}"
+
+  # ── Build + mandatory signing per target (R9-15: no unsigned fallback) ─────
+  build:
+    name: build + sign (${{ matrix.artifact_os }}/${{ matrix.artifact_arch }})
+    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
+    needs: verify-tag
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # 4 targets: linux x86_64, linux aarch64, macos aarch64 (Apple Silicon
+        # only — owner decision 161387a), windows x86_64.
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_os: linux
+            artifact_arch: x86_64
+          # F9: native ARM runner — no cross toolchain/linker/CC needed
+          # (cross toolchain is the documented fallback only).
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_os: linux
+            artifact_arch: aarch64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            artifact_os: macos
+            artifact_arch: aarch64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_os: windows
+            artifact_arch: x86_64
+    env:
+      CERBERUS_OS: ${{ matrix.artifact_os }}
+      CERBERUS_ARCH: ${{ matrix.artifact_arch }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout the TAG (never a mutable ref)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Install Rust target
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Build release artifacts
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./tools/release/build_release.sh "$VERSION"
+
+      # ── macOS: codesign + notarization, MANDATORY (R9-15) ──────────────────
+      - name: Fail-closed signing precheck (macOS)
+        if: matrix.artifact_os == 'macos'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+        run: |
+          : "${APPLE_ID:?FAIL: APPLE_ID secret missing — R9-15 mandates signing, no unsigned fallback}"
+          : "${APPLE_APP_SPECIFIC_PASSWORD:?FAIL: APPLE_APP_SPECIFIC_PASSWORD secret missing — R9-15 mandates signing, no unsigned fallback}"
+          : "${APPLE_TEAM_ID:?FAIL: APPLE_TEAM_ID secret missing — R9-15 mandates signing, no unsigned fallback}"
+          : "${APPLE_IDENTITY:?FAIL: APPLE_IDENTITY secret missing — R9-15 mandates signing, no unsigned fallback}"
+          echo "macOS signing credentials present"
+
+      - name: Codesign + notarize (macOS)
+        if: matrix.artifact_os == 'macos'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./tools/release/macos-notarize.sh "dist/cerberus-${VERSION}-macos-aarch64.tar.gz"
+          # Independent verification: the signature MUST validate.
+          tar xzf "dist/cerberus-${VERSION}-macos-aarch64.tar.gz" -C /tmp
+          codesign --verify --deep --strict --verbose=2 /tmp/cerberus
+          spctl --assess --type execute --verbose=2 /tmp/cerberus
+
+      # ── Windows: Authenticode, MANDATORY (R9-15) ───────────────────────────
+      - name: Fail-closed signing precheck (Windows)
+        if: matrix.artifact_os == 'windows'
+        env:
+          WINDOWS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT }}
+          WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+        run: |
+          : "${WINDOWS_SIGN_CERT:?FAIL: WINDOWS_SIGN_CERT secret missing — R9-15 mandates signing, no unsigned fallback}"
+          : "${WINDOWS_SIGN_PASSWORD:?FAIL: WINDOWS_SIGN_PASSWORD secret missing — R9-15 mandates signing, no unsigned fallback}"
+
+      - name: Authenticode sign (Windows)
+        if: matrix.artifact_os == 'windows'
+        env:
+          WINDOWS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT }}
+          WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $zip = "dist/cerberus-$version-windows-x86_64.zip"
+          Expand-Archive -Path $zip -DestinationPath "tmp-exe"
+          $certPath = "$env:RUNNER_TEMP\signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_SIGN_CERT))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1).FullName
+          if (-not $signtool) { throw "signtool not found on windows runner" }
+          & $signtool sign /f $certPath /p $env:WINDOWS_SIGN_PASSWORD /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 "tmp-exe\cerberus.exe"
+          & $signtool verify /pa /v "tmp-exe\cerberus.exe"
+          Remove-Item $certPath
+          Compress-Archive -Path "tmp-exe\cerberus.exe" -DestinationPath $zip -Force
+          $sha = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          "$sha  $zip" | Set-Content -NoNewline "dist\SHA256SUMS"
+          "Windows Authenticode signing verified"
+
+      # ── Linux: detached GPG signature, MANDATORY (R9-15) ───────────────────
+      - name: Fail-closed signing precheck (Linux)
+        if: matrix.artifact_os == 'linux'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          : "${GPG_PRIVATE_KEY:?FAIL: GPG_PRIVATE_KEY secret missing — R9-15 mandates signing, no unsigned fallback}"
+          : "${GPG_PASSPHRASE:?FAIL: GPG_PASSPHRASE secret missing — R9-15 mandates signing, no unsigned fallback}"
+
+      - name: Detached GPG signature (Linux)
+        if: matrix.artifact_os == 'linux'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ART="dist/cerberus-${VERSION}-linux-${{ matrix.artifact_arch }}.tar.gz"
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback \
+            --passphrase-fd 0 --detach-sign --armor --output "${ART}.sig" "$ART"
+          gpg --verify "${ART}.sig" "$ART"
+
+      # ── F8 attempt-2 fix (F8-V-1.2) ────────────────────────────────────────
+      # Each platform emits its sums under a UNIQUE name. Attempt 1 uploaded
+      # four artifacts that all contained a file literally named SHA256SUMS;
+      # download-artifact merge-multiple then kept only the last writer
+      # (official docs) and ≥3 platform lines were lost. The fragment is also
+      # normalized here: the Windows signing step writes the line with a
+      # `dist/` prefix and via `Set-Content -NoNewline`, so the path is
+      # stripped and the trailing newline guaranteed before concatenation.
+      - name: Emit per-platform sums fragment (unique name, normalized)
+        run: |
+          FRAG="dist/SHA256SUMS-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}"
+          {
+            sed 's#  dist/#  #' dist/SHA256SUMS | awk 'NF { print }'
+            # The detached signature is itself a release asset and MUST have a
+            # sums line (the both-directions asset gate fails otherwise).
+            for f in dist/*.sig; do
+              [ -e "$f" ] || continue
+              sha256sum "$f" | sed 's#  dist/#  #'
+            done
+          } > "$FRAG"
+          rm -f dist/SHA256SUMS
+          echo "== $FRAG =="
+          cat "$FRAG"
+
+      - name: Upload platform artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}
+          path: |
+            dist/cerberus-*
+            dist/SHA256SUMS-*
+          if-no-files-found: error
+
+  # ── deb/rpm really built (R9-15) ───────────────────────────────────────────
+  linux-packages:
+    name: build deb + rpm (linux/x86_64) with detached signatures
+    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+    steps:
+      # F8: build_deb.sh + `git archive HEAD` need the repo checked out at
+      # the tag; this job previously had NO checkout step at all.
+      - name: Checkout the TAG (build_deb.sh + git archive HEAD need the repo)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q rpm
+
+      - name: Download linux/x86_64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-linux-x86_64
+          path: dist
+
+      - name: Build .deb from the real artifact
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./packaging/deb/build_deb.sh "dist/cerberus-${VERSION}-linux-x86_64.tar.gz" "$VERSION" --arch amd64
+          dpkg-deb --info "dist/cerberus_${VERSION}_amd64.deb"
+
+      - name: Build .rpm from the real artifact
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git archive HEAD packaging/rpm | tar x -C /tmp
+          sed -e "s/{{VERSION}}/${VERSION}/g" -e "s/{{ARCH}}/x86_64/g" \
+            /tmp/packaging/rpm/cerberus.spec > /tmp/cerberus.spec
+          rpmbuild -ba \
+            --define "_sourcedir $(pwd)/dist" \
+            --define "_rpmdir $(pwd)/dist/rpm" \
+            --define "_srcrpmdir $(pwd)/dist/srpm" \
+            /tmp/cerberus.spec
+          find dist/rpm -name "*.rpm" -print
+
+      - name: Fail-closed signing precheck (packages)
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          : "${GPG_PRIVATE_KEY:?FAIL: GPG_PRIVATE_KEY secret missing — R9-15 mandates signing, no unsigned fallback}"
+          : "${GPG_PASSPHRASE:?FAIL: GPG_PASSPHRASE secret missing — R9-15 mandates signing, no unsigned fallback}"
+
+      - name: Detached GPG signatures for the packages (mandatory)
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          for pkg in "dist/cerberus_${VERSION}_amd64.deb" "$(find dist/rpm -type f -name "cerberus-${VERSION}-*.rpm" -print -quit)"; do
+            [ -f "$pkg" ] || { echo "FAIL: expected package missing: $pkg" >&2; exit 1; }
+            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback \
+              --passphrase-fd 0 --detach-sign --output "${pkg}.sig" "$pkg"
+            gpg --verify "${pkg}.sig" "$pkg"
+          done
+
+      # ── F8 attempt-2 fix (F8-V-1.1) ────────────────────────────────────────
+      # Attempt 1 never computed the deb/rpm checksums into any SHA256SUMS,
+      # so the release job's mandatory-integrity loop exited 1 BEFORE
+      # `gh release create`. The packages job now emits its own sums
+      # fragment (bare asset names, unique file name) that the release job
+      # concatenates into the canonical SHA256SUMS.
+      - name: Package sums fragment (deb/rpm + sigs, fail-closed)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          DEB="cerberus_${VERSION}_amd64.deb"
+          RPM_REL="$(find dist/rpm -type f -name "cerberus-${VERSION}-*.rpm" -print -quit || true)"
+          [ -f "dist/$DEB" ] || { echo "FAIL: dist/$DEB not built" >&2; exit 1; }
+          [ -f "dist/$DEB.sig" ] || { echo "FAIL: dist/$DEB.sig missing (R9-15)" >&2; exit 1; }
+          [ -n "$RPM_REL" ] || { echo "FAIL: no rpm under dist/rpm" >&2; exit 1; }
+          [ -f "$RPM_REL" ] || { echo "FAIL: $RPM_REL missing" >&2; exit 1; }
+          [ -f "$RPM_REL.sig" ] || { echo "FAIL: $RPM_REL.sig missing (R9-15)" >&2; exit 1; }
+          # Bare release-asset names in the fragment (the release job's
+          # recompute loop strips any path to the basename).
+          (
+            cd dist
+            sha256sum "$DEB" "$DEB.sig"
+            cd "$(dirname "${RPM_REL#dist/}")"
+            sha256sum "$(basename "$RPM_REL")" "$(basename "$RPM_REL").sig"
+          ) > dist/SHA256SUMS-packages
+          echo "== dist/SHA256SUMS-packages =="
+          cat dist/SHA256SUMS-packages
+
+      # ── F8 attempt-2 fix (F8-V-1.3) ────────────────────────────────────────
+      # Attempt 1 uploaded `dist/*.rpm` (non-recursive) while rpmbuild writes
+      # to `dist/rpm/x86_64/` — zero matches, the rpm and its signature never
+      # left this job. The globs now point at where the files really are, and
+      # the sums fragment rides along.
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-packages
+          path: |
+            dist/cerberus_*.deb
+            dist/cerberus_*.deb.sig
+            dist/rpm/x86_64/*.rpm
+            dist/rpm/x86_64/*.sig
+            dist/SHA256SUMS-packages
+          if-no-files-found: error
+
+  # ── Publish: merged SHA256SUMS, formula, release. No pushes to any branch ──
+  release:
+    name: publish GitHub release (SHA256SUMS mandatory)
+    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
+    needs: [build, linux-packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the TAG
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      # ── F8 attempt-2 fix (F8-V-1.2) ────────────────────────────────────────
+      # Each artifact is downloaded into its OWN directory (no
+      # merge-multiple anywhere): no download can clobber another artifact's
+      # files, so no platform's sums line can be lost.
+      - name: Download dist-linux-x86_64 (distinct dir)
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-linux-x86_64
+          path: dl/linux-x86_64
+
+      - name: Download dist-linux-aarch64 (distinct dir)
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-linux-aarch64
+          path: dl/linux-aarch64
+
+      - name: Download dist-macos-aarch64 (distinct dir)
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-macos-aarch64
+          path: dl/macos-aarch64
+
+      - name: Download dist-windows-x86_64 (distinct dir)
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-windows-x86_64
+          path: dl/windows-x86_64
+
+      - name: Download dist-packages (distinct dir)
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-packages
+          path: dl/packages
+
+      # ── F8 attempt-2 fix (F8-V-1.1/1.4) ────────────────────────────────────
+      # Canonical SHA256SUMS: an EXPLICIT concatenation of the five
+      # unique-named fragments (platforms + packages). Every file named in it
+      # must exist in the staged assets with a matching recomputed sha
+      # (direction A); every staged asset must be listed (direction B, run
+      # after the formula/manifests are folded in). Fail-closed both ways.
+      - name: Assemble canonical SHA256SUMS, stage assets, verify (fail-closed)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          # Stage every downloaded asset flat into dist/ (the rpm arrives at
+          # dl/packages/rpm/x86_64/). Fragment files stay behind in dl/.
+          find dl -type f ! -name 'SHA256SUMS-*' -exec mv {} dist/ \;
+          # Canonical sums — explicit concatenation of the five fragments.
+          cat \
+            "dl/linux-x86_64/SHA256SUMS-linux-x86_64" \
+            "dl/linux-aarch64/SHA256SUMS-linux-aarch64" \
+            "dl/macos-aarch64/SHA256SUMS-macos-aarch64" \
+            "dl/windows-x86_64/SHA256SUMS-windows-x86_64" \
+            "dl/packages/SHA256SUMS-packages" \
+            > dist/SHA256SUMS
+          echo "== canonical dist/SHA256SUMS =="
+          cat dist/SHA256SUMS
+          # Required entries (attempt-1 list kept as defense in depth). The
+          # rpm name is PINNED by packaging/rpm/cerberus.spec `Release: 1`
+          # (F8-V-3 fix: no %{?dist} suffix can drift the filename).
+          REQUIRED=(
+            "cerberus-${VERSION}-linux-x86_64.tar.gz"
+            "cerberus-${VERSION}-linux-aarch64.tar.gz"
+            "cerberus-${VERSION}-macos-aarch64.tar.gz"
+            "cerberus-${VERSION}-windows-x86_64.zip"
+            "cerberus_${VERSION}_amd64.deb"
+            "cerberus-${VERSION}-1.x86_64.rpm"
+          )
+          for name in "${REQUIRED[@]}"; do
+            sha="$(awk -v n="$name" 'index($0, n) { print $1; exit }' dist/SHA256SUMS)"
+            [ -n "$sha" ] || { echo "FAIL: $name missing from SHA256SUMS" >&2; exit 1; }
+            [ "$sha" != "0000000000000000000000000000000000000000000000000000000000000000" ] \
+              || { echo "FAIL: zero sha256 for $name" >&2; exit 1; }
+          done
+          # Direction A: every listed file staged + sha recomputed.
+          while read -r sha file; do
+            file="$(basename "$file")"
+            [ -f "dist/$file" ] || { echo "FAIL: $file listed in SHA256SUMS but not staged" >&2; exit 1; }
+            actual="$(sha256sum "dist/$file" | awk '{print $1}')"
+            [ "$actual" = "$sha" ] || { echo "FAIL: sha mismatch for $file" >&2; exit 1; }
+          done < dist/SHA256SUMS
+          echo "PASS: canonical SHA256SUMS assembled + verified (direction A)"
+
+      - name: Generate release Homebrew formula with real shas
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./tools/release/fill_brew_formula.sh --version "$VERSION" \
+            --platforms dist/SHA256SUMS --out dist/cerberus.rb
+          if grep -qE 'sha256 "0{64}"|\{\{' dist/cerberus.rb; then
+            echo "FAIL: release formula contains placeholder sha (R9-4)" >&2
+            exit 1
+          fi
+          ruby -c dist/cerberus.rb
+
+      - name: Generate winget manifests with real InstallerSha256
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Manifests are generated FLAT into dist/ (not a subdirectory) so
+          # they join the canonical SHA256SUMS and the both-directions gate;
+          # attempt 1 generated dist/winget-manifests/ that nothing ever
+          # uploaded (F8-V-1.4).
+          ./tools/release/fill_winget_manifest.sh --version "$VERSION" \
+            --sums dist/SHA256SUMS --out-dir dist
+
+      # ── F8 attempt-2 fix ───────────────────────────────────────────────────
+      # The formula and the winget manifests are themselves release assets
+      # generated from the sums, so their checksums are folded INTO the
+      # canonical SHA256SUMS before the final gate (the published manifest is
+      # 1:1 with the published asset set).
+      - name: Fold formula + winget manifests into the canonical SHA256SUMS
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum cerberus.rb Cerberus.Cerberus.*.yaml) >> dist/SHA256SUMS
+          echo "== final dist/SHA256SUMS =="
+          cat dist/SHA256SUMS
+
+      - name: Final both-directions asset gate (fail-closed)
+        run: |
+          set -euo pipefail
+          cd dist
+          # Direction A (full): every listed file exists + recomputed sha matches.
+          while read -r sha file; do
+            file="$(basename "$file")"
+            actual="$(sha256sum "$file" | awk '{print $1}')"
+            [ "$actual" = "$sha" ] || { echo "FAIL: sha mismatch for $file" >&2; exit 1; }
+          done < SHA256SUMS
+          # Direction B: every staged asset file MUST be listed in SHA256SUMS
+          # (end-anchored match: the .sig entry cannot satisfy the bare name).
+          fail=0
+          while IFS= read -r f; do
+            name="$(basename "$f")"
+            grep -q " ${name}\$" SHA256SUMS \
+              || { echo "FAIL: staged asset '$name' is NOT listed in SHA256SUMS" >&2; fail=1; }
+          done < <(find . -maxdepth 1 -type f ! -name SHA256SUMS)
+          [ "$fail" = 0 ] || exit 1
+          echo "PASS: both-directions asset gate (R9-15 mandatory integrity)"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # The asset list is driven FROM the verified canonical SHA256SUMS:
+          # exactly the files the both-directions gate just proved (F8-V-1.4
+          # fix — attempt 1's `find cerberus-*` dropped the underscore deb,
+          # the .rb formula and the winget manifests).
+          assets=("dist/SHA256SUMS")
+          while read -r _sha file; do
+            assets+=("dist/$(basename "$file")")
+          done < dist/SHA256SUMS
+          echo "== gh release create asset list =="
+          printf '%s\n' "${assets[@]}"
+          [ "${#assets[@]}" -ge 8 ] || { echo "FAIL: implausibly small asset list" >&2; exit 1; }
+          gh release create "$GITHUB_REF_NAME" \
+            --title "cerberus ${VERSION}" \
+            --generate-notes \
+            "${assets[@]}"
+          echo "== Release assets =="
+          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name'

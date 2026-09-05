@@ -350,10 +350,11 @@ mod tests {
 
     // ─── F4: MITM connected to the daemon ──────────────────────────────────────
 
-    /// Serializes tests that mutate `HOME` (process-global).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Isolated HOME to test the flow against a real user config.
+    // Serializes tests that mutate `HOME` (process-global): this is the
+    // SAME crate-wide mutex as `cli_api::tests::ENV_LOCK` (aliased below),
+    // so ALL env-mutating tests across modules share one lock — otherwise
+    // cross-module tests race (observed on F6.B).
+    use crate::cli_api::tests::ENV_LOCK;
     fn temp_home(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "cerberus-mitm-daemon-{tag}-{}",

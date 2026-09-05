@@ -1,28 +1,21 @@
-name: notify-tap
+name: notify-tap (FROZEN — Review 9 FAIL)
 
-# When a new Cerberus release is published, dispatch an event to the
-# homebrew-cerberus tap so it updates the formula automatically.
+# G0 containment for Review 9 — Attempt 2.
+# The empty event list makes this workflow inert for every ref. F8 must replace
+# it only after an independently reviewed PASS Evidence Pack and owner sign-off.
 
-on:
-  release:
-    types: [published]
+"on": []
+
+permissions:
+  contents: read
 
 jobs:
-  dispatch:
+  review9_tap_freeze:
+    name: Review 9 tap notification freeze
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch to homebrew-cerberus
-        env:
-          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
-          VERSION: ${{ github.event.release.name }}
+      - name: Unreachable fail-closed guard
+        shell: bash
         run: |
-          # Extract version from tag (v0.1.2 → 0.1.2)
-          VER="${TAG#v}"
-          echo "Dispatching release $VER (tag $TAG) to homebrew-cerberus"
-          gh api \
-            repos/alexeirojas87/homebrew-cerberus/dispatches \
-            -X POST \
-            -f event_type=new-release \
-            -f "client_payload[version]=$VER" \
-            -f "client_payload[tag]=$TAG"
+          exit 1

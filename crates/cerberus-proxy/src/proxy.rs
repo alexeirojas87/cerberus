@@ -45,7 +45,10 @@ use crate::api::{self, ApiContext, ADMIN_TOKEN_HEADER};
 use crate::config::{FailPolicy, ProxyConfig};
 use crate::decoder::{decode, ContentType};
 use crate::health::{health_json, is_health_path};
-use crate::json_redact::redact_body;
+use crate::json_redact::{
+    json_decision_output, multipart_scan_output, redact_body_with_scan, scan_json_leaves, scan_multipart_regions,
+    AuthoredScan,
+};
 use crate::log::{log_security_event, SecurityEvent};
 use crate::shadow;
 
@@ -81,6 +84,73 @@ const RESPONSE_HOP_BY_HOP: &[&str] = &[
 
 /// Headers (lowercased) that must never be forwarded upstream.
 const BYPASS_HEADER: &str = "x-cerberus-bypass";
+/// Prefix of the one-shot break-glass redemption inside `X-Cerberus-Bypass`
+/// (`break-glass:<nonce>`; F2.3/R9-8). Anything else is the legacy reason.
+const BREAK_GLASS_PREFIX: &str = "break-glass:";
+/// Audit flag marking that the bypass was granted by a one-shot break-glass
+/// token (the legacy reason bypass carries only the `bypass` flag).
+pub(crate) const BREAK_GLASS_FLAG: &str = "break-glass";
+
+/// Shape of an accepted data-plane bypass.
+#[derive(Debug, Clone)]
+enum BypassKind {
+    /// Legacy `X-Cerberus-Bypass: <reason>` with valid admin auth. The raw
+    /// reason is hashed (never persisted raw) and echoed back to the SAME
+    /// caller in the feedback header.
+    Legacy(String),
+    /// One-shot redemption via `POST /api/break-glass` + `break-glass:<nonce>`
+    /// (F2.3). Only the reason HASH travels here; the nonce is consumed
+    /// atomically (exactly-once) by the ledger before this variant exists.
+    OneShot {
+        /// SHA-256 of the truncated reason (audit trail).
+        reason_hash: String,
+    },
+}
+
+impl BypassKind {
+    /// Value echoed back in the response feedback header. For one-shot
+    /// tokens it is the fixed marker `break-glass` (never the nonce, never
+    /// the raw reason).
+    fn feedback_ack(&self) -> &str {
+        match self {
+            Self::Legacy(reason) => reason,
+            Self::OneShot { .. } => BREAK_GLASS_FLAG,
+        }
+    }
+
+    /// Truncated+hashed reason for the audit event (`bypass-hash:<hex>`).
+    ///
+    /// R9-16 (F5.2): when the installation audit key is wired (product
+    /// default), the hash is keyed HMAC-SHA256 over the break-glass domain;
+    /// the unkeyed SHA-256 branch is the test-context fallback only.
+    fn audit_hash(&self, audit_key: Option<&[u8]>) -> String {
+        match self {
+            Self::Legacy(reason) => {
+                let truncated = truncate_bypass_reason(reason);
+                audit_key.map_or_else(
+                    || cerberus_engine::engine::hash_value(truncated),
+                    |key| {
+                        cerberus_engine::engine::domain_hash(
+                            key,
+                            cerberus_engine::engine::BREAK_GLASS_HASH_DOMAIN,
+                            truncated.as_bytes(),
+                        )
+                    },
+                )
+            }
+            Self::OneShot { reason_hash } => reason_hash.clone(),
+        }
+    }
+}
+
+/// Strip a well-known hash-format prefix (`hmac:`, `sha256:`), returning the
+/// bare hex for the `bypass-hash:<hex>` audit artifact.
+fn strip_hash_prefix(digest: &str) -> &str {
+    digest
+        .strip_prefix("hmac:")
+        .or_else(|| digest.strip_prefix("sha256:"))
+        .unwrap_or(digest)
+}
 const FEEDBACK_HEADER: &str = "x-cerberus-feedback";
 
 /// Built-in path-prefix routing for known providers (still overridable by an
@@ -114,6 +184,21 @@ pub(crate) struct DirectUpstream {
     pub(crate) base: String,
     pub(crate) provider: String,
 }
+
+/// Audit flag: redaction FAILED and the policy decided the outcome (the raw
+/// original was forwarded on fail-open, the request rejected on fail-closed)
+/// — the event must NEVER claim plain `redact` in that state (fix P2-2).
+pub(crate) const REDACT_FAILED_FLAG: &str = "redact-failed";
+/// Audit flag: the request passed through INTACT under `shadow` mode while
+/// findings existed (the recorded action is what WOULD have happened) (P2-2).
+pub(crate) const SHADOW_FLAG: &str = "shadow";
+/// Audit flag: the body carried binary-claimed part payloads that were NOT
+/// scanned (byte-exact preservation trade-off, §4.2) — under-scan must never
+/// be silent (fix P2-1).
+pub(crate) const BINARY_UNSCANNED_FLAG: &str = "binary-unscanned";
+/// Audit flag: the body could not be decoded (JSON hint) and was forwarded
+/// intact under `fail_policy: open`, or rejected (fail-closed) (P2-2).
+pub(crate) const DECODE_FAILED_FLAG: &str = "decode-failed";
 
 /// Proxy shared state.
 pub struct ProxyContext {
@@ -177,6 +262,12 @@ pub async fn spawn_proxy(
     // non-loopback interface; we require a strong admin token (≥24 bytes) there.
     // The validation happens BEFORE the bind, so startup fails cleanly.
     check_listen_security(&listen, &ctx)?;
+    // R9-5/F6.1: install the anti-rebinding Host/Origin policy (fail-closed
+    // defaults) when the product wiring has not built an explicit one.
+    {
+        let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        ctx.api.ensure_host_origin(&listen, &cfg);
+    }
     let listener = TcpListener::bind(listen).await?;
     let actual = listener.local_addr()?;
     let handle = tokio::spawn(serve_proxy(listener, ctx));
@@ -223,6 +314,11 @@ pub async fn spawn_managed_proxy(
     ctx: Arc<ProxyContext>,
 ) -> Result<(SocketAddr, ManagedProxyHandle), Box<dyn std::error::Error + Send + Sync>> {
     check_listen_security(&listen, &ctx)?;
+    // R9-5/F6.1: same default policy install as `spawn_proxy`.
+    {
+        let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        ctx.api.ensure_host_origin(&listen, &cfg);
+    }
     let listener = TcpListener::bind(listen).await?;
     let actual = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -414,28 +510,53 @@ async fn collect_resp_body(body: hyper::body::Incoming, max: Option<usize>) -> R
 #[derive(Debug)]
 enum RedactDecision {
     Forward(Vec<u8>),
+    /// Redaction FAILED and the policy let the ORIGINAL body through
+    /// (fail-open). The audit trail must never record this as a plain
+    /// `redact` — the caller attaches the `redact-failed` flag and the
+    /// honest action (fix P2-2).
+    FailOpenForward(Vec<u8>),
     Reject(StatusCode, String),
 }
 
 /// Apply `fail_policy` to a redaction failure. Closed → 502 with
 /// `{"error":"redact failure",...}` (the raw secret is NEVER sent);
-/// Open → forward the ORIGINAL body and mark warn (real fail-open).
+/// Open → forward the ORIGINAL body and mark warn (real fail-open);
+/// `closed-on-critical` (§4.1 default, R9-12) → reject ONLY when the request
+/// carries `critical`-severity findings (the critical rules), otherwise
+/// forward the original body (fail-open for the rest). `findings` is the
+/// pipeline view of the request (post-allowlist).
 #[must_use]
 fn decide_redact_result(
     redaction: Result<Vec<u8>, String>,
     fail_policy: FailPolicy,
     original: &[u8],
+    findings: &[cerberus_engine::engine::Finding],
 ) -> RedactDecision {
     match redaction {
         Ok(b) => RedactDecision::Forward(b),
-        Err(e) if fail_policy == FailPolicy::Closed => RedactDecision::Reject(
-            StatusCode::BAD_GATEWAY,
-            format!(r#"{{"error":"redact failure","detail":"{e}"}}"#),
-        ),
-        Err(e) => {
-            tracing::warn!("redaction failed — fail_policy=open, forwarding original body: {e}");
-            RedactDecision::Forward(original.to_vec())
-        }
+        Err(e) => match fail_policy {
+            FailPolicy::Closed => RedactDecision::Reject(
+                StatusCode::BAD_GATEWAY,
+                format!(r#"{{"error":"redact failure","detail":"{e}"}}"#),
+            ),
+            FailPolicy::ClosedOnCritical
+                if findings
+                    .iter()
+                    .any(|f| f.severity == cerberus_engine::rule::Severity::Critical) =>
+            {
+                RedactDecision::Reject(
+                    StatusCode::BAD_GATEWAY,
+                    format!(r#"{{"error":"redact failure","detail":"{e}"}}"#),
+                )
+            }
+            _ => {
+                tracing::warn!(
+                    "redaction failed — fail_policy={:?}, no critical findings, forwarding original body: {e}",
+                    fail_policy
+                );
+                RedactDecision::FailOpenForward(original.to_vec())
+            }
+        },
     }
 }
 
@@ -451,8 +572,10 @@ pub(crate) async fn proxy_handler(
     let path = parts.uri.path().to_string();
     let query = parts.uri.query().map_or_else(String::new, |q| format!("?{q}"));
 
-    // API routes.
-    if direct_upstream.is_none() && api::is_api_path(&path) {
+    // API routes. `/ui` (F6.B, Appendix B B.6) is served here too: it is a
+    // public 302 to `/api/dashboard`, so the documented
+    // `http://localhost:8787/ui` URL never leaks into the dataplane.
+    if direct_upstream.is_none() && (api::is_api_path(&path) || path == "/ui") {
         let api_req = Request::from_parts(parts, body);
         return api::handle_api_request(api_req, &ctx.api).await;
     }
@@ -475,9 +598,9 @@ pub(crate) async fn proxy_handler(
     }
 
     // Body limit applied DURING buffering, not after (review 2, P1 #5).
-    let (max_body, mode, fail_policy) = {
+    let (max_body, mode, fail_policy, reversible_redaction) = {
         let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
-        (cfg.max_body_bytes, cfg.mode, cfg.fail_policy)
+        (cfg.max_body_bytes, cfg.mode, cfg.fail_policy, cfg.reversible_redaction)
     };
     // Body read errors (fix P1): too large → 413; the rest of the read
     // errors → 502 (there is no body to forward).
@@ -494,31 +617,68 @@ pub(crate) async fn proxy_handler(
         }
     };
 
-    // Audited break-glass: the `X-Cerberus-Bypass` header is only honored when
-    // the control plane is protected AND the request carries the valid admin
-    // token **via `X-Cerberus-Admin-Token`** (fix review v4 #2). Auth via
+    // Audited break-glass: the `X-Cerberus-Bypass` header is ONLY honored when
+    // the request carries the valid admin token **via `X-Cerberus-Admin-Token`**
+    // (fix review v4 #2, extended to ALL modes by R9-5/F6.2). Auth via
     // `Authorization: Bearer` is valid for `/api/*`, but on the DATA PLANE
     // we require exclusively the own header, to avoid risking substituting
     // the provider key (which travels in `Authorization`) with the admin
-    // token. With a configured token and missing/invalid auth the header is
-    // IGNORED (it does not block) and a warn is logged. Without a configured
-    // token (dev mode) the bypass stays open (P0).
-    let bypass_reason: Option<String> = {
+    // token.
+    //
+    // R9-5/F6.2 — FAIL-CLOSED EVERYWHERE: with a configured token and
+    // missing/invalid auth the header is IGNORED (it does not block) and a
+    // warn is logged. WITHOUT a configured token (dev mode) the bypass is
+    // now REFUSED too — the old "dev mode: bypass open" was the F4-verified
+    // injection vector (an unauthenticated `X-Cerberus-Bypass` smuggled a
+    // secret past the scanner); there is no valid credential to check, so
+    // there is no bypass, and the request proceeds to the normal scan.
+    //
+    // F2.3 (R9-8): the header carries either a plain reason (legacy audited
+    // bypass, unchanged) or `break-glass:<nonce>` — the one-shot primitive
+    // issued (authenticated) via `POST /api/break-glass`. A nonce is consumed
+    // ATOMICALLY exactly once; a replay, an expired token or a provider-scope
+    // mismatch REFUSES the bypass (the request proceeds to the normal scan
+    // and is blocked if findings require it). No valid admin token → no
+    // bypass; both mechanisms share the same audit trail.
+    let provider = direct_upstream.as_ref().map_or_else(
+        || provider_of(path.as_str(), ctx),
+        |direct| mitm_provider_of(ctx, &direct.provider),
+    );
+
+    // R9-11 (§4.7): the operation mode may be set PER UPSTREAM
+    // (`mode: shadow|enforce` in `UpstreamConfig`). An upstream without an
+    // explicit mode inherits the global `ProxyConfig::mode` — a shadow
+    // upstream never blocks/redacts, an enforce upstream enforces, mixed
+    // fleets route each request by its provider.
+    let mode = {
+        let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        cfg.upstreams.get(&provider).and_then(|u| u.mode).unwrap_or(mode)
+    };
+    let bypass: Option<BypassKind> = {
         let present = parts
             .headers
             .get(BYPASS_HEADER)
             .and_then(|v| v.to_str().ok())
             .map(ToString::to_string);
-        present.filter(|_| {
+        present.and_then(|raw| {
             let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
             match api::expected_admin_token(&cfg) {
-                // Dev mode: no token configured, bypass open.
-                None => true,
+                // R9-5/F6.2: NO token configured (dev mode) → the bypass is
+                // REFUSED. There is no valid credential to authenticate it,
+                // and an unauthenticated bypass is the F4 injection vector.
+                None => {
+                    tracing::warn!(
+                        "X-Cerberus-Bypass refused: no admin token is configured, so the \
+                         data-plane bypass cannot be authenticated (fail-closed, R9-5/F6.2)"
+                    );
+                    drop(cfg);
+                    return None;
+                }
                 // Token config: the data-plane bypass is honored ONLY by the
                 // `X-Cerberus-Admin-Token` header (not by `Authorization`).
                 Some(expected) => {
                     if api::admin_token_header_is_present(&parts.headers, expected) {
-                        true
+                        // authenticated
                     } else {
                         if api::authorized(&parts.headers, expected) {
                             tracing::warn!(
@@ -527,50 +687,157 @@ pub(crate) async fn proxy_handler(
                                 ADMIN_TOKEN_HEADER
                             );
                         }
-                        false
+                        return None;
                     }
                 }
             }
+            drop(cfg);
+            // Owned intermediate: the nonce is trimmed/copied so the legacy
+            // arm can take `raw` by value (map_or_else over if-let-else).
+            raw.strip_prefix(BREAK_GLASS_PREFIX)
+                .map(str::trim)
+                .map(ToString::to_string)
+                .map_or_else(
+                    || Some(BypassKind::Legacy(raw)),
+                    |nonce| match ctx.api.break_glass.redeem(&nonce, Some(provider.as_str())) {
+                        Ok(grant) => Some(BypassKind::OneShot {
+                            reason_hash: grant.reason_hash,
+                        }),
+                        Err(e) => {
+                            tracing::warn!("break-glass redemption refused: {e}");
+                            None
+                        }
+                    },
+                )
         })
     };
 
     // Decode and scan, wrapping the engine phase in the failure policy
     // (fix P1 #2): fail_policy=Open → if the engine cannot decode/redact
-    // the ORIGINAL body is forwarded intact; Closed → 502.
+    // the ORIGINAL body is forwarded intact; Closed → 502. With the
+    // `closed-on-critical` default (R9-12) an UNDECODABLE body has no
+    // findings, so criticality is indeterminate → fail-closed posture
+    // (same observable behavior as Closed here; documented in the pack).
     let content_type_hint = parts.headers.get("content-type").and_then(|v| v.to_str().ok());
     let decoded = decode(&body_bytes, content_type_hint);
     // Decode failure: content-type declares JSON but the body is not valid JSON.
     let json_hint = content_type_hint.is_some_and(|h| h.to_ascii_lowercase().contains("json"));
     let decode_failed = json_hint && decoded.content_type != ContentType::Json;
-    if decode_failed && fail_policy == FailPolicy::Closed {
+    // Outcome flags for the audit trail (fix P2-2/P2-1): every fail-open /
+    // fail-closed / under-scan outcome is visible in the event flags.
+    let mut audit_flags: Vec<String> = Vec::new();
+    if decode_failed {
+        audit_flags.push(DECODE_FAILED_FLAG.to_string());
+    }
+    if decode_failed && fail_policy != FailPolicy::Open {
+        // Fail-closed outcome (P2-2): audited honestly, never silently.
+        record_outcome_event(
+            ctx,
+            provider.as_str(),
+            &[],
+            cerberus_engine::rule::Action::Allow,
+            &audit_flags,
+            "fail-closed",
+        )
+        .await;
         return json_status(StatusCode::BAD_GATEWAY, r#"{"error":"cannot decode"}"#);
     }
     if decode_failed {
         // fail_policy=Open: a non-decodable body cannot be scanned; it is
-        // forwarded intact and marked in the log.
+        // forwarded intact and marked in the log and the audit (P2-2).
         tracing::warn!("decode failed for json content-type; fail_policy=open — forwarding original body");
     }
     // Snapshot of the engine for the whole request (hot-reload): the Arc is
     // cloned under the brief lock; scan+redact use the same snapshot → no
     // half-swapped pack is visible mid-request.
     let engine_snap = ctx.engine.read().unwrap_or_else(|p| p.into_inner()).clone();
-    let scan_result = if decode_failed {
-        ScanOutput {
-            findings: Vec::new(),
-            action_overall: cerberus_engine::rule::Action::Allow,
+    // FIX F-1/P1-3 (attempt 2): ONE authoritative scan pass per body feeds
+    // BOTH the pipeline decision (block/redact/criticality) AND the
+    // redaction. For multipart that pass is per-REGION (payloads, part
+    // headers, preamble, epilogue — whatever the decoder recorded) with one
+    // shared analyzer over the full body, exactly the model the redaction
+    // splices with; for JSON/text the pass is the whole decoded text. There
+    // is no surface left where a region re-scan can fire a rule the
+    // decision never saw — the redaction performs NO scan of its own.
+    let allowlist = {
+        let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        cfg.policy.allowlist.clone()
+    };
+    let audit_key_for_allowlist = ctx.api.audit_hash_key().map(std::vec::Vec::from);
+    let (scan_result, multipart_scan, json_scan) = if decode_failed {
+        (
+            ScanOutput {
+                findings: Vec::new(),
+                action_overall: cerberus_engine::rule::Action::Allow,
+            },
+            None,
+            None,
+        )
+    } else if decoded.content_type == ContentType::Multipart && decoded.multipart.is_some() {
+        let scan = scan_multipart_regions(
+            &engine_snap,
+            &body_bytes,
+            decoded.multipart.as_deref().unwrap_or(&[]),
+            &allowlist,
+            audit_key_for_allowlist.as_deref(),
+        );
+        (multipart_scan_output(&scan), Some(scan), None)
+    } else if decoded.content_type == ContentType::Json {
+        if let Some(parsed) = decoded.parsed.as_ref() {
+            // Fix R9-21 (F9.A): the decision view for JSON bodies is the
+            // union of the flat-text scan ("all textual content", §4.2 —
+            // key names included) and the ONE authoritative per-leaf scan —
+            // the same pass the redaction splices from. Before this fix a
+            // leaf re-scan could fire a rule the decision never saw
+            // (keyword validated by the analyzer but missed by the flat
+            // same-line window): a critical match reached the fail-open
+            // branch under the default policy and the raw value was
+            // forwarded.
+            let json = scan_json_leaves(
+                &engine_snap,
+                &body_bytes,
+                parsed,
+                &allowlist,
+                audit_key_for_allowlist.as_deref(),
+            );
+            let mut s = engine_snap.scan(&decoded.text);
+            // Allowlist (false-positive triage) — applied in the real path (P0-5).
+            filter_with_allowlist(&allowlist, audit_key_for_allowlist.as_deref(), &decoded.text, &mut s);
+            (json_decision_output(s, &json), None, Some(json))
+        } else {
+            // Hand-built `DecodedBody` without a parsed tree: flat path
+            // (compat, identical to the pre-R9-21 behavior).
+            let mut s = engine_snap.scan(&decoded.text);
+            filter_with_allowlist(&allowlist, audit_key_for_allowlist.as_deref(), &decoded.text, &mut s);
+            (s, None, None)
         }
     } else {
         let mut s = engine_snap.scan(&decoded.text);
         // Allowlist (false-positive triage) — applied in the real path (P0-5).
-        apply_allowlist(ctx, &decoded.text, &mut s);
-        s
+        filter_with_allowlist(&allowlist, audit_key_for_allowlist.as_deref(), &decoded.text, &mut s);
+        (s, None, None)
     };
 
     let mode_result = shadow::apply_mode(&scan_result, mode);
     let has_findings = !scan_result.findings.is_empty();
+    let is_shadow = matches!(mode_result, shadow::ModeResult::Shadow { .. });
+    if is_shadow && has_findings {
+        // Shadow events record what WOULD have happened while the body
+        // passes intact — the flag makes that unmistakable (fix P2-2).
+        audit_flags.push(SHADOW_FLAG.to_string());
+    }
+    if decoded.binary_parts_skipped > 0 {
+        // Byte-exact preservation trade-off made visible (fix P2-1): the
+        // request carried binary-claimed payloads that were never scanned.
+        audit_flags.push(BINARY_UNSCANNED_FLAG.to_string());
+        tracing::warn!(
+            count = decoded.binary_parts_skipped,
+            "multipart body carries binary-claimed part payloads that were not scanned (byte-exact preservation, §4.2)"
+        );
+    }
 
     // Block (Enforce + critical) — unless bypass.
-    let blocked = bypass_reason.is_none() && !mode_result.should_forward();
+    let blocked = bypass.is_none() && !mode_result.should_forward();
     if blocked {
         let flag = scan_result.findings.first().map_or("unknown", |f| f.flag.as_str());
         log_security_event(
@@ -578,16 +845,14 @@ pub(crate) async fn proxy_handler(
             &scan_result.findings,
             scan_result.action_overall,
         );
-        // Record event in the store.
-        let provider = direct_upstream
-            .as_ref()
-            .map_or_else(|| provider_of(path.as_str(), ctx), |direct| direct.provider.clone());
+        // Record event in the store (`provider` computed before the bypass
+        // block; F2.3 needs it early for the one-shot scope check).
         record_only_with_findings(ctx, &scan_result, provider.as_str()).await;
         let mut r = json_status(
             StatusCode::FORBIDDEN,
             &format!(r#"{{"error":"blocked","flag":"{flag}"}}"#),
         )?;
-        add_feedback_headers(&mut r, &scan_result, bypass_reason.as_deref());
+        add_feedback_headers(&mut r, &scan_result, bypass.as_ref().map(BypassKind::feedback_ack));
         return Ok(r);
     }
 
@@ -596,26 +861,69 @@ pub(crate) async fn proxy_handler(
     // forward the original body (real fail-open); Closed → 502 (fix review v4
     // #5: before the `apply_redaction` error was swallowed in json_redact and
     // the raw secret passed through even though the JSON failed).
+    //
+    // F2.2 (R9-8): with `reversible_redaction` (opt-in, closed decision §9 #4)
+    // a REQUEST-SCOPED vault is created here — it lives exactly for this
+    // request/response cycle (capacity/TTL bounded, zeroized on
+    // consume/expiry/clear/drop) and is used to store the originals that
+    // restore the response below. Nothing is shared across requests.
+    //
+    // FIX F-1 (attempt 2): the redaction receives the AUTHORITATIVE
+    // per-region scan (`multipart_scan`) the decision above was made from —
+    // it performs no scan of its own, so a failure can only ever be caused
+    // by a finding the criticality oracle saw.
+    let request_vault: Option<cerberus_engine::vault::Vault> =
+        reversible_redaction.then(cerberus_engine::vault::Vault::new);
+    let mut redact_failed_open = false;
     let final_bytes = if matches!(mode_result, shadow::ModeResult::Enforce { .. })
         && mode_result.action() == cerberus_engine::rule::Action::Redact
     {
-        let redaction = redact_body(
+        let redaction = redact_body_with_scan(
             &engine_snap,
             &body_bytes,
             &decoded,
             &ctx.redact_options,
             &scan_result.findings,
+            request_vault.as_ref(),
+            match (multipart_scan.as_ref(), json_scan.as_ref()) {
+                (Some(mp), _) => AuthoredScan::Multipart(mp),
+                (None, Some(js)) => AuthoredScan::Json(js),
+                (None, None) => AuthoredScan::None,
+            },
         );
-        match decide_redact_result(redaction, fail_policy, &body_bytes) {
+        match decide_redact_result(redaction, fail_policy, &body_bytes, &scan_result.findings) {
             RedactDecision::Forward(b) => b,
-            RedactDecision::Reject(status, reason) => return json_status(status, &reason),
+            // Fail-open outcome (fix P2-2): the ORIGINAL body is forwarded —
+            // audited with the honest action + flag, never as plain "redact".
+            RedactDecision::FailOpenForward(b) => {
+                redact_failed_open = true;
+                audit_flags.push(REDACT_FAILED_FLAG.to_string());
+                b
+            }
+            // Fail-closed outcome (fix P2-2): the request is rejected —
+            // audited honestly with the same flag.
+            RedactDecision::Reject(status, reason) => {
+                audit_flags.push(REDACT_FAILED_FLAG.to_string());
+                record_outcome_event(
+                    ctx,
+                    provider.as_str(),
+                    &scan_result.findings,
+                    scan_result.action_overall,
+                    &audit_flags,
+                    "fail-closed",
+                )
+                .await;
+                return json_status(status, &reason);
+            }
         }
     } else {
         body_bytes.to_vec()
     };
 
     // Log sec event (by intervention type).
-    let sec_event = if mode_result.action() == cerberus_engine::rule::Action::Block {
+    let sec_event = if redact_failed_open {
+        SecurityEvent::RedactFailed
+    } else if mode_result.action() == cerberus_engine::rule::Action::Block {
         SecurityEvent::Blocked
     } else if mode_result.action() == cerberus_engine::rule::Action::Redact {
         SecurityEvent::Redacted
@@ -627,14 +935,14 @@ pub(crate) async fn proxy_handler(
     log_security_event(sec_event, &scan_result.findings, scan_result.action_overall);
 
     // Record event in the store if there are findings (clean ones do not count — P1-12).
-    let provider = direct_upstream
-        .as_ref()
-        .map_or_else(|| provider_of(path.as_str(), ctx), |direct| direct.provider.clone());
+    // (`provider` was computed before the bypass block for the one-shot scope check.)
     if has_findings {
-        let is_bypass = bypass_reason.is_some();
+        let is_bypass = bypass.is_some();
         if is_bypass {
             // Audited break-glass (review 2, P1 #6): the authorized leak is
             // persisted as "bypass" with its reason — not as a fake block.
+            // Both the legacy reason header and the F2.3 one-shot primitive
+            // share this same audit trail.
             log_security_event(
                 SecurityEvent::Bypassed,
                 &scan_result.findings,
@@ -651,18 +959,50 @@ pub(crate) async fn proxy_handler(
         if is_bypass {
             event.action_taken = "bypass".to_string();
             // The reason is NEVER persisted raw (secret leak, fix P1):
-            // `flags` only carries the "bypass" marker; the reason (truncated
-            // to 200 bytes) is stored hashed in `hashed_values` as
-            // `bypass-hash:<sha256hex>`.
+            // `flags` only carries the "bypass" marker (plus "break-glass"
+            // when the bypass came from the F2.3 one-shot primitive); the
+            // reason (truncated to 200 bytes) is stored hashed in
+            // `hashed_values` as `bypass-hash:<hex>` — keyed HMAC-SHA256
+            // (R9-16/F5.2) when the installation key is wired.
             event.flags.push("bypass".to_string());
-            if let Some(reason) = &bypass_reason {
-                let digest = cerberus_engine::engine::hash_value(truncate_bypass_reason(reason));
+            if let Some(BypassKind::OneShot { .. }) = &bypass {
+                event.flags.push(BREAK_GLASS_FLAG.to_string());
+            }
+            if let Some(kind) = &bypass {
+                let digest = kind.audit_hash(ctx.api.audit_hash_key());
                 event
                     .hashed_values
-                    .push(format!("bypass-hash:{}", digest.trim_start_matches("sha256:")));
+                    .push(format!("bypass-hash:{}", strip_hash_prefix(&digest)));
             }
         }
+        // Outcome honesty (fix P2-2): a fail-open forward is never recorded
+        // as a plain "redact" — the action names the outcome and the
+        // `redact-failed` flag carries the cause. Shadow and under-scan
+        // outcomes carry their flags too.
+        if redact_failed_open {
+            event.action_taken = "fail-open".to_string();
+        }
+        event.flags.extend(audit_flags.iter().cloned());
         api::record_event(&ctx.api, event).await;
+    } else if !audit_flags.is_empty() {
+        // No findings, but the outcome must still be visible (fix P2-1/P2-2):
+        // `binary-unscanned` (byte-exact preservation trade-off) or
+        // `decode-failed` under fail-open. Without this the under-scan would
+        // be silent. The action names the outcome honestly.
+        let action_taken = if audit_flags.iter().any(|f| f == DECODE_FAILED_FLAG) {
+            "fail-open"
+        } else {
+            "allow"
+        };
+        record_outcome_event(
+            ctx,
+            provider.as_str(),
+            &[],
+            scan_result.action_overall,
+            &audit_flags,
+            action_taken,
+        )
+        .await;
     }
 
     // Resolve upstream (with path prefix stripping).
@@ -714,23 +1054,25 @@ pub(crate) async fn proxy_handler(
     // so both modes reject but with different proxy semantics:
     // Closed → 503 (the proxy is part of the chain and decides to reject);
     // Open → 502 (bad gateway: the destination did not respond).
+    // `closed-on-critical` (R9-12) is an ENGINE-failure policy; a connection
+    // failure carries no criticality signal → closed posture (503).
     let resp = match tokio::time::timeout(std::time::Duration::from_secs(30), client.request(up_req)).await {
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
-            // fail_policy Closed → 503 (proxy failure); Open → 502 and we
-            // surface the visible error (review 2, P1 #7).
-            let status = if fail_policy == crate::config::FailPolicy::Closed {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
+            // fail_policy Closed/closed-on-critical → 503 (proxy failure);
+            // Open → 502 and we surface the visible error (review 2, P1 #7).
+            let status = if fail_policy == crate::config::FailPolicy::Open {
                 StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
             };
             return json_status(status, &format!(r#"{{"error":"upstream failure","detail":"{e}"}}"#));
         }
         Err(_) => {
-            let status = if fail_policy == crate::config::FailPolicy::Closed {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
+            let status = if fail_policy == crate::config::FailPolicy::Open {
                 StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
             };
             return json_status(status, r#"{"error":"upstream timeout"}"#);
         }
@@ -749,33 +1091,67 @@ pub(crate) async fn proxy_handler(
         }
     };
 
-    let mut response = Response::new(Full::new(resp_bytes));
+    // F2.2 (R9-8): non-streaming un-redaction. The response is fully
+    // buffered (streaming is out of MVP), so the request-scoped vault can
+    // restore the original values of the `[VAULT:<id>]` tokens present in
+    // the response and consume+zeroize the used entries. `request_vault` is
+    // dropped right after — end of the request lifecycle, memory wiped.
+    let resp_bytes: Bytes = match &request_vault {
+        Some(vault) => Bytes::from(vault.unredact(&resp_bytes)),
+        None => resp_bytes,
+    };
+
+    let mut response = Response::new(Full::new(resp_bytes.clone()));
     *response.status_mut() = resp_parts.status;
     // Filter hop-by-hop headers from the response (fix P1 #6): tokens from
     // `Connection` + fixed list (te, trailer, proxy-authenticate, ...).
     *response.headers_mut() = filter_response_headers(&resp_parts.headers);
-    add_feedback_headers(&mut response, &scan_result, bypass_reason.as_deref());
+    // F2.2 (R9-8): un-redaction rewrote the body, so the upstream's
+    // `content-length` no longer describes it — recompute it (a stale
+    // header breaks the HTTP framing).
+    if request_vault.is_some() {
+        if let Ok(hv) = resp_bytes.len().to_string().parse() {
+            response.headers_mut().insert("content-length", hv);
+        }
+    }
+    add_feedback_headers(
+        &mut response,
+        &scan_result,
+        bypass.as_ref().map(BypassKind::feedback_ack),
+    );
     Ok(response)
 }
 
-/// Filter findings whose value is in the allowlist (removes false positives).
+/// Allowlist filter over a snapshot (fix F-1/P1-3 attempt 2): the pipeline
+/// reads the shared config allowlist once per request and applies the SAME
+/// semantics on every scan view — whole-text offsets on JSON/text, and the
+/// region-relative raw value on the multipart authoritative scan (the raw
+/// value sliced from the region text, trimmed, exact match).
 ///
-/// The allowlist is read from the shared config (`policy.allowlist`, fix
-/// review v6.1): it is the SAME one the control plane persists, so an FP
-/// triage from the dashboard takes effect on the next request without
-/// restarting and survives restart.
-fn apply_allowlist(ctx: &ProxyContext, text: &str, scan: &mut ScanOutput) {
-    let allow: Vec<String> = {
-        let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
-        cfg.policy.allowlist.clone()
-    };
+/// R9-7/F6.3: entries are **HMAC fingerprints** (`hmac:<hex>`, domain
+/// `cerberus:allowlist:v1`). A finding is allowed when the fingerprint of the
+/// raw candidate (sliced from the text and trimmed — the same normalization
+/// the fingerprinting applies) is present in the set. The fingerprints are
+/// resolved into a `HashSet` lazily (only when findings exist) so the hot
+/// path pays at most one HMAC per finding plus the set lookup.
+///
+/// Unkeyed context (`None` — direct library tests only; the daemon always
+/// keys via `ApiContext::with_audit_hash_key`): fingerprints cannot be
+/// evaluated, so NOTHING is filtered — fail-closed for detection (the
+/// allowlist can never silently widen what passes).
+fn filter_with_allowlist(allow: &[String], key: Option<&[u8]>, text: &str, scan: &mut ScanOutput) {
     if allow.is_empty() {
         return;
     }
+    let Some(key) = key else {
+        return; // unkeyed test context: cannot evaluate fingerprints (documented)
+    };
+    let fingerprints: std::collections::HashSet<&str> = allow.iter().map(String::as_str).collect();
     scan.findings.retain(|f| {
         if f.end <= text.len() {
             let raw = text[f.start..f.end].trim();
-            !allow.iter().any(|a| a.as_str() == raw)
+            let candidate = crate::allowlist::fingerprint(key, raw);
+            !fingerprints.contains(candidate.as_str())
         } else {
             true
         }
@@ -793,6 +1169,62 @@ fn apply_allowlist(ctx: &ProxyContext, text: &str, scan: &mut ScanOutput) {
 /// destination (review 2, P1 #10): uses the SAME order as `resolve_route`.
 fn provider_of(path: &str, ctx: &ProxyContext) -> String {
     resolve_route(ctx, path).provider
+}
+
+/// Host of an upstream `url` (e.g. `https://api.openai.com/v1` →
+/// `api.openai.com`), lowercased. `None` when the URL does not parse.
+#[must_use]
+fn upstream_url_host(url: &str) -> Option<String> {
+    url.parse::<Uri>().ok()?.host().map(str::to_ascii_lowercase)
+}
+
+/// Resolve the CONNECT hostname of an intercepted (MITM) tunnel to the
+/// upstream KEY the config itself keys on (fix P1-2, attempt 2).
+///
+/// Before this fix `DirectUpstream.provider` was the raw CONNECT hostname
+/// (`api.openai.com`), so the per-upstream `mode` lookup
+/// (`cfg.upstreams.get(&provider)`) only ever matched operators who literally
+/// named an upstream entry by hostname — per-upstream mode was silently inert
+/// on the MITM path and a per-upstream `enforce` could silently shadow under
+/// a global `shadow`. Resolution order:
+///
+/// 1. **Exact key** — the documented hostname-keying convention (unchanged).
+/// 2. **URL-host match** — the upstream whose `url` host equals the CONNECT
+///    host (case-insensitive); deterministic name-order tiebreak when several
+///    upstreams share one host. This is "the config's own keying": operators
+///    name upstreams (`openai`) and point them at provider URLs.
+/// 3. **The hostname itself** — traffic to a host no upstream covers keeps
+///    the hostname as the provider (audit shows the raw host) and inherits
+///    the global mode, exactly like an unknown provider on the reverse-proxy
+///    path (documented R9-11 fallback).
+#[must_use]
+fn mitm_provider_of(ctx: &ProxyContext, connect_host: &str) -> String {
+    let upstreams = {
+        let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        cfg.upstreams.clone()
+    };
+    if upstreams.contains_key(connect_host) {
+        return connect_host.to_string();
+    }
+    let host = connect_host.to_ascii_lowercase();
+    let mut matched: Vec<(&String, &crate::config::UpstreamConfig)> = upstreams
+        .iter()
+        .filter(|(_, up)| upstream_url_host(&up.url).is_some_and(|h| h == host))
+        .collect();
+    matched.sort_by(|(a, _), (b, _)| (*a).cmp(*b));
+    if let Some((name, _)) = matched.first() {
+        tracing::debug!(
+            connect_host = %connect_host,
+            upstream = %name,
+            "MITM CONNECT host mapped to the upstream configured for that URL host"
+        );
+        return (*name).clone();
+    }
+    tracing::debug!(
+        connect_host = %connect_host,
+        "MITM CONNECT host matches no configured upstream — inheriting the global mode"
+    );
+    connect_host.to_string()
 }
 
 /// Deterministic forward route. Priority (longest-match first):
@@ -902,9 +1334,54 @@ async fn record_only_with_findings(ctx: &ProxyContext, scan: &ScanOutput, provid
     }
 }
 
+/// Record the OUTCOME of a request whose audit story is carried entirely by
+/// flags and the honest action (fix P2-2/P2-1): fail-open / fail-closed
+/// outcomes after a redaction or decode failure, and under-scan visibility
+/// (`binary-unscanned`) when no findings exist. Never contains raw values.
+async fn record_outcome_event(
+    ctx: &ProxyContext,
+    provider: &str,
+    findings: &[cerberus_engine::engine::Finding],
+    action_overall: cerberus_engine::rule::Action,
+    flags: &[String],
+    action_taken: &str,
+) {
+    let mut event =
+        cerberus_store::event::AuditEvent::from_findings(findings, action_overall, "local", "proxy", provider);
+    event.action_taken = action_taken.to_string();
+    event.flags.extend(flags.iter().cloned());
+    api::record_event(&ctx.api, event).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── R9-16 (F5.2): the bypass audit hash is keyed by product default ───
+
+    #[test]
+    fn legacy_bypass_audit_hash_is_keyed_when_the_installation_key_is_wired() {
+        let kind = BypassKind::Legacy("operator reason".to_string());
+        let keyed = kind.audit_hash(Some(b"installation-key"));
+        assert!(keyed.starts_with("hmac:"), "keyed digest format: {keyed:?}");
+        let unkeyed = kind.audit_hash(None);
+        assert!(unkeyed.starts_with("sha256:"), "test fallback format: {unkeyed:?}");
+        assert_ne!(keyed, unkeyed, "keying must change the digest");
+        // The audit artifact carries the bare hex under `bypass-hash:`.
+        assert_eq!(strip_hash_prefix(&keyed), keyed.trim_start_matches("hmac:"));
+        assert!(
+            !strip_hash_prefix(&keyed).contains(':'),
+            "bare hex, got {}",
+            strip_hash_prefix(&keyed)
+        );
+    }
+
+    #[test]
+    fn strip_hash_prefix_handles_both_schemes() {
+        assert_eq!(strip_hash_prefix("hmac:abc123"), "abc123");
+        assert_eq!(strip_hash_prefix("sha256:abc123"), "abc123");
+        assert_eq!(strip_hash_prefix("abc123"), "abc123");
+    }
 
     #[test]
     fn https_connector_is_wired() {
@@ -927,6 +1404,8 @@ mod tests {
                 url: "https://api.openai.com".to_string(),
                 path_prefix: None,
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         upstreams.insert(
@@ -935,6 +1414,8 @@ mod tests {
                 url: "http://mock.local".to_string(),
                 path_prefix: Some("/myproj".to_string()),
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         let cfg = crate::config::ProxyConfig {
@@ -992,6 +1473,8 @@ mod tests {
                 url: "http://short.local".to_string(),
                 path_prefix: Some("/v1".to_string()),
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         upstreams.insert(
@@ -1000,6 +1483,8 @@ mod tests {
                 url: "http://longer.local".to_string(),
                 path_prefix: Some("/v1/admin".to_string()),
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         let ctx = test_ctx(upstreams);
@@ -1141,28 +1626,235 @@ mod tests {
         // Review v4 #5: if redaction fails and fail_policy=Closed, the
         // response is 502 JSON and the raw secret never goes in the body.
         let original = br#"{"content":"RAW-SECRET-DO-NOT-LEAK999"}"#;
-        match decide_redact_result(Err("invalid span".to_string()), FailPolicy::Closed, original) {
+        match decide_redact_result(Err("invalid span".to_string()), FailPolicy::Closed, original, &[]) {
             RedactDecision::Reject(status, body) => {
                 assert_eq!(status, StatusCode::BAD_GATEWAY, "closed → 502");
                 assert!(body.contains("redact failure"), "body: {body}");
                 assert!(!body.contains("RAW-SECRET"), "raw secret leaked into 502: {body}");
             }
-            RedactDecision::Forward(_) => panic!("expected Reject"),
+            RedactDecision::Forward(_) | RedactDecision::FailOpenForward(_) => panic!("expected Reject"),
         }
     }
 
     #[test]
     fn redact_failure_fail_open_forwards_original() {
         // Review v4 #5: fail_policy=Open → the ORIGINAL body is forwarded intact
-        // (marked warn) and an OK redact is forwarded as is.
+        // (marked warn) and an OK redact is forwarded as is. Fix P2-2: the
+        // fail-open outcome is its OWN variant so the audit can never record
+        // it as a plain "redact".
         let original = b"raw-original-bytes".to_vec();
-        match decide_redact_result(Err("oops".to_string()), FailPolicy::Open, &original) {
-            RedactDecision::Forward(b) => assert_eq!(b, original, "open forwards original"),
-            RedactDecision::Reject(..) => panic!("expected Forward"),
+        match decide_redact_result(Err("oops".to_string()), FailPolicy::Open, &original, &[]) {
+            RedactDecision::FailOpenForward(b) => assert_eq!(b, original, "open forwards original"),
+            RedactDecision::Forward(_) | RedactDecision::Reject(..) => panic!("expected FailOpenForward"),
         }
-        match decide_redact_result(Ok(b"redacted".to_vec()), FailPolicy::Closed, &original) {
+        match decide_redact_result(Ok(b"redacted".to_vec()), FailPolicy::Closed, &original, &[]) {
             RedactDecision::Forward(b) => assert_eq!(b, b"redacted".to_vec()),
-            RedactDecision::Reject(..) => panic!("expected Forward"),
+            RedactDecision::FailOpenForward(_) | RedactDecision::Reject(..) => panic!("expected Forward"),
         }
+    }
+
+    // ── R9-12: `closed-on-critical` redaction-failure decision table ──
+
+    fn finding_with_severity(severity: cerberus_engine::rule::Severity) -> cerberus_engine::engine::Finding {
+        cerberus_engine::engine::Finding {
+            flag: "secret.test".to_string(),
+            category: cerberus_engine::rule::Category::Secrets,
+            severity,
+            action: cerberus_engine::rule::Action::Redact,
+            start: 0,
+            end: 1,
+            hashed_value: "sha256:test".to_string(),
+        }
+    }
+
+    #[test]
+    fn closed_on_critical_rejects_when_critical_findings_present() {
+        // §4.1: fail-closed for critical rules — a redaction failure on a
+        // request with critical findings is a 502, the raw secret never
+        // leaves.
+        let original = br#"{"content":"RAW-SECRET-DO-NOT-LEAK999"}"#;
+        let findings = [finding_with_severity(cerberus_engine::rule::Severity::Critical)];
+        match decide_redact_result(
+            Err("invalid span".to_string()),
+            FailPolicy::ClosedOnCritical,
+            original,
+            &findings,
+        ) {
+            RedactDecision::Reject(status, body) => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY, "critical finding → fail closed");
+                assert!(!body.contains("RAW-SECRET"), "raw secret leaked: {body}");
+            }
+            RedactDecision::Forward(_) | RedactDecision::FailOpenForward(_) => {
+                panic!("expected Reject for critical findings")
+            }
+        }
+    }
+
+    #[test]
+    fn closed_on_critical_forwards_original_for_non_critical_findings() {
+        // §4.1: fail-open for the rest — a redaction failure with only
+        // non-critical findings forwards the ORIGINAL body (real fail-open).
+        let original = b"non-critical-original".to_vec();
+        let findings = [
+            finding_with_severity(cerberus_engine::rule::Severity::Low),
+            finding_with_severity(cerberus_engine::rule::Severity::High),
+        ];
+        match decide_redact_result(
+            Err("oops".to_string()),
+            FailPolicy::ClosedOnCritical,
+            &original,
+            &findings,
+        ) {
+            RedactDecision::FailOpenForward(b) => {
+                assert_eq!(b, original, "non-critical → fail open");
+            }
+            RedactDecision::Forward(_) | RedactDecision::Reject(..) => {
+                panic!("expected FailOpenForward for non-critical findings")
+            }
+        }
+    }
+
+    #[test]
+    fn closed_on_critical_forwards_original_when_no_critical_findings() {
+        // §4.1: fail-open for the rest — a redaction failure with no
+        // critical findings forwards the ORIGINAL body (real fail-open).
+        // (Indeterminate criticality — undecodable bodies — is decided at
+        // the decode site, which fails closed for everything but Open.)
+        let original = b"non-critical-original".to_vec();
+        match decide_redact_result(Err("oops".to_string()), FailPolicy::ClosedOnCritical, &original, &[]) {
+            RedactDecision::FailOpenForward(b) => assert_eq!(b, original, "no critical findings → fail open"),
+            RedactDecision::Forward(_) | RedactDecision::Reject(..) => {
+                panic!("expected FailOpenForward when no critical findings")
+            }
+        }
+    }
+
+    #[test]
+    fn redact_failure_fail_closed_is_its_own_variant() {
+        // Fix P2-2: the reject outcome is distinct from both Forward and
+        // FailOpenForward, so the audit records "fail-closed" honestly.
+        let original = b"original".to_vec();
+        match decide_redact_result(Err("boom".to_string()), FailPolicy::Closed, &original, &[]) {
+            RedactDecision::Reject(status, body) => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+                assert!(body.contains("redact failure"));
+            }
+            RedactDecision::Forward(_) | RedactDecision::FailOpenForward(_) => panic!("expected Reject"),
+        }
+    }
+
+    // ── Fix P1-2 (attempt 2): MITM CONNECT host → upstream key mapping ──
+
+    #[test]
+    fn upstream_url_host_parses_scheme_and_port() {
+        assert_eq!(
+            upstream_url_host("https://api.openai.com").as_deref(),
+            Some("api.openai.com")
+        );
+        assert_eq!(
+            upstream_url_host("https://api.openai.com/v1/chat").as_deref(),
+            Some("api.openai.com")
+        );
+        assert_eq!(
+            upstream_url_host("http://API.Example.COM:8080/x").as_deref(),
+            Some("api.example.com")
+        );
+        assert_eq!(upstream_url_host("not a url"), None);
+    }
+
+    #[test]
+    fn mitm_provider_maps_connect_host_to_upstream_url_host() {
+        // Fix P1-2: the CONNECT hostname (`api.nanbuilders.test`) must resolve
+        // to the upstream KEYED `nanbuilders` whose URL points at that host,
+        // so the per-upstream `mode` applies on the MITM path.
+        let mut upstreams = std::collections::HashMap::new();
+        upstreams.insert(
+            "nanbuilders".to_string(),
+            crate::config::UpstreamConfig {
+                url: "https://api.nanbuilders.test/v1".to_string(),
+                path_prefix: None,
+                auth_header: "authorization".to_string(),
+                mode: Some(crate::config::OperationMode::Enforce),
+                expected_auth: None,
+            },
+        );
+        let cfg = crate::config::ProxyConfig {
+            upstreams,
+            ..crate::config::ProxyConfig::default()
+        };
+        let ctx = ProxyContext {
+            config: Arc::new(RwLock::new(cfg)),
+            engine: Arc::new(std::sync::RwLock::new(Arc::new(
+                cerberus_engine::engine::EngineBuilder::new(&[])
+                    .build()
+                    .expect("engine"),
+            ))),
+            redact_options: RedactOptions::default(),
+            api: api::ApiContext::new(Arc::new(RwLock::new(crate::config::ProxyConfig::default()))),
+            last_upstream: Arc::new(std::sync::Mutex::new(None)),
+        };
+        assert_eq!(mitm_provider_of(&ctx, "api.nanbuilders.test"), "nanbuilders");
+        // An unconfigured host keeps the hostname as the provider (global
+        // mode fallback, documented R9-11 behavior).
+        assert_eq!(mitm_provider_of(&ctx, "unknown.host.test"), "unknown.host.test");
+    }
+
+    #[test]
+    fn mitm_provider_exact_hostname_key_wins_and_mapping_is_deterministic() {
+        // 1) The documented hostname-keying convention still wins.
+        // 2) Two upstreams sharing one URL host resolve deterministically
+        //    (name order).
+        let mut upstreams = std::collections::HashMap::new();
+        upstreams.insert(
+            "byhost.test".to_string(),
+            crate::config::UpstreamConfig {
+                url: "https://other-place.test".to_string(),
+                path_prefix: None,
+                auth_header: "authorization".to_string(),
+                mode: Some(crate::config::OperationMode::Shadow),
+                expected_auth: None,
+            },
+        );
+        upstreams.insert(
+            "zeta".to_string(),
+            crate::config::UpstreamConfig {
+                url: "https://api.shared.test".to_string(),
+                path_prefix: None,
+                auth_header: "authorization".to_string(),
+                mode: Some(crate::config::OperationMode::Enforce),
+                expected_auth: None,
+            },
+        );
+        upstreams.insert(
+            "alpha".to_string(),
+            crate::config::UpstreamConfig {
+                url: "https://api.shared.test".to_string(),
+                path_prefix: None,
+                auth_header: "authorization".to_string(),
+                mode: Some(crate::config::OperationMode::Enforce),
+                expected_auth: None,
+            },
+        );
+        let cfg = crate::config::ProxyConfig {
+            upstreams,
+            ..crate::config::ProxyConfig::default()
+        };
+        let ctx = ProxyContext {
+            config: Arc::new(RwLock::new(cfg)),
+            engine: Arc::new(std::sync::RwLock::new(Arc::new(
+                cerberus_engine::engine::EngineBuilder::new(&[])
+                    .build()
+                    .expect("engine"),
+            ))),
+            redact_options: RedactOptions::default(),
+            api: api::ApiContext::new(Arc::new(RwLock::new(crate::config::ProxyConfig::default()))),
+            last_upstream: Arc::new(std::sync::Mutex::new(None)),
+        };
+        // Exact key beats URL-host matching (documented convention).
+        assert_eq!(mitm_provider_of(&ctx, "byhost.test"), "byhost.test");
+        // URL-host tiebreak: alpha < zeta by name, deterministic.
+        assert_eq!(mitm_provider_of(&ctx, "api.shared.test"), "alpha");
+        // An URL host that only the exact-key upstream points at.
+        assert_eq!(mitm_provider_of(&ctx, "other-place.test"), "byhost.test");
     }
 }

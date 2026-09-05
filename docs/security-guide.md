@@ -23,7 +23,7 @@ to the provider.
 
 ### 1. Zero Leak of Secrets
 - **Never persisted:** Raw secret values are never written to disk or logs
-- **Hashed only:** All stored values are SHA-256 hashed
+- **Hashed only:** All stored values are keyed HMAC-SHA256 hashed (per-installation key; R9-16 remediation — unsalted SHA-256 was recoverable offline for low-entropy values)
 - **Not logged:** Secret values excluded from all log output
 - **Not in telemetry:** Telemetry payload (if enabled) contains only anonymous
   metrics — never secrets, PII, findings, flags, or hashes
@@ -107,6 +107,23 @@ telemetry:
 - Config file should have restricted permissions (`chmod 600`)
 - The admin token is never returned by `GET /api/config` (only
   `admin_token_configured: bool`); set it via env or the config file
+- **The control plane is fail-closed (R9-5, F6):** every data `/api/*`
+  route requires the admin token — loopback included. With no token
+  configured the API is CLOSED (401), never open; `cerberus init`
+  generates a strong token into `config.yaml` (0600) and `CERBERUS_ADMIN_TOKEN`
+  overrides it. Startup on a non-loopback interface additionally REQUIRES a
+  token of ≥ 24 bytes.
+- **Anti DNS-rebinding (R9-5, F6):** `/api/*` requests with a disallowed
+  `Host` header (e.g. `attacker.com` pointed at 127.0.0.1) or a foreign
+  `Origin` are rejected 403 before authentication. Loopback binds default to
+  the loopback names; public binds must name their hostnames exactly in
+  `allowed_hosts` (no wildcards).
+- **The data-plane bypass is token-gated everywhere (F6.2):**
+  `X-Cerberus-Bypass` is honored only when a valid `X-Cerberus-Admin-Token`
+  accompanies it; with no token configured the bypass is refused.
+- **The false-positive allowlist stores HMAC fingerprints only (R9-7, F6.3):**
+  the raw value is never persisted in `config.yaml`, never returned by the
+  API, and never logged — only `hmac:` digests under the installation key.
 - API endpoint should not be exposed to untrusted networks
 - Dashboard serves on localhost only by default; CSP forbids inline scripts
 

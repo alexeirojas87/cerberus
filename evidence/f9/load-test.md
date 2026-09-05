@@ -1,6 +1,16 @@
 # Evidence Pack — Fase 9 / load-test
 - Intento: 3    Revisor: Builder (Codex via Orca) + adversarial (Codex + OpenCode)    Veredicto: PASS
 
+> **SUPERSEDED (R9-2) — 2026-09-01.** Review 9 (finding R9-2, P0) marked this
+> pack stale: commit `f1cdab9` had inflated `P99_BUDGET_MS` 7→15 ms with zero
+> evidence while this file still claimed "Release sigue enforcing 5 ms"
+> (line 36), and no gate measured the real HTTP round-trip path. History is
+> preserved as-is per fix-plan §0.4. The current latency authority is the
+> F3.3 honest gate: `evidence/f3/r9-honest-latency-gate.md` (real HTTP
+> proxy→mock-upstream round trip, ≥2,000 individual samples per scenario,
+> direct baseline, strict plan-closed 5.0 ms p99, budget constants restored
+> to plan-closed values).
+
 ## Criterios de aceptación
 | Criterio | Comando ejecutudo | Salida | Resultado |
 |----------|-------------------|--------|-----------|

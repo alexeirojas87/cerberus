@@ -11,8 +11,10 @@
 //! - `GET  /api/events` — recent events (with optional filters)
 //! - `GET  /api/stats` — aggregated statistics
 //! - `POST /api/allowlist` — add to allowlist (FP triage)
-//! - `GET  /api/upstreams` — list upstreams/providers `{name,url,auth_header}`
-//! - `POST /api/upstreams` — add an upstream `{name,url,auth_header?}`
+//! - `POST /api/break-glass` — issue a one-shot bypass token (F2.3/R9-8;
+//!   authenticated; nonce redeemed once via `X-Cerberus-Bypass`)
+//! - `GET  /api/upstreams` — list upstreams/providers `{name,url,auth_header,mode}`
+//! - `POST /api/upstreams` — add an upstream `{name,url,auth_header?,mode?}`
 //! - `DELETE /api/upstreams/{name}` — remove a provider (not the last one)
 //!   (upstream CRUD: review v6 F6, UI/API parity. Each mutation persists
 //!   to YAML with the SAME policy as `PUT /api/config`.)
@@ -83,6 +85,27 @@ pub enum PackCommand {
         /// oneshot that returns the result to the caller.
         reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
+    /// Enable a pack by name (Appendix B B.3 `packs enable`); the worker
+    /// flips the manifest flag and hot-reloads the engine.
+    Enable {
+        /// Pack name (metadata name, not a versioned key).
+        name: String,
+        /// oneshot that returns the result to the caller.
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+    /// Disable a pack by name (rules leave the engine; JSON stays on disk).
+    Disable {
+        /// Pack name.
+        name: String,
+        /// oneshot that returns the result to the caller.
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+    /// Re-verify every installed pack signature and hot-reload (F6 contract
+    /// of `packs update`; registry fetch is the F7 auto-update unit).
+    Update {
+        /// oneshot that returns the result to the caller.
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// Canonical header for the admin token. Always accepted on `/api/*` and on
@@ -99,6 +122,14 @@ pub const ADMIN_TOKEN_MIN_BYTES: usize = 24;
 /// Maximum body limit for the `/api/*` control-plane routes (1 MiB,
 /// review v4 #4). The data-plane limit (`max_body_bytes`) applies separately
 /// and is not touched.
+///
+/// KNOWN LIMIT (F6.B attempt 2, security P3-2 — documented, by design): the
+/// build plan's "100 KB scan budget" describes the scan BUDGET SHAPE (how
+/// much text a dry-run may cost), while `POST /api/scan` here is bounded by
+/// this shared 1 MiB CONTROL-PLANE limit like every other `/api/*` body.
+/// Empirically bounded either way (10 MB → 413; 954 KB → ~38 ms linear
+/// scan); a scan-specific cap would be a behavior change and stays out of
+/// this fix (see evidence pack, attempt 2).
 const CONTROL_PLANE_MAX_BYTES: usize = MAX_PACK_BODY_BYTES;
 
 /// Shared context for the API.
@@ -127,6 +158,26 @@ pub struct ApiContext {
     /// pack rules. `None` (tests/dev) = the policy is validated and
     /// persisted, but there is no engine to update.
     pub engine: Option<crate::detection_policy::EngineControl>,
+
+    /// Server-side one-shot break-glass ledger (F2.3/R9-8): the control
+    /// plane issues tokens here (behind the admin-token gate) and the data
+    /// plane redeems them on `X-Cerberus-Bypass: break-glass:<nonce>`.
+    pub break_glass: std::sync::Arc<cerberus_engine::break_glass::BreakGlassLedger>,
+
+    /// Per-installation HMAC key for audit hashes (R9-16, F5.2). When set
+    /// (product wiring), break-glass reason hashes AND the legacy bypass
+    /// audit hash are keyed + domain-separated. `None` only in test
+    /// contexts that never construct this builder — the daemon always keys.
+    /// Not `Debug`-printed (`ApiContext` has no `Debug` derive) and never logged.
+    pub audit_hash_key: Option<std::sync::Arc<Vec<u8>>>,
+
+    /// Control-plane Host/Origin allowlist (R9-5 anti-DNS-rebinding, F6.1).
+    /// Installed once per boot: the product wiring (daemon) builds it from
+    /// the listen address + config BEFORE sharing the context; every other
+    /// producer ([`crate::proxy::spawn_proxy`]) installs the fail-closed
+    /// default from the bound address at spawn time. Enforced on every
+    /// `/api/*` request BEFORE authentication.
+    pub host_origin: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::host_origin::HostOriginPolicy>>>,
 }
 
 impl ApiContext {
@@ -140,6 +191,9 @@ impl ApiContext {
             pack_worker: None,
             config_path: None,
             engine: None,
+            break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
+            audit_hash_key: None,
+            host_origin: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -153,6 +207,9 @@ impl ApiContext {
             pack_worker: None,
             config_path: None,
             engine: None,
+            break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
+            audit_hash_key: None,
+            host_origin: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -166,6 +223,9 @@ impl ApiContext {
             pack_worker: None,
             config_path: None,
             engine: None,
+            break_glass: std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new()),
+            audit_hash_key: None,
+            host_origin: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -196,12 +256,109 @@ impl ApiContext {
     pub fn without_store(config: Arc<RwLock<ProxyConfig>>) -> Self {
         Self::new(config)
     }
+
+    /// Key ALL audit hashes with the per-installation HMAC key (R9-16/F5.2):
+    /// break-glass reason hashes issued by the ledger AND the legacy bypass
+    /// audit hash computed on the data path become keyed, domain-separated
+    /// HMAC-SHA256. Product wiring (daemon) MUST call this before the
+    /// context is shared; test contexts that skip it keep the unkeyed
+    /// library fallback.
+    #[must_use]
+    pub fn with_audit_hash_key(mut self, key: Vec<u8>) -> Self {
+        self.break_glass =
+            std::sync::Arc::new(cerberus_engine::break_glass::BreakGlassLedger::new().with_hash_key(key.clone()));
+        self.audit_hash_key = Some(std::sync::Arc::new(key));
+        self
+    }
+
+    /// The installation audit-hash key, if wired (`None` only in tests).
+    #[must_use]
+    pub fn audit_hash_key(&self) -> Option<&[u8]> {
+        self.audit_hash_key.as_ref().map(|v| v.as_slice())
+    }
+
+    /// Install the control-plane Host/Origin allowlist (R9-5/F6.1). Product
+    /// wiring (daemon) calls this with the policy built from the real listen
+    /// address + config so wildcard/blank entries FAIL the boot; every other
+    /// producer gets the fail-closed default installed by
+    /// [`Self::ensure_host_origin`].
+    #[must_use]
+    pub fn with_host_origin(self, policy: crate::host_origin::HostOriginPolicy) -> Self {
+        let _ = self.host_origin.set(std::sync::Arc::new(policy));
+        self
+    }
+
+    /// The installed policy, if any.
+    #[must_use]
+    pub fn host_origin_policy(&self) -> Option<&crate::host_origin::HostOriginPolicy> {
+        self.host_origin.get().map(std::sync::Arc::as_ref)
+    }
+
+    /// Install the DEFAULT (fail-closed) policy for a bound address when the
+    /// product wiring has not installed one. Called by `spawn_proxy` with the
+    /// requested listen address: loopback binds get the loopback names,
+    /// non-loopback binds get ONLY the explicitly configured entries
+    /// (config-driven, A.1).
+    pub fn ensure_host_origin(&self, listen: &std::net::SocketAddr, cfg: &ProxyConfig) {
+        if self.host_origin.get().is_none() {
+            if let Ok(policy) = crate::host_origin::HostOriginPolicy::build(listen, cfg) {
+                let _ = self.host_origin.set(std::sync::Arc::new(policy));
+            }
+        }
+    }
 }
 
 /// Determine if a path belongs to the API.
 #[must_use]
 pub fn is_api_path(path: &str) -> bool {
     path.starts_with("/api/")
+}
+
+/// The control-plane route table, as `<METHOD> <path>` pairs (F6.B).
+///
+/// Single source of truth for the CI parity test (`crates/cerberus` walks
+/// the Appendix B CLI surface and asserts each daemon-backed command's
+/// endpoint is present here) and for the parity matrix
+/// (`evidence/f6/parity-matrix.md`). Keep in sync with
+/// [`handle_api_request`].
+#[must_use]
+pub const fn known_api_routes() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("GET", "/api/config"),
+        ("PUT", "/api/config"),
+        ("GET", "/api/events"),
+        ("GET", "/api/stats"),
+        ("POST", "/api/allowlist"),
+        ("DELETE", "/api/allowlist"),
+        ("GET", "/api/allowlist"),
+        ("POST", "/api/break-glass"),
+        ("GET", "/api/policy"),
+        ("PUT", "/api/policy"),
+        ("GET", "/api/upstreams"),
+        ("POST", "/api/upstreams"),
+        ("DELETE", "/api/upstreams/{name}"),
+        ("GET", "/api/packs"),
+        ("POST", "/api/packs/install"),
+        ("POST", "/api/packs/rollback"),
+        ("POST", "/api/packs/enable"),
+        ("POST", "/api/packs/disable"),
+        ("POST", "/api/packs/update"),
+        ("POST", "/api/reload"),
+        ("POST", "/api/scan"),
+        ("GET", "/api/dashboard"),
+        ("GET", "/ui"),
+    ]
+}
+
+/// Does `(method, path)` exist in the control-plane route table? The
+/// parameterized upstream delete is matched by prefix.
+#[must_use]
+pub fn is_known_api_route(method: &str, path: &str) -> bool {
+    known_api_routes().iter().any(|&(m, p)| {
+        m == method
+            && (p == path
+                || (p == "/api/upstreams/{name}" && path.starts_with("/api/upstreams/") && path != "/api/upstreams"))
+    })
 }
 
 /// Constant-time comparison (accumulated xor + loop sum) to avoid timing
@@ -219,10 +376,21 @@ pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// Admin token expected by the control plane: a non-empty `Some` means
-/// authentication is active (`None` or empty = dev mode, open API).
+/// authentication is active.
+///
+/// **R9-5/F6 dev-mode semantics: `None`/empty = the control plane is CLOSED
+/// (every data route 401s) — never open.**
 #[must_use]
-pub(crate) fn expected_admin_token(cfg: &ProxyConfig) -> Option<&str> {
+pub fn expected_admin_token(cfg: &ProxyConfig) -> Option<&str> {
     cfg.admin_token.as_deref().filter(|t| !t.is_empty())
+}
+
+/// A persisted admin token must round-trip through the `x-cerberus-admin-token`
+/// header: the header layer trims, so a whitespace-padded token can never
+/// authenticate (self-lockout), and an empty or whitespace-only value is no
+/// token at all (re-verification finding, F6.B attempt 3b).
+fn admin_token_shape_is_valid(t: &str) -> bool {
+    !t.is_empty() && t.trim() == t
 }
 
 /// Does the request carry a valid admin token? Accepts `Authorization: Bearer <t>`
@@ -261,29 +429,108 @@ fn admin_token_header(headers: &hyper::HeaderMap) -> Option<&str> {
 /// PUBLIC static HTML without data → never requires auth (review v5 F6).
 #[must_use]
 fn route_serves_data(path: &str) -> bool {
-    path != "/api/dashboard"
+    // `/ui` (F6.B) is a pure 302 to the dashboard — public HTML, no data.
+    path != "/api/dashboard" && path != "/ui"
 }
 
-/// Control-plane authentication gate (review v5 F6).
+/// Control-plane authentication gate — **FAIL-CLOSED** (R9-5 / F6.1).
 ///
-/// `None` = allow (valid token, exempt route, or dev mode without token).
-/// `Some(resp)` = reject with that response (401 when the token is missing).
+/// Every data `/api/*` route requires a valid admin token; the dashboard
+/// (public HTML without data) is exempt. **Dev mode is CLOSED, not open:**
+/// when no token is configured there is no valid credential, so every data
+/// route answers 401 — loopback included (the old "None = open control
+/// plane" was the R9-5 vulnerability: a DNS-rebinding page could drive the
+/// API from a browser). `None` only for an allowed request.
 #[must_use]
 fn auth_gate(cfg: &ProxyConfig, path: &str, headers: &hyper::HeaderMap) -> Option<Response<Full<Bytes>>> {
-    if let Some(expected) = expected_admin_token(cfg) {
-        if route_serves_data(path) && !authorized(headers, expected) {
-            return Some(json_response(StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#));
+    if !route_serves_data(path) {
+        return None;
+    }
+    let authenticated = expected_admin_token(cfg).is_some_and(|expected| authorized(headers, expected));
+    if !authenticated {
+        return Some(json_response(StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#));
+    }
+    None
+}
+
+/// Control-plane Host/Origin gate — anti-DNS-rebinding (R9-5 / F6.1).
+///
+/// Enforced on EVERY `/api/*` request (dashboard included) BEFORE the auth
+/// gate: a rebound/evil Host or Origin is rejected 403 without ever reaching
+/// the token check (defense-in-depth works even for an operator who happens
+/// to hold a valid token in the attacked browser).
+///
+/// - `Host` must be in the exact allowlist ([`crate::host_origin`]); a
+///   loopback bind defaults to `localhost`/`127.0.0.1`/`[::1]`, a public
+///   bind is fail-closed (only configured entries).
+/// - A present `Origin` must be same-origin or explicitly allowlisted
+///   (`Origin: null` — sandboxed iframe — is always rejected).
+/// - A browser mutation (Origin present) must not carry a form-submittable
+///   "simple" content type (`text/plain`, urlencoded, multipart).
+///
+/// `None` = allowed (no policy installed: direct-handler tests only) or the
+/// request passed all three checks.
+#[must_use]
+fn anti_rebinding_gate(
+    ctx: &ApiContext,
+    method: &str,
+    path: &str,
+    headers: &hyper::HeaderMap,
+) -> Option<Response<Full<Bytes>>> {
+    let policy = ctx.host_origin_policy()?;
+    let forbidden = |msg: &str| {
+        Some(json_response(
+            StatusCode::FORBIDDEN,
+            &format!(r#"{{"error":"forbidden","detail":"{msg}"}}"#),
+        ))
+    };
+
+    let host_header = headers
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // A missing Host is itself malformed for a browser client (HTTP/1.1
+    // requires it) and cannot be allowlisted → reject.
+    if !policy.host_allowed(host_header) {
+        return forbidden("host not allowed (anti-rebinding allowlist)");
+    }
+
+    let origin = headers
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !policy.origin_allowed(origin, host_header) {
+        return forbidden("origin not allowed (same-origin/allowlist check)");
+    }
+
+    // Browser mutations must not use the form-submittable simple types.
+    let is_mutation = matches!(method, "POST" | "PUT" | "PATCH" | "DELETE");
+    if !origin.is_empty() && is_mutation {
+        let ct = headers.get(hyper::header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
+        if !crate::host_origin::HostOriginPolicy::mutation_content_type_allowed(ct) {
+            return forbidden("form-submittable content type not allowed for mutations");
         }
     }
+
+    let _ = path; // path is not part of the allowlist decision; kept for signature clarity
     None
 }
 
 /// Extract the `provider` query param (review v5 F6). `None` = no filter.
 #[must_use]
 fn query_provider(query: &str) -> Option<String> {
+    query_param(query, "provider")
+}
+
+/// Extract a single query param (`name=value`), URL-decoded as far as the
+/// wire format requires for our identifiers (plain tokens; `+` is NOT
+/// decoded to space to keep the parser trivial and injection-free).
+#[must_use]
+fn query_param(query: &str, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
     let mut found: Option<String> = None;
     for pair in query.split('&') {
-        if let Some(value) = pair.strip_prefix("provider=") {
+        if let Some(value) = pair.strip_prefix(&prefix) {
             if !value.is_empty() {
                 found = Some(value.to_string());
             }
@@ -301,6 +548,26 @@ fn filter_by_provider(events: &[AuditEvent], provider: Option<String>) -> Vec<Au
     )
 }
 
+/// Filter events by originating tool (Appendix B B.5 `--tool`).
+#[must_use]
+fn filter_by_tool(events: &[AuditEvent], tool: Option<String>) -> Vec<AuditEvent> {
+    tool.map_or_else(
+        || events.to_vec(),
+        |t| events.iter().filter(|e| e.tool == t).cloned().collect(),
+    )
+}
+
+/// Filter events recorded at or after `since` (unix epoch seconds; Appendix
+/// B B.5 `--since`). The CLI accepts RFC 3339 or `30m/2h/1d` shorthand and
+/// normalizes to epoch seconds on the wire.
+#[must_use]
+fn filter_since(events: &[AuditEvent], since_unix: Option<i64>) -> Vec<AuditEvent> {
+    since_unix.map_or_else(
+        || events.to_vec(),
+        |s| events.iter().filter(|e| e.ts_unix >= s).cloned().collect(),
+    )
+}
+
 /// Handle an API request.
 ///
 /// # Errors
@@ -314,10 +581,21 @@ pub async fn handle_api_request(
     let path = parts.uri.path().to_string();
     let method = parts.method.clone();
 
-    // -- Control plane auth (P0, review v5 F6) ------------------------------
-    // If an admin token is configured, all DATA routes `/api/*` require
-    // authentication; the dashboard (public HTML without data) is exempt.
-    // Without a configured token (dev mode / tests) the control plane is open.
+    // -- Control plane anti-rebinding gate (P0, R9-5/F6.1) -------------------
+    // FIRST gate: a rebound/evil Host or Origin is 403'd before anything
+    // else (including before the token check), so a DNS-rebinding page can
+    // never reach the auth layer at all.
+    {
+        if let Some(denied) = anti_rebinding_gate(ctx, method.as_str(), &path, &parts.headers) {
+            return Ok(denied);
+        }
+    }
+
+    // -- Control plane auth (P0, R9-5/F6.1) ----------------------------------
+    // FAIL-CLOSED: if an admin token is configured, all DATA routes `/api/*`
+    // require authentication; the dashboard (public HTML without data) is
+    // exempt. With NO configured token the control plane is CLOSED (401) —
+    // loopback included; the old dev-mode "open API" was the R9-5 finding.
     {
         let cfg = ctx.config.read().unwrap_or_else(|p| p.into_inner());
         if let Some(denied) = auth_gate(&cfg, &path, &parts.headers) {
@@ -326,8 +604,12 @@ pub async fn handle_api_request(
     }
 
     // Query param `provider` for per-provider filters (review v5 F6).
+    // F6.B (Appendix B B.5): `tool` and `since` (unix epoch seconds) extend
+    // the same filter surface for `cerberus events` / `cerberus stats`.
     let query = parts.uri.query().map_or_else(String::new, |q| q.to_string());
     let provider = query_provider(&query);
+    let tool = query_param(&query, "tool");
+    let since_unix = query_param(&query, "since").and_then(|s| s.parse::<i64>().ok());
 
     // Upstream CRUD (review v6 F6): DELETE carries the name in the path. It
     // is resolved BEFORE the static match because `/api/upstreams/{name}` is
@@ -342,9 +624,10 @@ pub async fn handle_api_request(
     match (method.as_str(), path.as_str()) {
         ("GET", "/api/config") => handle_get_config(ctx).await,
         ("PUT", "/api/config") => handle_put_config(ctx, body).await,
-        ("GET", "/api/events") => handle_get_events(ctx, provider).await,
-        ("GET", "/api/stats") => handle_get_stats(ctx, provider).await,
+        ("GET", "/api/events") => handle_get_events(ctx, provider, tool, since_unix).await,
+        ("GET", "/api/stats") => handle_get_stats(ctx, provider, tool, since_unix).await,
         ("POST", "/api/allowlist") => handle_post_allowlist(ctx, body).await,
+        ("POST", "/api/break-glass") => handle_post_break_glass(ctx, body).await,
         ("GET", "/api/allowlist") => handle_get_allowlist(ctx).await,
         ("DELETE", "/api/allowlist") => handle_delete_allowlist(ctx, body).await,
         ("GET", "/api/policy") => handle_get_policy(ctx).await,
@@ -354,7 +637,20 @@ pub async fn handle_api_request(
         ("GET", "/api/packs") => handle_pack_mode(ctx, PackKind::List).await,
         ("POST", "/api/packs/install") => handle_pack_install(ctx, body).await,
         ("POST", "/api/packs/rollback") => handle_pack_mode(ctx, PackKind::Rollback).await,
+        // F6.B (Appendix B B.3): per-pack enable/disable and the update
+        // (verify + hot-reload) contract; the pack worker owns the manifest.
+        ("POST", "/api/packs/enable") => handle_pack_enable_disable(ctx, body, true).await,
+        ("POST", "/api/packs/disable") => handle_pack_enable_disable(ctx, body, false).await,
+        ("POST", "/api/packs/update") => handle_pack_mode(ctx, PackKind::Update).await,
+        // F6.B (Appendix B B.7): hot-reload of the on-disk config.
+        ("POST", "/api/reload") => handle_reload(ctx).await,
+        // F6.B (Appendix B B.4): dry-run scan for the dashboard "Test
+        // detection" box. Scans with the LIVE engine; nothing is persisted.
+        ("POST", "/api/scan") => handle_api_scan(ctx, body).await,
         (_, "/api/dashboard") => handle_dashboard(ctx),
+        // Public redirect so the documented `http://localhost:8787/ui`
+        // (Appendix B B.6 `cerberus dashboard`) resolves to the dashboard.
+        (_, "/ui") => Ok(redirect_dashboard()),
         _ => Ok(not_found()),
     }
 }
@@ -363,6 +659,8 @@ pub async fn handle_api_request(
 enum PackKind {
     List,
     Rollback,
+    /// Verify + hot-reload installed packs (`packs update` F6 contract).
+    Update,
 }
 
 /// Send a (bodyless) pack command to the worker and wait for its reply.
@@ -374,9 +672,13 @@ async fn handle_pack_mode(ctx: &ApiContext, kind: PackKind) -> Result<Response<F
         ));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    // `Update` is a config mutation (verify + hot-reload) and gets an audit
+    // event; List is read-only.
+    let is_update = matches!(kind, PackKind::Update);
     let cmd = match kind {
         PackKind::List => PackCommand::List { reply: reply_tx },
         PackKind::Rollback => PackCommand::Rollback { reply: reply_tx },
+        PackKind::Update => PackCommand::Update { reply: reply_tx },
     };
     if worker.send(cmd).await.is_err() {
         return Ok(json_response(
@@ -385,10 +687,17 @@ async fn handle_pack_mode(ctx: &ApiContext, kind: PackKind) -> Result<Response<F
         ));
     }
     match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
-        Ok(Ok(Ok(text))) => Ok(json_response(
-            StatusCode::OK,
-            &format!(r#"{{"status":"ok","message":{text:?}}}"#),
-        )),
+        Ok(Ok(Ok(text))) => {
+            if is_update {
+                // Audit the applied mutation (F6.B attempt 2, security P2-1).
+                let mode = live_operation_mode(ctx);
+                audit_config_mutation(ctx, &mode, "pack-update", "").await;
+            }
+            Ok(json_response(
+                StatusCode::OK,
+                &format!(r#"{{"status":"ok","message":{text:?}}}"#),
+            ))
+        }
         Ok(Ok(Err(e))) => Ok(json_response(StatusCode::BAD_REQUEST, &format!(r#"{{"error":{e:?}}}"#))),
         Ok(Err(_)) => Ok(json_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -399,6 +708,280 @@ async fn handle_pack_mode(ctx: &ApiContext, kind: PackKind) -> Result<Response<F
             r#"{"error":"pack worker timed out"}"#,
         )),
     }
+}
+
+/// Core of `POST /api/packs/enable|disable` (F6.B, Appendix B B.3): sends
+/// `PackCommand::Enable/Disable` to the worker, which owns the manifest.
+async fn apply_pack_enable_disable(ctx: &ApiContext, body_bytes: &[u8], enable: bool) -> Response<Full<Bytes>> {
+    #[derive(serde::Deserialize)]
+    struct PackNameRequest {
+        name: String,
+    }
+    let parsed: PackNameRequest = match serde_json::from_slice(body_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"invalid request: expected {{\"name\": \"<pack>\"}}","detail":"{e}"}}"#),
+            );
+        }
+    };
+    let Some(worker) = ctx.pack_worker.as_ref() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"pack worker not connected"}"#,
+        );
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let pack_name = parsed.name.clone();
+    let cmd = if enable {
+        PackCommand::Enable {
+            name: parsed.name,
+            reply: reply_tx,
+        }
+    } else {
+        PackCommand::Disable {
+            name: parsed.name,
+            reply: reply_tx,
+        }
+    };
+    if worker.try_send(cmd).is_err() {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"pack worker not running"}"#,
+        );
+    }
+    match reply_rx.await {
+        Ok(Ok(message)) => {
+            // Audit the applied mutation (F6.B attempt 2, security P2-1):
+            // the pack name is manifest metadata, never a secret.
+            let mode = live_operation_mode(ctx);
+            let action = if enable { "pack-enable" } else { "pack-disable" };
+            audit_config_mutation(ctx, &mode, action, &pack_name).await;
+            json_response(StatusCode::OK, &format!(r#"{{"status":"ok","message":{message:?}}}"#))
+        }
+        Ok(Err(e)) => json_response(StatusCode::BAD_REQUEST, &format!(r#"{{"error":{e:?}}}"#)),
+        Err(_) => json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"pack worker disconnected"}"#,
+        ),
+    }
+}
+
+async fn handle_pack_enable_disable(
+    ctx: &ApiContext,
+    body: hyper::body::Incoming,
+    enable: bool,
+) -> Result<Response<Full<Bytes>>, String> {
+    let body_bytes = match collect_api_body(body).await {
+        Ok(b) => b,
+        Err(ApiBodyError::TooLarge) => {
+            return Ok(json_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                r#"{"error":"request body too large"}"#,
+            ));
+        }
+        Err(ApiBodyError::Read(msg)) => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"{msg}"}}"#),
+            ));
+        }
+    };
+    Ok(apply_pack_enable_disable(ctx, &body_bytes, enable).await)
+}
+
+/// Core of `POST /api/reload` (F6.B, Appendix B B.7): re-reads the config
+/// file from disk, validates it, and hot-swaps the live config + policy
+/// engine WITHOUT restarting the proxy. The listen address is intentionally
+/// NOT reloaded (the socket is already bound); a changed `admin_token`
+/// takes effect immediately (the auth gate reads the live config).
+///
+/// Requires a `config_path` wired at boot (the daemon always wires it;
+/// API-only test contexts may not have one → 503).
+fn apply_reload(ctx: &ApiContext) -> Response<Full<Bytes>> {
+    let Some(path) = ctx.config_path.as_ref() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"no config path wired at boot: reload is unavailable"}"#,
+        );
+    };
+    let raw = match std::fs::read_to_string(path) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!(r#"{{"error":"cannot read {}: {e}"}}"#, path.display()),
+            );
+        }
+    };
+    let loaded: ProxyConfig = match serde_yaml::from_str(&raw) {
+        Ok(c) => c,
+        Err(e) => return invalid_config_response(&format!("config does not parse: {e}")),
+    };
+    let mut candidate = loaded;
+    // Preserve the RUNNING port: a listen change in the file cannot move a
+    // bound socket; the operator restarts for that. Everything else reloads.
+    {
+        let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        candidate.listen.clone_from(&live.listen);
+    }
+    if let Err(e) = candidate.policy.validate() {
+        return invalid_config_response(&format!("policy in {} is invalid: {e}", path.display()));
+    }
+    // Anti-lockout (fail-closed preserved): the live daemon was booted with
+    // a token (product wiring); a reload that would REMOVE it silently
+    // closes the control plane mid-session and locks the operator out
+    // (every /api/* answers 401, including reload itself). Reject the
+    // reload instead — the operator edits the file or restarts. Changing
+    // to a DIFFERENT token is applied immediately (the gate reads the live
+    // config).
+    {
+        let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        // One fail-closed check covering every self-lockout encoding: a
+        // REMOVED token (None over a live token), an EMPTY token, or a
+        // WHITESPACE-PADDED token — all of them close the plane because the
+        // header layer trims and cannot send such a token back. A live
+        // already-unusable token means "already closed": no-op reloads stay
+        // allowed, opening stays allowed.
+        let candidate_token_closes_plane = candidate.admin_token.as_deref().map_or_else(
+            || expected_admin_token(&live).is_some(),
+            |t| !admin_token_shape_is_valid(t),
+        );
+        if candidate_token_closes_plane {
+            return invalid_config_response(
+                "reload would remove, clear, or invalidate the admin token and CLOSE the \
+                 control plane (fail-closed); keep a non-empty, whitespace-free admin_token in \
+                 the file or restart the daemon",
+            );
+        }
+    }
+    let (published, mode) = {
+        let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
+        // F6 fix: the CANDIDATE map alone decides — a reload to zero
+        // upstreams is rejected even when the live map still has upstreams.
+        // The old `live.is_empty() && candidate.is_empty()` let
+        // `upstreams: {}` through and bricked traffic
+        // (UserAbsoluteUriRequired). Live config retained on rejection.
+        if candidate.upstreams.is_empty() {
+            return invalid_config_response("reload would leave zero upstreams; fix the file first");
+        }
+        let compiled = match ctx.engine.as_ref() {
+            Some(engine) => match engine.compile(&candidate.policy) {
+                Ok(c) => Some(engine.publish(c)),
+                Err(e) => return invalid_config_response(&format!("policy does not compile: {e}")),
+            },
+            None => None,
+        };
+        // Persist is NOT performed: the file on disk IS the source we just
+        // read (Mode A IaC semantics; B.7 "config before deploying").
+        *live = candidate;
+        let mode = format!("{:?}", live.mode).to_lowercase();
+        (compiled, mode)
+    };
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({
+            "status": "ok",
+            "message": "config reloaded from disk (listen unchanged, hot-reload applied)",
+            "mode": mode,
+            "engine_rules": published,
+        })
+        .to_string(),
+    )
+}
+
+async fn handle_reload(ctx: &ApiContext) -> Result<Response<Full<Bytes>>, String> {
+    let resp = apply_reload(ctx);
+    // Audit ONLY the applied mutations (a 400 left the live config intact).
+    if resp.status() == StatusCode::OK {
+        let mode = live_operation_mode(ctx);
+        audit_config_mutation(ctx, &mode, "config-reload", "").await;
+    }
+    Ok(resp)
+}
+
+/// Core of `POST /api/scan` (F6.B, Appendix B B.4 — dashboard "Test
+/// detection"): dry-runs the LIVE engine over the body text and returns the
+/// findings (flags, counts, action, keyed hashes). NOTHING is persisted and
+/// raw input is NEVER echoed — the response mirrors the event schema's
+/// no-leak contract.
+fn apply_api_scan(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Bytes>> {
+    #[derive(serde::Deserialize)]
+    struct ScanRequest {
+        text: String,
+    }
+    let parsed: ScanRequest = match serde_json::from_slice(body_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"invalid request: expected {{\"text\": \"...\"}}","detail":"{e}"}}"#),
+            );
+        }
+    };
+    let Some(engine_control) = ctx.engine.as_ref() else {
+        return json_response(StatusCode::SERVICE_UNAVAILABLE, r#"{"error":"engine not wired"}"#);
+    };
+    let mode = {
+        let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        live.mode
+    };
+    let engine = engine_control.live_snapshot();
+    let output = engine.scan(&parsed.text);
+    let findings = output.findings;
+    // Enforce reports the effective action of the highest finding; shadow
+    // only reports what WOULD happen (warn, nothing applied).
+    let action_taken = if findings.is_empty() {
+        cerberus_engine::rule::Action::Allow
+    } else if mode == crate::config::OperationMode::Enforce {
+        output.action_overall
+    } else {
+        cerberus_engine::rule::Action::Warn
+    };
+    let mut counts = std::collections::BTreeMap::new();
+    for f in &findings {
+        *counts.entry(f.flag.clone()).or_insert(0usize) += 1;
+    }
+    let hashed: Vec<String> = findings.iter().map(|f| f.hashed_value.clone()).collect();
+    let body = serde_json::json!({
+        "status": "ok",
+        "action": action_taken.to_string(),
+        "finding_count": findings.len(),
+        "flags": counts,
+        "hashed_values": hashed,
+    });
+    json_response(StatusCode::OK, &body.to_string())
+}
+
+async fn handle_api_scan(ctx: &ApiContext, body: hyper::body::Incoming) -> Result<Response<Full<Bytes>>, String> {
+    let body_bytes = match collect_api_body(body).await {
+        Ok(b) => b,
+        Err(ApiBodyError::TooLarge) => {
+            return Ok(json_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                r#"{"error":"request body too large"}"#,
+            ));
+        }
+        Err(ApiBodyError::Read(msg)) => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"{msg}"}}"#),
+            ));
+        }
+    };
+    Ok(apply_api_scan(ctx, &body_bytes))
+}
+
+/// 302 to the dashboard so the documented `http://localhost:8787/ui`
+/// (Appendix B B.6) resolves. Public: HTML only, no data.
+fn redirect_dashboard() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header("location", "/api/dashboard")
+        .header("content-security-policy", "default-src 'none'; frame-ancestors 'none'")
+        .body(Full::new(Bytes::new()))
+        .unwrap_or_else(|_| not_found())
 }
 
 async fn handle_pack_install(ctx: &ApiContext, body: hyper::body::Incoming) -> Result<Response<Full<Bytes>>, String> {
@@ -537,7 +1120,10 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for PatchField<T> {
 ///
 /// - `admin_token` absent ⇒ the live token is preserved (it never has to
 ///   be resent, and `GET` does not reveal it). Explicit `null` ⇒ it is
-///   deleted.
+///   deleted **at the DTO level only**: `handle_put_config` REJECTS the
+///   patch with 400 when the live config has a token (anti-lockout, F6.B
+///   attempt 2 finding F1 — removal must never close/persist a closed
+///   control plane). Changing to a DIFFERENT token stays allowed.
 /// - `admin_token_configured` is accepted (so a GET→modify→PUT cycle from
 ///   the client does not fail) but it is READ-ONLY: it is ignored
 ///   completely, it cannot enable or disable authentication.
@@ -576,10 +1162,19 @@ impl ConfigPatch {
             health_path: self.health_path.unwrap_or_else(|| base.health_path.clone()),
             max_body_bytes: self.max_body_bytes.resolve(base.max_body_bytes),
             admin_token: self.admin_token.resolve(base.admin_token.clone()),
+            // Host/Origin allowlists (R9-5/F6.1) are not hot-toggleable via
+            // this route: they are boot-time security config (the policy is
+            // built once per boot from the listen address), so the YAML/
+            // startup values are always preserved here.
+            allowed_hosts: base.allowed_hosts.clone(),
+            allowed_origins: base.allowed_origins.clone(),
             // The detection policy is NOT touched via this route: it has its own
             // door (`PUT /api/policy`), which validates the rules and
             // recompiles the engine. Here it is always preserved.
             policy: base.policy.clone(),
+            // Reversible redaction (F2.2, opt-in §9 #4) is not hot-toggleable
+            // through this route; the YAML/startup value is preserved.
+            reversible_redaction: base.reversible_redaction,
         }
     }
 }
@@ -654,21 +1249,76 @@ async fn handle_get_config(ctx: &ApiContext) -> Result<Response<Full<Bytes>>, St
     Ok(json_response(StatusCode::OK, json))
 }
 
+/// Atomically replace `path` with `content`, enforcing mode **0600** on the
+/// RESULT (F6.A attempt 2, P1/P2 fix — F5 F-1 discipline).
+///
+/// The tmp file is removed if stale, then created EXCLUSIVELY with mode 0600
+/// AT CREATION on unix (no umask window — the content carries the admin
+/// token), and only then renamed over `path`. Because the rename replaces
+/// any pre-existing file, the final mode is 0600 regardless of what it was
+/// before (a re-init or later write REPAIRS a regressed 0644 config instead
+/// of preserving it).
+///
+/// Every `Result` is handled: on any failure the tmp is removed and the
+/// error returned — the previous file is left untouched (rename is atomic).
+///
+/// # Errors
+///
+/// Propagates the tmp creation/write or rename error.
+pub fn write_config_file_0600(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    // Temp in the SAME directory so the rename is atomic.
+    let tmp = std::path::PathBuf::from(format!("{}.tmp", path.to_string_lossy()));
+    // A stale tmp from a crashed writer must not be reused at its old mode:
+    // remove it BEFORE the exclusive create (the F-1 pattern).
+    let _ = std::fs::remove_file(&tmp);
+    let write = write_tmp_0600(&tmp, content);
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// Create the tmp file EXCLUSIVELY (`create_new`) with `0600` applied at
+/// creation (unix) and write `content`. Exclusive create + creation-time
+/// mode ⇒ there is NO window where the credential-carrying tmp exists at a
+/// umask-derived mode, and a concurrent writer cannot interleave.
+fn write_tmp_0600(tmp: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(tmp)?;
+        f.write_all(content.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(tmp)?;
+        f.write_all(content.as_bytes())
+    }
+}
+
 /// Persist the shared config to YAML at `ctx.config_path` (review v6 F6).
 ///
 /// Atomic write (temp + rename) so the file is not corrupted on a cutoff.
-/// `None` (tests/dev) → no-op without error. If the write fails, `Err` is
-/// returned; the caller decides whether to roll back the in-memory change.
+/// F6.A attempt 2 (P1): the write goes through [`write_config_file_0600`]
+/// so EVERY control-plane write leaves `config.yaml` at 0600 — the old plain
+/// tmp write regressed a 0600 config to umask 0644 (the file carries the
+/// admin token). `None` (tests/dev) → no-op without error. If the write
+/// fails, `Err` is returned; the caller decides whether to roll back the
+/// in-memory change.
 fn persist_config(ctx: &ApiContext, config: &ProxyConfig) -> Result<(), String> {
     let Some(path) = ctx.config_path.as_ref() else {
         return Ok(());
     };
     let yaml = serde_yaml::to_string(config).map_err(|e| format!("config yaml serialize error: {e}"))?;
-    // Temp in the SAME directory so the rename is atomic.
-    let tmp = std::path::PathBuf::from(format!("{}.tmp", path.to_string_lossy()));
-    std::fs::write(&tmp, yaml).map_err(|e| format!("config write failed: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("config commit failed: {e}"))?;
-    Ok(())
+    write_config_file_0600(path, &yaml).map_err(|e| format!("config write failed: {e}"))
 }
 
 /// Control-plane body limited to 1 MiB (review v4 #4). Distinguishes the
@@ -715,26 +1365,63 @@ async fn handle_put_config(ctx: &ApiContext, body: hyper::body::Incoming) -> Res
     // released until publishing (or aborting): nobody cuts in midway, and the
     // order is validate → persist → publish. Transactional from the in-memory
     // perspective: if validation or disk fail, the live config did not change.
-    let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    let candidate = patch.apply(&live);
+    // The guard is scoped LEXICALLY (block) so the future stays `Send` — the
+    // audit emission below awaits AFTER the lock is released.
+    let (requires_restart, mode_now) = {
+        let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
+        let candidate = patch.apply(&live);
 
-    // Exposure revalidation BEFORE persisting/mutating (review v6.1).
-    if let Err(e) = validate_control_plane_exposure(&candidate) {
-        return Ok(invalid_config_response(&e));
-    }
-    // Persistence first: if the YAML cannot be written, we publish nothing
-    // (before, it was applied in memory and diverged from disk).
-    if let Err(e) = persist_config(ctx, &candidate) {
-        return Ok(persist_failed_response(&e));
-    }
+        // Anti-lockout (F6.B attempt 2, finding F1 — the SAME invariant
+        // `apply_reload` already enforces): a running daemon booted with an
+        // admin token; a PUT that would REMOVE it (explicit
+        // `"admin_token":null`) closes every `/api/*` route mid-session
+        // (all 401, including for the operator who just sent the PUT), and
+        // because the candidate is persisted the closure would survive
+        // `cerberus restart` — recovery would require a hand edit of the
+        // YAML. Reject BEFORE persisting or publishing: the live config and
+        // the on-disk file keep the old token. Changing the token to a
+        // DIFFERENT value stays allowed and applies immediately (documented
+        // rotation semantics, live-verified).
+        // One fail-closed check covering every self-lockout encoding (see
+        // the reload guard): removal, empty, or whitespace-padded candidate
+        // tokens all close the plane.
+        let candidate_token_closes_plane = candidate.admin_token.as_deref().map_or_else(
+            || expected_admin_token(&live).is_some(),
+            |t| !admin_token_shape_is_valid(t),
+        );
+        if candidate_token_closes_plane {
+            return Ok(invalid_config_response(
+                "config update would remove, clear, or invalidate the admin token and CLOSE the \
+                 control plane (fail-closed); omit admin_token to keep it or PUT a new \
+                 non-empty, whitespace-free value to rotate it",
+            ));
+        }
 
-    // Review v6 F6: if `listen` changed, the LIVE socket cannot rebind;
-    // we return `requires_restart:true` so the UI warns that the new listen
-    // applies on the NEXT startup (the `listen` is already persisted).
-    let requires_restart = live.listen != candidate.listen;
-    // Publish: write the SAME config the hot path reads (hot-reload, P0-5).
-    *live = candidate;
-    drop(live);
+        // Exposure revalidation BEFORE persisting/mutating (review v6.1).
+        if let Err(e) = validate_control_plane_exposure(&candidate) {
+            return Ok(invalid_config_response(&e));
+        }
+        // Persistence first: if the YAML cannot be written, we publish
+        // nothing (before, it was applied in memory and diverged from disk).
+        if let Err(e) = persist_config(ctx, &candidate) {
+            return Ok(persist_failed_response(&e));
+        }
+
+        // Review v6 F6: if `listen` changed, the LIVE socket cannot rebind;
+        // we return `requires_restart:true` so the UI warns that the new
+        // listen applies on the NEXT startup (the `listen` is already
+        // persisted).
+        let requires_restart = live.listen != candidate.listen;
+        let mode_now = format!("{:?}", candidate.mode).to_lowercase();
+        // Publish: write the SAME config the hot path reads (hot-reload, P0-5).
+        *live = candidate;
+        (requires_restart, mode_now)
+    };
+
+    // Audit the applied mutation (F6.B attempt 2, security P2-1). The body
+    // is NEVER echoed (it may carry the rotated token) — only the honest
+    // action name.
+    audit_config_mutation(ctx, &mode_now, "config-update", "").await;
 
     let message = if requires_restart {
         r#"{"status":"ok","requires_restart":true,"message":"config updated (listen change applies on next restart)"}"#
@@ -765,16 +1452,30 @@ async fn events_snapshot(ctx: &ApiContext, limit: usize) -> Vec<AuditEvent> {
     all
 }
 
-async fn handle_get_events(ctx: &ApiContext, provider: Option<String>) -> Result<Response<Full<Bytes>>, String> {
+async fn handle_get_events(
+    ctx: &ApiContext,
+    provider: Option<String>,
+    tool: Option<String>,
+    since_unix: Option<i64>,
+) -> Result<Response<Full<Bytes>>, String> {
     let events = events_snapshot(ctx, 10_000).await;
     let events = filter_by_provider(&events, provider);
+    let events = filter_by_tool(&events, tool);
+    let events = filter_since(&events, since_unix);
     let json = serde_json::to_string(&events).map_err(|e| format!("serialize error: {e}"))?;
     Ok(json_response(StatusCode::OK, json))
 }
 
-async fn handle_get_stats(ctx: &ApiContext, provider: Option<String>) -> Result<Response<Full<Bytes>>, String> {
+async fn handle_get_stats(
+    ctx: &ApiContext,
+    provider: Option<String>,
+    tool: Option<String>,
+    since_unix: Option<i64>,
+) -> Result<Response<Full<Bytes>>, String> {
     let events = events_snapshot(ctx, 10_000).await;
     let events = filter_by_provider(&events, provider);
+    let events = filter_by_tool(&events, tool);
+    let events = filter_since(&events, since_unix);
     let s = stats::summary(&events);
     let json = serde_json::to_string(&s).map_err(|e| format!("serialize error: {e}"))?;
     Ok(json_response(StatusCode::OK, json))
@@ -793,6 +1494,9 @@ struct UpstreamPayload {
     name: String,
     url: String,
     auth_header: Option<String>,
+    /// Per-upstream operation mode (R9-11): `shadow` | `enforce`. `None`
+    /// (absent) → inherit the global mode, exactly like the YAML.
+    mode: Option<crate::config::OperationMode>,
 }
 
 async fn handle_get_upstreams(ctx: &ApiContext) -> Result<Response<Full<Bytes>>, String> {
@@ -802,14 +1506,34 @@ async fn handle_get_upstreams(ctx: &ApiContext) -> Result<Response<Full<Bytes>>,
         .iter()
         .map(|(name, up)| {
             format!(
-                r#"{{"name":{name:?},"url":{url:?},"auth_header":{auth:?}}}"#,
+                r#"{{"name":{name:?},"url":{url:?},"auth_header":{auth:?},"mode":{mode}}}"#,
                 url = up.url,
-                auth = up.auth_header
+                auth = up.auth_header,
+                mode = match up.mode {
+                    None => "null".to_string(),
+                    Some(crate::config::OperationMode::Shadow) => r#""shadow""#.to_string(),
+                    Some(crate::config::OperationMode::Enforce) => r#""enforce""#.to_string(),
+                },
             )
         })
         .collect();
     let joined = items.join(",");
     Ok(json_response(StatusCode::OK, format!("[{joined}]")))
+}
+
+/// F5 (r9-remediation): `add-provider` advertises `/{name}` as a local
+/// routable path, so the name must be a single path segment. Returns the
+/// 400 error message, or `None` when the shape is valid.
+fn upstream_name_shape_error(name: &str) -> Option<&'static str> {
+    if name.contains('/') {
+        Some("provider name must be a single path segment (no '/')")
+    } else if name.chars().any(char::is_whitespace) {
+        Some("provider name must not contain whitespace")
+    } else if name.contains('.') {
+        Some("provider name must not contain '.'")
+    } else {
+        None
+    }
 }
 
 /// Add/update an upstream. Hot mutation + YAML persistence (same policy as
@@ -830,35 +1554,63 @@ async fn handle_post_upstreams(ctx: &ApiContext, body: hyper::body::Incoming) ->
             ));
         }
     };
-    let payload: UpstreamPayload =
-        serde_json::from_slice(&body_bytes).map_err(|e| format!("invalid upstream payload: {e}"))?;
+    // F6.A attempt 2 (P3-1): a malformed JSON body must answer 400 like
+    // every other parse arm — the old `?` surfaced the serde error as a
+    // handler `Err`, so hyper logged "error from user's Service" and closed
+    // the connection (curl HTTP=000) instead of answering.
+    let payload: UpstreamPayload = match serde_json::from_slice(&body_bytes) {
+        Ok(p) => p,
+        Err(e) => return Ok(invalid_config_response(&format!("invalid upstream payload: {e}"))),
+    };
     if payload.name.is_empty() {
         return Ok(json_response(StatusCode::BAD_REQUEST, r#"{"error":"missing 'name'"}"#));
     }
     if payload.url.is_empty() {
-        return Ok(json_response(StatusCode::BAD_REQUEST, r#"{"error":"missing 'url'"}"#));
+        return Ok(json_response(StatusCode::BAD_REQUEST, r#"{"error":"missing 'url'}"#));
+    }
+    // F5 (r9-remediation): the CLI advertises `/{name}` as a routable path,
+    // so validate the shape BEFORE any mutation.
+    if let Some(msg) = upstream_name_shape_error(&payload.name) {
+        return Ok(json_response(
+            StatusCode::BAD_REQUEST,
+            &format!(r#"{{"error":"{msg}"}}"#),
+        ));
     }
 
     // Same transaction as PUT /api/config (review v6.1): candidate →
-    // validate → persist → publish, with the write lock held.
-    let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    let mut candidate = live.clone();
-    candidate.upstreams.insert(
-        payload.name.clone(),
-        UpstreamConfig {
-            url: payload.url.clone(),
-            path_prefix: None,
-            auth_header: payload.auth_header.unwrap_or_else(|| "authorization".to_string()),
-        },
-    );
-    if let Err(e) = validate_control_plane_exposure(&candidate) {
-        return Ok(invalid_config_response(&e));
-    }
-    if let Err(e) = persist_config(ctx, &candidate) {
-        return Ok(persist_failed_response(&e));
-    }
-    *live = candidate;
-    drop(live);
+    // validate → persist → publish, with the write lock held (scoped
+    // LEXICALLY — the audit emission awaits after the lock is released).
+    let (mode_now, saved_name) = {
+        let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
+        let mut candidate = live.clone();
+        candidate.upstreams.insert(
+            payload.name.clone(),
+            UpstreamConfig {
+                url: payload.url.clone(),
+                // F5 (r9-remediation): register `/{name}` so the advertised
+                // provider URL is actually routable (resolve_route
+                // priority-1, longest-match first — proxy.rs:1243).
+                path_prefix: Some(format!("/{}", payload.name)),
+                auth_header: payload.auth_header.unwrap_or_else(|| "authorization".to_string()),
+                mode: payload.mode,
+                expected_auth: None,
+            },
+        );
+        if let Err(e) = validate_control_plane_exposure(&candidate) {
+            return Ok(invalid_config_response(&e));
+        }
+        if let Err(e) = persist_config(ctx, &candidate) {
+            return Ok(persist_failed_response(&e));
+        }
+        let mode_now = format!("{:?}", candidate.mode).to_lowercase();
+        *live = candidate;
+        (mode_now, payload.name.clone())
+    };
+
+    // Audit the applied mutation (F6.B attempt 2, security P2-1). The name
+    // is operator-chosen metadata, not a secret; the URL/auth are NOT
+    // echoed.
+    audit_config_mutation(ctx, &mode_now, "upstream-add", &saved_name).await;
 
     Ok(json_response(
         StatusCode::OK,
@@ -874,29 +1626,37 @@ async fn handle_post_upstreams(ctx: &ApiContext, body: hyper::body::Incoming) ->
 async fn handle_delete_upstream(ctx: &ApiContext, name: &str) -> Result<Response<Full<Bytes>>, String> {
     // Same transaction as PUT /api/config (review v6.1). The guards are
     // evaluated on the candidate; the live config only changes at the end.
-    let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    if live.upstreams.contains_key(name) && live.upstreams.len() <= 1 {
-        return Ok(json_response(
-            StatusCode::BAD_REQUEST,
-            &format!(r#"{{"error":"cannot remove the last upstream","name":{name:?}}}"#),
-        ));
-    }
-    let mut candidate = live.clone();
-    if candidate.upstreams.remove(name).is_none() {
-        return Ok(json_response(
-            StatusCode::NOT_FOUND,
-            &format!(r#"{{"error":"upstream not found","name":{name:?}}}"#),
-        ));
-    }
-    if let Err(e) = persist_config(ctx, &candidate) {
-        return Ok(persist_failed_response(&e));
-    }
-    *live = candidate;
-    drop(live);
+    // The write guard is scoped LEXICALLY (the audit emission below awaits
+    // after the lock is released).
+    let (mode_now, removed) = {
+        let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
+        if live.upstreams.contains_key(name) && live.upstreams.len() <= 1 {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"cannot remove the last upstream","name":{name:?}}}"#),
+            ));
+        }
+        let mut candidate = live.clone();
+        if candidate.upstreams.remove(name).is_none() {
+            return Ok(json_response(
+                StatusCode::NOT_FOUND,
+                &format!(r#"{{"error":"upstream not found","name":{name:?}}}"#),
+            ));
+        }
+        if let Err(e) = persist_config(ctx, &candidate) {
+            return Ok(persist_failed_response(&e));
+        }
+        let mode_now = format!("{:?}", candidate.mode).to_lowercase();
+        *live = candidate;
+        (mode_now, name.to_string())
+    };
+
+    // Audit the applied mutation (F6.B attempt 2, security P2-1).
+    audit_config_mutation(ctx, &mode_now, "upstream-remove", &removed).await;
 
     Ok(json_response(
         StatusCode::OK,
-        &format!(r#"{{"status":"ok","deleted":{name:?}}}"#),
+        &format!(r#"{{"status":"ok","deleted":{removed:?}}}"#),
     ))
 }
 
@@ -925,7 +1685,11 @@ use crate::detection_policy::{
 ///
 /// Wire names stable with respect to v6.1 (`rules` = per-flag overrides) and
 /// `persisted: true`: what you see here is in the YAML.
-fn policy_document(policy: &DetectionPolicy, engine_rules: Option<usize>) -> serde_json::Value {
+fn policy_document(
+    policy: &DetectionPolicy,
+    engine_rules: Option<usize>,
+    effective_rules: Option<&[serde_json::Value]>,
+) -> serde_json::Value {
     serde_json::json!({
         "categories": policy
             .categories
@@ -943,6 +1707,7 @@ fn policy_document(policy: &DetectionPolicy, engine_rules: Option<usize>) -> ser
         "valid_categories": POLICY_CATEGORIES,
         "persisted": true,
         "engine_rules": engine_rules,
+        "effective_rules": effective_rules,
     })
 }
 
@@ -1060,7 +1825,27 @@ fn commit_policy(
 /// Current policy (categories, overrides, custom rules and allowlist).
 async fn handle_get_policy(ctx: &ApiContext) -> Result<Response<Full<Bytes>>, String> {
     let config = ctx.config.read().unwrap_or_else(|p| p.into_inner());
-    let json = serialize_policy_document(&config.policy, ctx.engine.as_ref().map(EngineControl::live_rules));
+    // F6.B (Appendix B B.3 `rules list`): the EFFECTIVE rule set (base pack
+    // rules + operator overrides + custom rules) exactly as the dataplane
+    // runs it, so the CLI/dashboard list what is really live.
+    let effective = ctx.engine.as_ref().map(|e| {
+        e.live_snapshot()
+            .rules()
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "flag": r.flag,
+                    "category": r.category.to_string(),
+                    "action": r.action.to_string(),
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let json = serialize_policy_document(
+        &config.policy,
+        ctx.engine.as_ref().map(EngineControl::live_rules),
+        effective.as_deref(),
+    );
     Ok(json_response(StatusCode::OK, json))
 }
 
@@ -1107,13 +1892,33 @@ fn apply_policy_patch(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Byte
         }
     };
     let engine_rules = engine_rules.or_else(|| ctx.engine.as_ref().map(EngineControl::live_rules));
-    json_response(StatusCode::OK, serialize_policy_document(&doc, engine_rules))
+    let effective = ctx.engine.as_ref().map(|e| {
+        e.live_snapshot()
+            .rules()
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "flag": r.flag,
+                    "category": r.category.to_string(),
+                    "action": r.action.to_string(),
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    json_response(
+        StatusCode::OK,
+        serialize_policy_document(&doc, engine_rules, effective.as_deref()),
+    )
 }
 
 /// Serialize the policy document; if `serde_json` failed (it cannot with
 /// this document), a minimal JSON is returned instead of an opaque 500.
-fn serialize_policy_document(policy: &DetectionPolicy, engine_rules: Option<usize>) -> String {
-    serde_json::to_string(&policy_document(policy, engine_rules))
+fn serialize_policy_document(
+    policy: &DetectionPolicy,
+    engine_rules: Option<usize>,
+    effective_rules: Option<&[serde_json::Value]>,
+) -> String {
+    serde_json::to_string(&policy_document(policy, engine_rules, effective_rules))
         .unwrap_or_else(|_| r#"{"error":"policy serialize failed"}"#.to_string())
 }
 
@@ -1143,30 +1948,131 @@ async fn handle_post_allowlist(ctx: &ApiContext, body: hyper::body::Incoming) ->
             ));
         }
     };
-    Ok(apply_allowlist_add(ctx, &body_bytes))
+    let resp = apply_allowlist_add(ctx, &body_bytes);
+    // Audit the applied mutation (F6.B attempt 2, security P2-1). The event
+    // carries NO fingerprint: the raw value is already HMAC'd for the
+    // config; the audit trail needs only the honest action name.
+    if resp.status() == StatusCode::OK {
+        let mode = live_operation_mode(ctx);
+        audit_config_mutation(ctx, &mode, "allowlist-add", "").await;
+    }
+    Ok(resp)
+}
+
+/// `POST /api/break-glass` — issue a one-shot bypass token (F2.3/R9-8).
+///
+/// Authenticated by the control-plane gate (`X-Cerberus-Admin-Token` /
+/// `Authorization: Bearer` when an admin token is configured): **no valid
+/// admin token → no break-glass token**. Body:
+/// `{"reason": "...", "provider": "openai"|null, "ttl_secs": 60}`.
+/// The raw reason is NEVER stored — only its truncated+hashed form. The
+/// returned nonce is redeemed exactly once on the data plane via
+/// `X-Cerberus-Bypass: break-glass:<nonce>`.
+async fn handle_post_break_glass(
+    ctx: &ApiContext,
+    body: hyper::body::Incoming,
+) -> Result<Response<Full<Bytes>>, String> {
+    let body_bytes = match collect_api_body(body).await {
+        Ok(b) => b,
+        Err(ApiBodyError::TooLarge) => {
+            return Ok(json_response_close(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                r#"{"error":"request body too large"}"#,
+            ));
+        }
+        Err(ApiBodyError::Read(msg)) => {
+            return Ok(json_response_close(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"{msg}"}}"#),
+            ));
+        }
+    };
+    Ok(apply_break_glass_issue(ctx, &body_bytes))
+}
+
+/// Core of `POST /api/break-glass` (testable without a socket).
+fn apply_break_glass_issue(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Bytes>> {
+    #[derive(serde::Deserialize)]
+    struct BreakGlassRequest {
+        /// Reason for the bypass (required, non-empty). Stored only hashed.
+        reason: String,
+        /// Optional provider scope. Absent/null → explicit global scope.
+        provider: Option<String>,
+        /// Optional TTL override in seconds (clamped to [1, 3600]).
+        ttl_secs: Option<u64>,
+    }
+    let parsed: BreakGlassRequest = match serde_json::from_slice(body_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"invalid break-glass request","detail":"{e}"}}"#),
+            );
+        }
+    };
+    if parsed.reason.trim().is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid break-glass request","detail":"reason must be non-empty"}"#,
+        );
+    }
+    let scope = parsed.provider.map_or_else(
+        cerberus_engine::break_glass::BreakGlassScope::global,
+        cerberus_engine::break_glass::BreakGlassScope::for_provider,
+    );
+    let ttl = parsed.ttl_secs.map(std::time::Duration::from_secs);
+    let token = ctx.break_glass.issue(scope, &parsed.reason, ttl);
+    tracing::info!(
+        "break-glass token issued (scope={}, ttl={}s); raw reason is not stored",
+        token.scope,
+        token.ttl_secs
+    );
+    // The nonce is the ONLY copy of the bearer credential returned to the
+    // operator; the ledger keeps the scope + reason hash, never the reason.
+    let body = format!(
+        r#"{{"status":"ok","nonce":"{}","reason_hash":"{}","scope":"{}","ttl_secs":{},"expires_at_nanos":{}}}"#,
+        token.nonce, token.reason_hash, token.scope, token.ttl_secs, token.expires_at_nanos
+    );
+    json_response(StatusCode::OK, body)
 }
 
 /// Core of `POST /api/allowlist` (testable without a socket).
+///
+/// R9-7/F6.3: the body carries the RAW value (`{"value": "sk-..."}`); only
+/// its **HMAC fingerprint** (`cerberus:allowlist:v1` domain, installation
+/// key) is persisted — the raw value is NEVER stored, echoed back in the
+/// response, or logged. Requires the installation audit key (product wiring
+/// always keys).
 fn apply_allowlist_add(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Bytes>> {
     let value = match allowlist_value(body_bytes) {
         Ok(v) => v,
         Err(resp) => return *resp,
     };
+    let Some(key) = ctx.audit_hash_key() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"installation key not wired: the allowlist persists HMAC fingerprints (R9-7) and cannot run unkeyed"}"#,
+        );
+    };
+    let fingerprint = crate::allowlist::fingerprint(key, &value);
 
     let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    if live.policy.allows(&value) {
+    if live.policy.allowlist.contains(&fingerprint) {
         // Idempotent: it was already there, we do not rewrite the YAML.
         return json_response(
             StatusCode::OK,
-            &format!(r#"{{"status":"ok","added":{value:?},"already_present":true}}"#),
+            &format!(r#"{{"status":"ok","fingerprint":"{fingerprint}","already_present":true}}"#),
         );
     }
     let mut candidate = live.policy.clone();
-    candidate.allowlist.push(value.clone());
+    candidate.allowlist.push(fingerprint.clone());
     if let Err(resp) = commit_policy(ctx, &mut live, candidate) {
         return *resp;
     }
-    json_response(StatusCode::OK, &format!(r#"{{"status":"ok","added":{value:?}}}"#))
+    json_response(
+        StatusCode::OK,
+        &format!(r#"{{"status":"ok","fingerprint":"{fingerprint}"}}"#),
+    )
 }
 
 /// Extract `{"value": "…"}` from the body of the allowlist routes.
@@ -1207,29 +2113,56 @@ async fn handle_delete_allowlist(
             ));
         }
     };
-    Ok(apply_allowlist_remove(ctx, &body_bytes))
+    let resp = apply_allowlist_remove(ctx, &body_bytes);
+    // Audit the applied mutation (F6.B attempt 2, security P2-1); NO
+    // fingerprint in the event (honest action name only).
+    if resp.status() == StatusCode::OK {
+        let mode = live_operation_mode(ctx);
+        audit_config_mutation(ctx, &mode, "allowlist-remove", "").await;
+    }
+    Ok(resp)
 }
 
 /// Core of `DELETE /api/allowlist` (testable without a socket).
+///
+/// R9-7/F6.3: the body value may be the RAW value (its fingerprint is
+/// computed and removed) or an already-persisted fingerprint. Error and ok
+/// responses carry the FINGERPRINT only — never the raw value.
 fn apply_allowlist_remove(ctx: &ApiContext, body_bytes: &[u8]) -> Response<Full<Bytes>> {
     let value = match allowlist_value(body_bytes) {
         Ok(v) => v,
         Err(resp) => return *resp,
     };
+    // Either the caller passes the fingerprint itself (the dashboard lists
+    // fingerprints) or the raw value (compute its fingerprint here).
+    let fingerprint = if crate::allowlist::is_fingerprint(&value) {
+        value
+    } else {
+        let Some(key) = ctx.audit_hash_key() else {
+            return json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":"installation key not wired: the allowlist persists HMAC fingerprints (R9-7) and cannot run unkeyed"}"#,
+            );
+        };
+        crate::allowlist::fingerprint(key, &value)
+    };
 
     let mut live = ctx.config.write().unwrap_or_else(|p| p.into_inner());
-    if !live.policy.allows(&value) {
+    if !live.policy.allowlist.contains(&fingerprint) {
         return json_response(
             StatusCode::NOT_FOUND,
-            &format!(r#"{{"error":"not in allowlist","value":{value:?}}}"#),
+            &format!(r#"{{"error":"not in allowlist","fingerprint":"{fingerprint}"}}"#),
         );
     }
     let mut candidate = live.policy.clone();
-    candidate.allowlist.retain(|v| *v != value);
+    candidate.allowlist.retain(|v| *v != fingerprint);
     if let Err(resp) = commit_policy(ctx, &mut live, candidate) {
         return *resp;
     }
-    json_response(StatusCode::OK, &format!(r#"{{"status":"ok","removed":{value:?}}}"#))
+    json_response(
+        StatusCode::OK,
+        &format!(r#"{{"status":"ok","removed":"{fingerprint}"}}"#),
+    )
 }
 
 // ─── Effective CSP of the dashboard (review v6.1) ───────────────────────
@@ -1515,6 +2448,27 @@ pub async fn record_event(ctx: &ApiContext, event: AuditEvent) {
     }
 }
 
+/// Audit a successful control-plane CONFIG MUTATION (F6.B attempt 2,
+/// security P2-1): emit the event (visible via `GET /api/events`) AND a tee
+/// log line. Reload used to swap the whole live config with zero trace; the
+/// same gap covered config PUT, allowlist CRUD, upstream CRUD and the pack
+/// mutations.
+///
+/// `mode` = the live operation mode at mutation time; `detail` = optional
+/// non-secret metadata (a pack/upstream name). NEVER a token, a raw
+/// allowlist value or a fingerprint — the event must stay secret-free.
+async fn audit_config_mutation(ctx: &ApiContext, mode: &str, action: &str, detail: &str) {
+    tracing::info!(action = %action, detail = %detail, "control-plane config mutation applied");
+    let event = AuditEvent::control_plane(mode, action, detail);
+    record_event(ctx, event).await;
+}
+
+/// Live operation mode as a lowercase string (the event `mode` field).
+fn live_operation_mode(ctx: &ApiContext) -> String {
+    let live = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+    format!("{:?}", live.mode).to_lowercase()
+}
+
 /// Extract the provider from the request path.
 ///
 /// E.g. "/openai/v1/chat" → "openai", "/anthropic/v1/messages" → "anthropic".
@@ -1651,7 +2605,7 @@ mod tests {
             ));
         }
 
-        let s = handle_get_stats(&ctx, Some("openai".to_string()))
+        let s = handle_get_stats(&ctx, Some("openai".to_string()), None, None)
             .await
             .unwrap()
             .into_body()
@@ -1668,7 +2622,7 @@ mod tests {
         );
 
         // Without provider → counts both.
-        let all = handle_get_stats(&ctx, None)
+        let all = handle_get_stats(&ctx, None, None, None)
             .await
             .unwrap()
             .into_body()
@@ -1772,6 +2726,8 @@ mod tests {
                 url: "https://api.openai.com".to_string(),
                 path_prefix: None,
                 auth_header: "authorization".to_string(),
+                mode: None,
+                expected_auth: None,
             },
         );
         let patch: ConfigPatch = serde_json::from_str(r#"{"mode":"shadow"}"#).unwrap();
@@ -1909,6 +2865,79 @@ mod tests {
         assert!(persist_config(&ctx, &ProxyConfig::default()).is_err());
     }
 
+    /// F6.A attempt 2 (P1 regression): a control-plane write on a 0600
+    /// fixture must leave config.yaml at 0600 — the file carries the admin
+    /// token, and the old plain tmp write replaced it with a umask 0644 file
+    /// on the first PUT. `persist_config` is the writer behind every
+    /// mutation (PUT /api/config, PUT /api/policy, POST /api/allowlist,
+    /// upstream CRUD).
+    #[test]
+    fn persist_config_keeps_0600_on_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus_f6a2_persist_existing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "listen: 127.0.0.1:8787\nadmin_token: stale-token\n").expect("fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod fixture");
+        }
+
+        // `path` is reused by the unix mode-check below; on non-unix targets that
+        // use is cfg'd out and the clone is technically redundant (clippy 1.98).
+        #[allow(clippy::redundant_clone)]
+        let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default()))).with_config_path(path.clone());
+        persist_config(&ctx, &ProxyConfig::default()).expect("persist");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "config.yaml must stay 0600 after a control-plane write, got {mode:o}"
+            );
+        }
+        assert!(
+            !dir.join("config.yaml.tmp").exists(),
+            "no tmp residue may be left behind"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F6.A attempt 2 (P1): the first write on a fresh path must create the
+    /// file at 0600 from birth too (no umask-derived creation).
+    #[test]
+    fn persist_config_creates_the_file_at_0600() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus_f6a2_persist_fresh_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("config.yaml");
+        // `path` is reused by the unix mode-check below; on non-unix targets that
+        // use is cfg'd out and the clone is technically redundant (clippy 1.98).
+        #[allow(clippy::redundant_clone)]
+        let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default()))).with_config_path(path.clone());
+        persist_config(&ctx, &ProxyConfig::default()).expect("persist");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "a created config.yaml must be 0600, got {mode:o}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ─── F6 v6.1 fix: persistent detection policy ───────────────────────────
 
     /// Minimal valid custom rule.
@@ -1923,7 +2952,8 @@ mod tests {
     }
 
     /// Context with YAML persistence and a connected live engine (what the real
-    /// daemon has).
+    /// daemon has). R9-7: the installation audit-hash key is wired (like the
+    /// daemon) — the allowlist fingerprints require it.
     fn policy_ctx(dir: &std::path::Path) -> (ApiContext, crate::detection_policy::EngineControl) {
         let base = vec![crate::detection_policy::tests_support::base_rule("pack.token")];
         let engine =
@@ -1932,8 +2962,18 @@ mod tests {
         let control = crate::detection_policy::EngineControl::new(live, base, None);
         let ctx = ApiContext::new(Arc::new(RwLock::new(ProxyConfig::default())))
             .with_config_path(dir.join("config.yaml"))
-            .with_engine(control.clone());
+            .with_engine(control.clone())
+            .with_audit_hash_key(TEST_INSTALLATION_KEY.to_vec());
         (ctx, control)
+    }
+
+    /// Deterministic test installation key (R9-7 fingerprints).
+    const TEST_INSTALLATION_KEY: &[u8] = b"cerberus-test-installation-key-0123456789ab";
+
+    /// The fingerprint `apply_allowlist_add` persists for `raw` under
+    /// [`TEST_INSTALLATION_KEY`].
+    fn test_fingerprint(raw: &str) -> String {
+        crate::allowlist::fingerprint(TEST_INSTALLATION_KEY, raw)
     }
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -2038,13 +3078,14 @@ mod tests {
         let (ctx, control) = policy_ctx(&dir);
         assert_eq!(control.live_rules(), 1, "starts with the pack rule");
 
+        let fp = test_fingerprint("sk-EXAMPLE");
         let (status, doc) = put_policy(
             &ctx,
             &serde_json::json!({
                 "categories": {"secrets": "block"},
                 "rules": {"pack.token": "warn"},
                 "custom_rules": [custom_rule("custom.badge", "internal_code", "block", r"BADGE-\d{4}")],
-                "allowlist": ["sk-EXAMPLE"],
+                "allowlist": [fp],
             }),
         );
         assert_eq!(status, StatusCode::OK, "{doc}");
@@ -2052,7 +3093,10 @@ mod tests {
         assert_eq!(doc["categories"]["secrets"].as_str(), Some("block"));
         assert_eq!(doc["rules"]["pack.token"].as_str(), Some("warn"));
         assert_eq!(doc["custom_rules"][0]["flag"].as_str(), Some("custom.badge"));
-        assert_eq!(doc["allowlist"][0].as_str(), Some("sk-EXAMPLE"));
+        assert_eq!(
+            doc["allowlist"][0].as_str(),
+            Some(test_fingerprint("sk-EXAMPLE")).as_deref()
+        );
 
         // Live engine: the pack rule is STILL there and the custom one was added.
         assert_eq!(control.live_rules(), 2, "packs + custom, without losing any");
@@ -2063,7 +3107,11 @@ mod tests {
         let reloaded = ProxyConfig::parse(&yaml).expect("reparse");
         assert_eq!(reloaded.policy, ctx.config.read().unwrap().policy);
         assert_eq!(reloaded.policy.custom_rules.len(), 1);
-        assert_eq!(reloaded.policy.allowlist, vec!["sk-EXAMPLE".to_string()]);
+        assert_eq!(reloaded.policy.allowlist, vec![test_fingerprint("sk-EXAMPLE")]);
+        assert!(
+            !yaml.contains("sk-EXAMPLE\""),
+            "raw value never lands in the YAML: {yaml}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2113,8 +3161,12 @@ mod tests {
     async fn policy_and_allowlist_are_exposed_together() {
         let dir = tmpdir("together");
         let (ctx, _control) = policy_ctx(&dir);
-        let (status, _) = decode(apply_allowlist_add(&ctx, br#"{"value":"sk-EXAMPLE-do-not-flag"}"#));
-        assert_eq!(status, StatusCode::OK);
+        let raw = "sk-EXAMPLE-do-not-flag";
+        let (status, doc) = decode(apply_allowlist_add(&ctx, br#"{"value":"sk-EXAMPLE-do-not-flag"}"#));
+        assert_eq!(status, StatusCode::OK, "{doc}");
+        // R9-7: the response carries the FINGERPRINT, never the raw value.
+        assert_eq!(doc["fingerprint"].as_str(), Some(test_fingerprint(raw)).as_deref());
+        assert!(!doc.to_string().contains(raw), "raw value must not be echoed: {doc}");
 
         let body = handle_get_policy(&ctx)
             .await
@@ -2129,14 +3181,16 @@ mod tests {
             Some(0),
             "without an explicit override, the API exposes inherited categories as absent"
         );
-        assert_eq!(json["allowlist"][0].as_str(), Some("sk-EXAMPLE-do-not-flag"));
+        assert_eq!(json["allowlist"][0].as_str(), Some(test_fingerprint(raw)).as_deref());
         assert_eq!(json["valid_actions"].as_array().map(Vec::len), Some(4));
         assert_eq!(json["valid_categories"].as_array().map(Vec::len), Some(3));
         assert_eq!(json["persisted"].as_bool(), Some(true), "the policy is in the YAML");
 
-        // The allowlist ended up in the YAML (survives restart).
+        // The allowlist FINGERPRINT ended up in the YAML (survives restart);
+        // the raw value does not exist anywhere on disk (R9-7).
         let yaml = std::fs::read_to_string(dir.join("config.yaml")).expect("yaml");
-        assert!(yaml.contains("sk-EXAMPLE-do-not-flag"), "{yaml}");
+        assert!(yaml.contains(test_fingerprint(raw).as_str()), "{yaml}");
+        assert!(!yaml.contains(raw), "raw value never persisted: {yaml}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2150,12 +3204,22 @@ mod tests {
         }
         assert_eq!(
             ctx.config.read().unwrap().policy.allowlist,
-            vec!["dup".to_string()],
+            vec![test_fingerprint("dup")],
             "it is not duplicated"
         );
 
         let (status, doc) = decode(apply_allowlist_remove(&ctx, br#"{"value":"ghost"}"#));
         assert_eq!(status, StatusCode::NOT_FOUND, "{doc}");
+        // R9-7: the 404 echoes the computed FINGERPRINT, never the raw value.
+        assert!(
+            !doc.to_string().contains("ghost"),
+            "the raw value must not be echoed back: {doc}"
+        );
+        assert_eq!(
+            doc["fingerprint"].as_str(),
+            Some(test_fingerprint("ghost")).as_deref(),
+            "the fingerprint identifies the entry"
+        );
 
         let (status, _) = decode(apply_allowlist_remove(&ctx, br#"{"value":"dup"}"#));
         assert_eq!(status, StatusCode::OK);
@@ -2350,5 +3414,102 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("nosniff")
         );
+    }
+
+    // ── F6 (r9-remediation): reload guard is candidate-independent ──
+
+    fn f6_upstream(url: &str) -> UpstreamConfig {
+        UpstreamConfig {
+            url: url.to_string(),
+            path_prefix: None,
+            auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
+        }
+    }
+
+    fn f6_body(resp: Response<Full<Bytes>>) -> String {
+        String::from_utf8_lossy(&resp.into_body().into_inner().expect("body")).into_owned()
+    }
+
+    // ── F5 (r9-remediation): add-provider name shape ──
+
+    #[test]
+    fn f5_provider_name_shape_rules_reject_non_segment_names() {
+        // F5: the CLI advertises `/{name}` as a routable path
+        // (provider_url), so the name must be a single path segment: no
+        // `/`, no whitespace, no `.` (which also blocks `..`). Valid
+        // segment names are accepted.
+        assert!(upstream_name_shape_error("myproj").is_none());
+        assert!(upstream_name_shape_error("my-proj_2").is_none());
+        assert_eq!(
+            upstream_name_shape_error("a/b"),
+            Some("provider name must be a single path segment (no '/')")
+        );
+        assert!(upstream_name_shape_error("a b").is_some(), "whitespace rejected");
+        assert!(upstream_name_shape_error("..").is_some(), "dot-dot rejected");
+        assert!(upstream_name_shape_error("v1.2").is_some(), "dots rejected");
+    }
+
+    #[test]
+    fn f6_reload_rejects_empty_candidate_upstreams_even_with_live_upstreams() {
+        // F6-reject: candidate upstreams `{}` must be rejected REGARDLESS of
+        // the live map. The old `live.is_empty() && candidate.is_empty()`
+        // guard let the swap through while the live map still had upstreams
+        // → the live config became zero-upstream and every data-plane
+        // request failed (UserAbsoluteUriRequired). Fail-closed: reject and
+        // RETAIN the live config (no brick).
+        let dir = std::env::temp_dir().join(format!("cerberus-f6-reject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "listen: 127.0.0.1:0\nmode: enforce\nupstreams: {}\n").expect("candidate config");
+
+        let mut live = ProxyConfig::default();
+        live.upstreams
+            .insert("openai".to_string(), f6_upstream("https://api.openai.com"));
+        let ctx = ApiContext::new(Arc::new(RwLock::new(live))).with_config_path(path);
+
+        let resp = apply_reload(&ctx);
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "empty candidate upstreams must be rejected"
+        );
+        assert!(
+            f6_body(resp).contains("zero upstreams"),
+            "the rejection must surface the upstream error"
+        );
+        // Live config RETAINED: the upstream map is untouched (no brick).
+        let after = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(after.upstreams.len(), 1, "live upstreams retained");
+        assert!(after.upstreams.contains_key("openai"), "no silent default");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn f6_reload_accepts_nonempty_candidate_upstreams() {
+        // F6-accept: a candidate with upstreams reloads as today.
+        let dir = std::env::temp_dir().join(format!("cerberus-f6-accept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.yaml");
+        std::fs::write(
+            &path,
+            "listen: 127.0.0.1:0\nmode: enforce\nupstreams:\n  openai:\n    url: https://api.openai.com\n",
+        )
+        .expect("candidate config");
+
+        let mut live = ProxyConfig::default();
+        live.upstreams
+            .insert("stale".to_string(), f6_upstream("https://stale.example.com"));
+        let ctx = ApiContext::new(Arc::new(RwLock::new(live))).with_config_path(path);
+
+        let resp = apply_reload(&ctx);
+        assert_eq!(resp.status(), StatusCode::OK, "non-empty candidate reloads");
+        let after = ctx.config.read().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(after.upstreams.len(), 1, "candidate applied");
+        assert!(after.upstreams.contains_key("openai"), "candidate applied");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

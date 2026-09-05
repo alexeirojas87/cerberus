@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -80,6 +80,13 @@ pub(crate) fn license_path() -> PathBuf {
         .map_or_else(|| config_dir().join("license.json"), PathBuf::from)
 }
 
+/// Daemon log file (F6.B, Appendix B B.5 `cerberus logs [-f]`): the daemon
+/// tees its non-blocking log stream here while running. No secrets — the
+/// logging layer only ever emits flags, categories, counts and hashes.
+pub(crate) fn log_file_path() -> PathBuf {
+    config_dir().join("logs").join("cerberus.log")
+}
+
 /// Load the active license for the daemon (F7 connection in the product,
 /// fix from code review item 12).
 ///
@@ -122,19 +129,99 @@ fn load_proxy_config() -> Option<ProxyConfig> {
 }
 
 /// Load config from an explicit path to isolate the filesystem in tests.
+///
+/// Fix P3-1 (attempt 2): a config file that EXISTS but fails to parse is
+/// never silently swallowed — the real serde error is logged loudly (the
+/// operator previously saw the misleading `no upstreams configured` instead).
+/// The behavior stays fail-closed: the invalid file is ignored and the
+/// defaults apply (or boot refuses where required).
 fn load_proxy_config_from(path: &std::path::Path) -> Option<ProxyConfig> {
     if !path.exists() {
         return None;
     }
-    ProxyConfig::from_file(path).ok()
+    match ProxyConfig::from_file(path) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            tracing::error!(
+                "proxy config file {} is INVALID and will be IGNORED (fail-closed defaults apply — fix the parse error or remove the file): {e}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
-/// Payload-hash secret (HMAC-SHA256, P1-12) from `CERBERUS_HMAC_SECRET`.
-fn payload_secret_from_env() -> Option<Vec<u8>> {
-    std::env::var("CERBERUS_HMAC_SECRET")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(String::into_bytes)
+/// Resolve the per-installation audit-hash key (R9-16, F5.2).
+///
+/// Precedence: `CERBERUS_HMAC_SECRET` env override → persisted key file →
+/// generate + persist (0600, atomic). There is NO unkeyed fallback: every
+/// hash of secret material in the product is keyed HMAC-SHA256. See
+/// `audit_key.rs` for the full key-management design.
+pub(crate) fn resolve_audit_key() -> (Vec<u8>, crate::audit_key::KeySource) {
+    crate::audit_key::resolve_or_create_key(&crate::audit_key::default_config_dir())
+}
+
+/// Migrate legacy RAW allowlist entries to HMAC fingerprints (R9-7/F6.3).
+///
+/// Runs at boot BEFORE the policy validation (the store write gate rejects
+/// raw entries) and BEFORE the shared config exists, so the hot path never
+/// sees a raw entry. The migrated config is persisted back to `config.yaml`
+/// atomically (tmp+rename) when the YAML is the config source — the raw
+/// value then no longer exists anywhere on disk. In-memory only (no
+/// persistence) when the config came from env/test wiring. The conversion is
+/// loud: every migrated entry is announced; NO raw backup file is kept (a
+/// raw backup would itself violate the R9-7 invariant).
+fn migrate_allowlist_to_fingerprints(config: &mut ProxyConfig, audit_key: &[u8]) {
+    let persist = {
+        let path = config_file();
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    };
+    if let Err(e) = migrate_allowlist_to_fingerprints_persisting_to(config, audit_key, persist) {
+        eprintln!("warning: {e}");
+    }
+}
+
+/// The testable core of the allowlist migration: converts raw entries with
+/// `audit_key`, logs the conversion loudly, and (when `persist_to` is set)
+/// rewrites the YAML atomically at 0600 so the raw value no longer exists on
+/// disk. Returns the number of migrated entries, or the persist error (the
+/// in-memory migration has already happened — the raw entries are gone from
+/// the running config either way; only the disk rewrite can fail).
+fn migrate_allowlist_to_fingerprints_persisting_to(
+    config: &mut ProxyConfig,
+    audit_key: &[u8],
+    persist_to: Option<PathBuf>,
+) -> Result<usize, String> {
+    let migrated = cerberus_proxy::allowlist::migrate_entries(&mut config.policy.allowlist, Some(audit_key));
+    if migrated == 0 {
+        return Ok(0);
+    }
+    println!(
+        "allowlist migration (R9-7): {migrated} raw entr{} converted to HMAC fingerprints \
+         (domain cerberus:allowlist:v1); raw values are no longer persisted anywhere",
+        if migrated == 1 { "y" } else { "ies" }
+    );
+    // Persist only when the YAML on disk is the config source (the daemon's
+    // normal path); env-driven configs have nothing to rewrite.
+    if let Some(path) = persist_to {
+        let yaml = serde_yaml::to_string(config).map_err(|e| format!("allowlist-migrated YAML dump failed: {e}"))?;
+        atomic_write_config(&path, &yaml).map_err(|e| format!("allowlist migration persist: {e}"))?;
+    }
+    Ok(migrated)
+}
+
+/// Atomic config write (tmp + rename, 0600 — the YAML carries the admin
+/// token and now only fingerprinted allowlist entries).
+///
+/// F6.A attempt 2 (P2): delegates to the shared F-1-discipline helper so the
+/// tmp is CREATED with mode 0600 (the old write-then-chmod briefly exposed
+/// the tmp at the umask default before the chmod).
+fn atomic_write_config(path: &Path, content: &str) -> Result<(), String> {
+    cerberus_proxy::api::write_config_file_0600(path, content).map_err(|e| format!("config write: {e}"))
 }
 
 /// Non-empty env value as `Option<String>`.
@@ -151,7 +238,8 @@ fn retention_days_from_env() -> u64 {
         .unwrap_or(90)
 }
 
-/// Compile the base engine (default rules + optional payload secret).
+/// Compile the base engine (default rules + the installation payload-hash
+/// key — ALWAYS keyed, R9-16/F5.2).
 /// This is the ONLY source of rules for the daemon and the CLI: from here
 /// derives both the `PackManager` (which merges it with the packs, finding 7)
 /// and the snapshot the proxy receives — without a second independent
@@ -160,14 +248,13 @@ fn retention_days_from_env() -> u64 {
 /// # Errors
 ///
 /// Returns the error from loading/compiling the rules.
-fn build_base_engine() -> Result<cerberus_engine::engine::CompiledEngine, String> {
+fn build_base_engine(audit_key: &[u8]) -> Result<cerberus_engine::engine::CompiledEngine, String> {
     let rules_json = default_rules_json();
     let rules = load_rules_from_str(&rules_json).map_err(|e| format!("error loading rules: {e}"))?;
-    let mut builder = EngineBuilder::new(&rules);
-    if let Some(secret) = payload_secret_from_env() {
-        builder = builder.with_payload_secret(secret);
-    }
-    builder.build().map_err(|e| format!("engine build error: {e}"))
+    EngineBuilder::new(&rules)
+        .with_payload_secret(audit_key.to_vec())
+        .build()
+        .map_err(|e| format!("engine build error: {e}"))
 }
 
 /// Open a `PackManager` over `packs_dir()` with the base engine — the SAME
@@ -176,8 +263,8 @@ fn build_base_engine() -> Result<cerberus_engine::engine::CompiledEngine, String
 /// # Errors
 ///
 /// Returns an error if the packs directory cannot be created or compilation fails.
-fn open_packs_manager() -> Result<PackManager, String> {
-    let engine = build_base_engine()?;
+fn open_packs_manager(audit_key: &[u8]) -> Result<PackManager, String> {
+    let engine = build_base_engine(audit_key)?;
     let license = load_license(Some(&license_path()));
     let trust_root =
         PackTrustRoot::from_optional_key(env_nonempty("CERBERUS_PACK_TRUST_ROOT")).gated_by_pro(license.is_pro());
@@ -239,6 +326,8 @@ fn resolve_config(port: u16, file_cfg: Option<ProxyConfig>) -> Result<ProxyConfi
                 url: url.clone(),
                 path_prefix: Some("/openai/".to_string()),
                 auth_header: upstream_auth.clone(),
+                mode: None,
+                expected_auth: None,
             },
         );
         m.insert(
@@ -247,6 +336,8 @@ fn resolve_config(port: u16, file_cfg: Option<ProxyConfig>) -> Result<ProxyConfi
                 url: url.clone(),
                 path_prefix: Some("/anthropic/".to_string()),
                 auth_header: upstream_auth.clone(),
+                mode: None,
+                expected_auth: None,
             },
         );
         m.insert(
@@ -255,6 +346,8 @@ fn resolve_config(port: u16, file_cfg: Option<ProxyConfig>) -> Result<ProxyConfi
                 url,
                 path_prefix: None,
                 auth_header: upstream_auth,
+                mode: None,
+                expected_auth: None,
             },
         );
         config.upstreams = m;
@@ -284,13 +377,47 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
         return Err("Cerberus is already running. Use 'cerberus stop' first.".to_string());
     }
 
+    // R9-16 (F5.2): resolve the per-installation audit-hash key ONCE per
+    // boot and thread it through EVERY engine construction + the API context,
+    // so all secret-material hashes (event hashes, entropy, break-glass
+    // reasons) share one keyed, domain-separated scheme.
+    let (audit_key, key_source) = resolve_audit_key();
+    println!("audit hashing: keyed HMAC-SHA256 (key source: {})", key_source.label());
+    // F5 F-3 (loudness): a GENERATED or EPHEMERAL key is a security-relevant
+    // boot condition, not a routine line — a regenerated key breaks dedup
+    // correlation with all events hashed under the previous key, and an
+    // ephemeral key makes every hash per-process and non-comparable. WARN in
+    // addition to the boot label (F5 security panel follow-up).
+    if key_source.requires_loud_warning() {
+        eprintln!("warning: audit hash key: {}", key_source.label());
+        tracing::warn!("audit hash key: {}", key_source.label());
+    }
+
     // UNIQUE base engine (finding 7): used by PackManager and, after the
     // initial pack load, by the snapshot the proxy receives.
-    let base_engine = build_base_engine()?;
+    let base_engine = build_base_engine(&audit_key)?;
 
     // A) Real config: base = config.yaml (without losing fields) + overrides.
     let file_cfg = load_proxy_config();
     let mut config = resolve_config(port, file_cfg)?;
+
+    // R9-7 (F6.3): migrate legacy RAW allowlist entries to HMAC fingerprints
+    // BEFORE the policy is validated (the store write gate rejects raw).
+    // Idempotent; the conversion is loud and the config is persisted
+    // atomically so the raw value never survives on disk.
+    migrate_allowlist_to_fingerprints(&mut config, &audit_key);
+
+    // R9-5 (F6): the control plane must never boot silently open. With no
+    // admin token configured every data /api/* route answers 401 (the API is
+    // CLOSED in dev mode, not open) — make that unmistakable at boot.
+    if cerberus_proxy::api::expected_admin_token(&config).is_none() {
+        eprintln!(
+            "warning: NO admin token configured — the control plane is CLOSED (every data /api/* \
+             route responds 401, loopback included; R9-5). Set admin_token in {} or export \
+             CERBERUS_ADMIN_TOKEN to operate the dashboard/API",
+            config_file().display()
+        );
+    }
 
     // --chain: rewrite all upstreams to forward to another local proxy
     // (e.g. headroom) instead of the provider directly. This lets you
@@ -363,9 +490,7 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     if !trust_root.is_enabled() {
         tracing::warn!("packs: no effective trust root (Free tier or root missing) — base engine, zero packs");
     }
-    let engine_for_proxy = packs_manager
-        .snapshot_engine(payload_secret_from_env().as_deref())
-        .await?;
+    let engine_for_proxy = packs_manager.snapshot_engine(Some(&audit_key)).await?;
     let installed = packs_manager.list_packs().await.len();
     println!(
         "packs: manager ready at {} ({} packs installed; snapshot passes to the proxy)",
@@ -385,12 +510,8 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
         .policy
         .validate()
         .map_err(|e| format!("invalid policy in {}: {e}", config_file().display()))?;
-    let boot_engine = cerberus_proxy::detection_policy::build_engine(
-        &base_rules,
-        &config.policy,
-        payload_secret_from_env().as_deref(),
-    )
-    .map_err(|e| format!("policy engine build error: {e}"))?;
+    let boot_engine = cerberus_proxy::detection_policy::build_engine(&base_rules, &config.policy, Some(&audit_key))
+        .map_err(|e| format!("policy engine build error: {e}"))?;
     println!(
         "policy: {} categories, {} overrides, {} custom rules, {} allowlist entries → engine with {} rules ({} base)",
         config.policy.categories.len(),
@@ -405,11 +526,8 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     // worker writes the snapshot after install/rollback and the control plane
     // republishes after each policy change.
     let live_engine: Arc<RwLock<Arc<CompiledEngine>>> = Arc::new(std::sync::RwLock::new(Arc::new(boot_engine)));
-    let engine_control = cerberus_proxy::detection_policy::EngineControl::new(
-        live_engine.clone(),
-        base_rules,
-        payload_secret_from_env(),
-    );
+    let engine_control =
+        cerberus_proxy::detection_policy::EngineControl::new(live_engine.clone(), base_rules, Some(audit_key.clone()));
 
     // Rule packs worker (async) — runs install/rollback/list against the
     // PackManager and, after each mutation, replaces the BASE rules and
@@ -420,9 +538,12 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     let packs_worker_manager = pack_worker_manager.clone();
     let engine_control_worker = engine_control.clone();
     let policy_source = shared_config.clone();
+    let audit_key_for_worker = audit_key.clone();
     tokio::spawn(async move {
         use cerberus_proxy::api::PackCommand;
-        let payload_secret = payload_secret_from_env();
+        // The SAME installation key follows hot-reloads (R9-16/F5.2): pack
+        // snapshots are compiled keyed exactly like the boot engine.
+        let payload_secret = Some(audit_key_for_worker.clone());
         while let Some(cmd) = pack_rx.recv().await {
             // Each arm produces (reply, Result) and the send happens once.
             let outcome: (
@@ -493,10 +614,101 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
                     let res = Ok(format!("{} packs installed", packs.len()));
                     (reply, res)
                 }
+                PackCommand::Enable { name, reply } => {
+                    // Same gate as install/rollback: enabling (re)activates
+                    // rules — a Pro benefit (open-core consistency).
+                    let license = load_license(Some(&license_path()));
+                    let res = if let Err(e) = require_pro_for_pack_ops(&license) {
+                        Err(format!("pack enable aborted via control plane: {e}"))
+                    } else {
+                        match packs_worker_manager.set_active(&name, true).await {
+                            Ok(()) => match packs_worker_manager.snapshot_engine(payload_secret.as_deref()).await {
+                                Ok(new_engine) => {
+                                    match rebase_live_engine(&engine_control_worker, &policy_source, &new_engine) {
+                                        Ok(rules) => Ok(format!(
+                                            "pack '{name}' enabled (hot-reload): engine now has {rules} rules"
+                                        )),
+                                        Err(e) => Err(format!("policy rebase failed after enable: {e}")),
+                                    }
+                                }
+                                Err(e) => Err(format!("snapshot engine failed: {e}")),
+                            },
+                            Err(e) => Err(e),
+                        }
+                    };
+                    (reply, res)
+                }
+                PackCommand::Disable { name, reply } => {
+                    // Disabling only REDUCES detection: available in every
+                    // tier (no trust-root gate).
+                    let res = match packs_worker_manager.set_active(&name, false).await {
+                        Ok(()) => match packs_worker_manager.snapshot_engine(payload_secret.as_deref()).await {
+                            Ok(new_engine) => {
+                                match rebase_live_engine(&engine_control_worker, &policy_source, &new_engine) {
+                                    Ok(rules) => Ok(format!(
+                                        "pack '{name}' disabled (hot-reload): engine now has {rules} rules"
+                                    )),
+                                    Err(e) => Err(format!("policy rebase failed after disable: {e}")),
+                                }
+                            }
+                            Err(e) => Err(format!("snapshot engine failed: {e}")),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    (reply, res)
+                }
+                PackCommand::Update { reply } => {
+                    // F6 contract of `packs update`: re-verify every
+                    // installed signature and hot-reload. Fetching NEW
+                    // versions from a registry is the F7 auto-update unit.
+                    let license = load_license(Some(&license_path()));
+                    let res = if let Err(e) = require_pro_for_pack_ops(&license) {
+                        Err(format!("pack update aborted via control plane: {e}"))
+                    } else {
+                        match packs_worker_manager.verify_installed().await {
+                            Ok(results) => {
+                                let ok = results.iter().filter(|(_, good)| *good).count();
+                                let failed: Vec<String> = results
+                                    .iter()
+                                    .filter(|(_, good)| !good)
+                                    .map(|(k, _)| k.clone())
+                                    .collect();
+                                let reload = if failed.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("; DEACTIVATED after failed verification: {}", failed.join(", "))
+                                };
+                                match packs_worker_manager.snapshot_engine(payload_secret.as_deref()).await {
+                                    Ok(new_engine) => {
+                                        match rebase_live_engine(&engine_control_worker, &policy_source, &new_engine) {
+                                            Ok(rules) => Ok(format!(
+                                                "packs update: {ok}/{} signatures verified{reload}; engine hot-reloaded with {rules} rules",
+                                                results.len()
+                                            )),
+                                            Err(e) => Err(format!("policy rebase failed after update: {e}")),
+                                        }
+                                    }
+                                    Err(e) => Err(format!("snapshot engine failed: {e}")),
+                                }
+                            }
+                            Err(e) => Err(e),
+                        }
+                    };
+                    (reply, res)
+                }
             };
             let _ = outcome.0.send(outcome.1);
         }
     });
+
+    // R9-5 (F6): the control-plane Host/Origin allowlist (anti
+    // DNS-rebinding) is built ONCE per boot from the listen address + the
+    // `allowed_hosts`/`allowed_origins` config and enforced on every /api/*
+    // request BEFORE authentication. Wildcard/blank entries fail the boot
+    // (fail-closed config).
+    let listen_addr: std::net::SocketAddr = config.listen.parse().map_err(|e| format!("invalid address: {e}"))?;
+    let host_origin = cerberus_proxy::host_origin::HostOriginPolicy::build(&listen_addr, &config)
+        .map_err(|e| format!("invalid host/origin allowlist: {e}"))?;
 
     let ctx = Arc::new(ProxyContext {
         config: shared_config.clone(),
@@ -505,7 +717,9 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
         api: ApiContext::with_store_opt(shared_config, store_opt.clone())
             .with_config_path(config_file())
             .with_pack_worker(pack_tx)
-            .with_engine(engine_control),
+            .with_engine(engine_control)
+            .with_audit_hash_key(audit_key.clone())
+            .with_host_origin(host_origin),
         last_upstream: Arc::new(std::sync::Mutex::new(None)),
     });
 
@@ -516,8 +730,7 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
     let api_events = ctx.api.events.clone();
     let mut interventions = crate::feedback_ux::InterventionWatcher::new();
 
-    let addr: std::net::SocketAddr = config.listen.parse().map_err(|e| format!("invalid address: {e}"))?;
-    let (actual, proxy_handle) = spawn_managed_proxy(addr, ctx.clone())
+    let (actual, proxy_handle) = spawn_managed_proxy(listen_addr, ctx.clone())
         .await
         .map_err(|e| format!("proxy error: {e}"))?;
     let mut forward_handle = if let Some(mitm_config) = mitm_config {
@@ -648,7 +861,8 @@ pub(crate) async fn start(port: u16, chain: Option<String>) -> Result<String, St
 pub(crate) async fn pack_install(pack_file: &str) -> Result<String, String> {
     let license = load_license(Some(&license_path()));
     require_pro_for_pack_ops(&license).map_err(|e| format!("pack install aborted: {e}"))?;
-    let packs = open_packs_manager()?;
+    let (audit_key, _) = resolve_audit_key();
+    let packs = open_packs_manager(&audit_key)?;
     if let Some(root) = env_nonempty("CERBERUS_PACK_TRUST_ROOT") {
         // Rehydrate what is installed (engine history) before adding the new one.
         packs.load_installed_from_dir(&root).await?;
@@ -668,7 +882,8 @@ pub(crate) async fn pack_install(pack_file: &str) -> Result<String, String> {
 ///
 /// Returns an error only if the directory cannot be read.
 pub(crate) fn pack_list() -> Result<String, String> {
-    let _ = open_packs_manager()?; // ensures the packs layout (or fails fast).
+    let (audit_key, _) = resolve_audit_key();
+    let _ = open_packs_manager(&audit_key)?; // ensures the packs layout (or fails fast).
     let dir = packs_dir();
     let mut entries = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|e| format!("cannot read packs dir {}: {e}", dir.display()))? {
@@ -759,7 +974,8 @@ pub(crate) async fn pack_rollback() -> Result<String, String> {
     // benefit also in local mode without daemon (open-core).
     let license = load_license(Some(&license_path()));
     require_pro_for_pack_ops(&license).map_err(|e| format!("pack rollback aborted: {e}"))?;
-    let packs = open_packs_manager()?;
+    let (audit_key, _) = resolve_audit_key();
+    let packs = open_packs_manager(&audit_key)?;
     if let Some(root) = env_nonempty("CERBERUS_PACK_TRUST_ROOT") {
         packs.load_installed_from_dir(&root).await?;
     }
@@ -848,10 +1064,123 @@ fn console_style(text: &str, color: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     /// Guard to serialize tests that mutate `std::env` (process-global).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// SHARED with `cli_api`'s tests: two separate mutexes over the same
+    /// process-global env raced (license tests, F7 re-verification P1) and
+    /// made the workspace suite nondeterministic (2/5 exit-101). One lock,
+    /// one discipline.
+    use crate::cli_api::tests::ENV_LOCK;
+
+    // ── R9-7 (F6.3): legacy raw allowlist migration at boot ──
+
+    /// The smallest safe migration design, tested: a legacy config.yaml whose
+    /// `policy.allowlist` carries RAW secret values is converted IN PLACE to
+    /// HMAC fingerprints under the installation key, the YAML is rewritten
+    /// atomically (0600), and the raw values are gone from disk. Idempotent:
+    /// a second run migrates nothing. After migration the policy passes the
+    /// store write gate (`DetectionPolicy::validate`).
+    #[test]
+    fn allowlist_migration_converts_raw_entries_and_persists_fingerprints() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerb_f6_migration_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        let raw_value = "sk-MIGRATION-legacy-raw-value-0001";
+        let already_fp = "hmac:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        std::fs::write(
+            &path,
+            format!("listen: 127.0.0.1:8787\npolicy:\n  allowlist:\n    - {raw_value}\n    - {already_fp}\n"),
+        )
+        .unwrap();
+        let mut config = ProxyConfig::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        let key: Vec<u8> = (0u8..32).collect();
+        let migrated = migrate_allowlist_to_fingerprints_persisting_to(&mut config, &key, Some(path.clone()))
+            .expect("migration persists");
+        assert_eq!(migrated, 1, "only the raw entry migrated");
+
+        // Stored bytes: the YAML now carries ONLY fingerprints.
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !yaml.contains(raw_value),
+            "the raw value must NOT survive anywhere on disk: {yaml}"
+        );
+        let expected = cerberus_proxy::allowlist::fingerprint(&key, raw_value);
+        assert!(yaml.contains(expected.as_str()), "fingerprint persisted: {yaml}");
+        assert!(yaml.contains(already_fp), "pre-existing fingerprint untouched");
+
+        // The migrated policy passes the store write gate now.
+        config.policy.validate().expect("migrated policy is gate-clean");
+
+        // The persisted YAML re-parses to the migrated policy (restart-safe).
+        let reloaded = ProxyConfig::parse(&yaml).unwrap();
+        assert_eq!(reloaded.policy, config.policy);
+
+        // Idempotent: a second migration over the migrated state is a no-op.
+        let mut again = ProxyConfig::parse(&yaml).unwrap();
+        assert_eq!(
+            migrate_allowlist_to_fingerprints_persisting_to(&mut again, &key, Some(path)).unwrap(),
+            0,
+            "second run migrates nothing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `migrate_entries` without a key is a no-op (test contexts only); the
+    /// product daemon always resolves the installation key BEFORE migrating.
+    #[test]
+    fn allowlist_migration_without_key_is_inert() {
+        let mut config = ProxyConfig::default();
+        config.policy.allowlist.push("sk-raw".to_string());
+        assert_eq!(
+            cerberus_proxy::allowlist::migrate_entries(&mut config.policy.allowlist, None),
+            0,
+            "no key → no conversion (the write gate would reject raw at validate)"
+        );
+    }
+
+    /// F6.A attempt 2 (P2 regression): `atomic_write_config` (the migration
+    /// persist writer) must leave the file at 0600 — it replaces a regressed
+    /// 0644 file with 0600 (mode enforced on the RESULT, tmp created 0600 —
+    /// no umask window).
+    #[test]
+    fn atomic_write_config_enforces_0600_on_result() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerb_f6a2_atomic_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "listen: 127.0.0.1:8787\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        atomic_write_config(&path, "listen: 127.0.0.1:8787\n").expect("atomic write");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "rewritten config must be 0600, got {mode:o}");
+        }
+        assert!(
+            !dir.join("config.yaml.tmp").exists(),
+            "no tmp residue may be left behind"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn require_pro_gate_for_pack_ops() {
@@ -964,6 +1293,34 @@ mod tests {
     #[test]
     fn process_alive_for_current_process() {
         assert!(process_alive(std::process::id()));
+    }
+
+    // ─── R9-16 (F5.2): the product engine is ALWAYS keyed ──────────────────
+
+    #[test]
+    fn product_engine_wiring_hashes_every_finding_with_hmac() {
+        // The daemon's single engine-construction path must never emit an
+        // unsalted hash: build_base_engine takes the installation key and
+        // wires it unconditionally.
+        let engine = build_base_engine(b"wiring-test-key").expect("build base engine");
+        let out = engine.scan("my openai api key is sk-abcDEFghijklmnopqrstuvwxyz1234");
+        assert!(!out.findings.is_empty(), "the probe text must produce findings");
+        for finding in &out.findings {
+            assert!(
+                finding.hashed_value.starts_with("hmac:"),
+                "product wiring must key EVERY hash, got {}",
+                finding.hashed_value
+            );
+        }
+        // Deterministic under the same key, divergent under another.
+        let other = build_base_engine(b"other-key").expect("build other engine");
+        let a = out.findings[0].hashed_value.clone();
+        let b = other
+            .scan("my openai api key is sk-abcDEFghijklmnopqrstuvwxyz1234")
+            .findings[0]
+            .hashed_value
+            .clone();
+        assert_ne!(a, b, "different installation keys must diverge");
     }
 
     #[test]

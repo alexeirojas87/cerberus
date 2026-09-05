@@ -1,160 +1,489 @@
-//! Break-glass / audited bypass (§4.7 of the build plan).
+//! Break-glass / audited bypass — server-side one-shot primitive (§4.7 of
+//! the build plan, R9-8 remediation F2.3).
 //!
-//! Allows a dev to force-send something that Cerberus would block,
-//! leaving an audited record of the bypass. Mechanisms:
+//! Review 9 (R9-8) found the historical `BreakGlass` struct was **dead code**
+//! (no caller outside its own tests) while evidence claimed the feature was
+//! BUILT. This module now provides the real primitive:
 //!
-//! - **Header `X-Cerberus-Bypass`** in the HTTP request.
-//! - **Programmatic call** (`BreakGlass::allow_once`).
-//!
-//! The bypass only applies to findings with action `Block`; findings
-//! with `Redact`/`Warn`/`Allow` are processed normally.
+//! - **Authenticated**: tokens are issued ONLY through the control plane
+//!   (`POST /api/break-glass`), which sits behind the existing admin-token
+//!   gate (`X-Cerberus-Admin-Token`). No valid admin token → no bypass.
+//! - **One-shot**: a nonce is consumed atomically on redemption; a replay is
+//!   rejected (`UnknownNonce`) even under concurrency.
+//! - **Cryptographic nonce**: 256 bits of CSPRNG output (`getrandom`).
+//! - **Short TTL**: every token carries an absolute deadline; expired tokens
+//!   are rejected and purged.
+//! - **Explicit scope**: a token can be bound to a specific provider; a
+//!   redemption from another provider is rejected (`ScopeMismatch`) and the
+//!   token stays valid for its intended scope.
+//! - **Audited**: the data-plane redemption flows into the existing bypass
+//!   audit path (`action_taken = "bypass"`, flags `["bypass", "break-glass"]`,
+//!   `bypass-hash:<hmac>`); the header bypass and the (future) CLI share
+//!   the same audit trail.
+//! - **Never stores the raw reason**: only a keyed HMAC-SHA256 (R9-16/F5.2,
+//!   domain `cerberus:break-glass:v1`) of the truncated reason is kept —
+//!   unkeyed `sha256:` only in unkeyed test ledgers (the reason may itself
+//!   contain secrets).
 
-use crate::engine::Finding;
-use crate::rule::Action;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Record of a bypass: what was skipped and why.
+use crate::engine::hash_value;
+
+/// Maximum TTL accepted for a one-shot token (short-lived by design).
+pub const MAX_TTL: Duration = Duration::from_hours(1);
+
+/// Default TTL for a one-shot token.
+pub const DEFAULT_TTL: Duration = Duration::from_mins(1);
+
+/// Truncate a bypass reason to at most 200 bytes without cutting a UTF-8
+/// char in half (mirrors the proxy-side helper; the result is hashed).
+#[must_use]
+fn truncate_reason(reason: &str) -> &str {
+    const MAX: usize = 200;
+    if reason.len() <= MAX {
+        return reason;
+    }
+    let mut end = MAX;
+    while end > 0 && !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    &reason[..end]
+}
+
+/// Explicit scope of a one-shot token.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BypassRecord {
-    /// Reason provided by the dev.
-    pub reason: String,
-    /// Timestamp (Unix epoch nanos) of the bypass.
-    pub timestamp_nanos: u128,
-    /// Flags of the findings that were skipped.
-    pub bypassed_flags: Vec<String>,
-    /// Number of blocking findings that were skipped.
-    pub bypassed_count: usize,
+pub struct BreakGlassScope {
+    /// When `Some(provider)`, the token is only valid for that provider.
+    /// `None` = explicit global scope (any provider).
+    pub provider: Option<String>,
 }
 
-/// Break-glass control.
-#[derive(Debug, Clone, Default)]
-pub struct BreakGlass {
-    /// Whether break-glass is enabled.
-    pub enabled: bool,
-}
-
-impl BreakGlass {
-    /// Create an instance with break-glass enabled.
+impl BreakGlassScope {
+    /// Scope bound to one provider.
     #[must_use]
-    pub const fn enabled() -> Self {
-        Self { enabled: true }
+    pub fn for_provider(name: impl Into<String>) -> Self {
+        Self {
+            provider: Some(name.into()),
+        }
     }
 
-    /// Apply bypass over findings: removes the `Block` ones and returns
-    /// the remaining findings plus a `BypassRecord` if there was a bypass.
+    /// Explicit global scope.
+    #[must_use]
+    pub const fn global() -> Self {
+        Self { provider: None }
+    }
+
+    /// Does this scope cover a redemption for `provider`?
+    #[must_use]
+    fn covers(&self, provider: Option<&str>) -> bool {
+        self.provider
+            .as_deref()
+            .is_none_or(|p| provider.is_some_and(|req| req == p))
+    }
+}
+
+impl std::fmt::Display for BreakGlassScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.provider {
+            Some(p) => write!(f, "provider:{p}"),
+            None => f.write_str("global"),
+        }
+    }
+}
+
+/// A one-shot break-glass token (as returned by `issue`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreakGlassToken {
+    /// 256-bit CSPRNG nonce (hex). The ONLY bearer credential for the bypass.
+    pub nonce: String,
+    /// Explicit scope.
+    pub scope: BreakGlassScope,
+    /// Keyed HMAC-SHA256 (`hmac:<hex>`, R9-16/F5.2) of the truncated reason
+    /// — the raw reason is NEVER stored. Unkeyed `sha256:` in test ledgers.
+    pub reason_hash: String,
+    /// TTL in seconds (informational; redemption uses the absolute deadline).
+    pub ttl_secs: u64,
+    /// Absolute deadline (Unix epoch nanos, informational for the API).
+    pub expires_at_nanos: u64,
+}
+
+/// Successful redemption: what the data plane needs to authorize the bypass
+/// and write the audit event. Contains no raw secret and no raw reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreakGlassGrant {
+    /// Keyed HMAC-SHA256 of the truncated reason (audit trail; R9-16/F5.2).
+    pub reason_hash: String,
+    /// Scope the token was issued for.
+    pub scope: BreakGlassScope,
+}
+
+/// Why a redemption failed. `Display` never leaks secret material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BreakGlassError {
+    /// Unknown nonce: never issued, already consumed (replay), or purged.
+    UnknownNonce,
+    /// The token existed but its TTL elapsed; it was consumed and purged.
+    Expired,
+    /// The token is scoped to another provider; it was NOT consumed.
+    ScopeMismatch {
+        /// Provider the token is scoped to.
+        scoped_to: String,
+    },
+}
+
+impl std::fmt::Display for BreakGlassError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownNonce => f.write_str("unknown or already-consumed break-glass nonce"),
+            Self::Expired => f.write_str("break-glass token expired"),
+            Self::ScopeMismatch { scoped_to } => {
+                write!(f, "break-glass token is scoped to another provider ({scoped_to})")
+            }
+        }
+    }
+}
+
+/// Pending one-shot token held server-side.
+struct PendingToken {
+    scope: BreakGlassScope,
+    reason_hash: String,
+    expires_at: Instant,
+}
+
+/// Server-side one-shot break-glass ledger.
+///
+/// Shared between the control plane (issue, authenticated by the admin-token
+/// gate) and the data plane (redeem on `X-Cerberus-Bypass: break-glass:<nonce>`).
+/// The `Mutex` makes consumption atomic: exactly one concurrent redeemer wins.
+pub struct BreakGlassLedger {
+    inner: Mutex<HashMap<String, PendingToken>>,
+    default_ttl: Duration,
+    /// Installation HMAC key (R9-16, F5.2). When set, issued reason hashes
+    /// are keyed + domain-separated (`BREAK_GLASS_HASH_DOMAIN`); the unkeyed
+    /// `sha256:` fallback is a library affordance for unit tests only — every
+    /// product wiring keys the ledger (`ApiContext::with_audit_hash_key`).
+    hash_key: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for BreakGlassLedger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.lock().expect("break-glass lock poisoned");
+        f.debug_struct("BreakGlassLedger")
+            .field("pending", &inner.len())
+            // The nonce map is intentionally NOT part of Debug output: nonces
+            // are bearer credentials (R9-8: nothing secret in Debug/logs).
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for BreakGlassLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BreakGlassLedger {
+    /// Create a ledger with [`DEFAULT_TTL`] as the default token TTL.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::new_with_ttl(DEFAULT_TTL)
+    }
+
+    /// Create a ledger with an explicit default TTL (tests / policy).
+    #[must_use]
+    pub fn new_with_ttl(default_ttl: Duration) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            default_ttl,
+            hash_key: None,
+        }
+    }
+
+    /// Key the reason hashes with the per-installation HMAC key (R9-16/F5.2).
     ///
-    /// If `self.enabled` is `false` or there are no `Block` findings,
-    /// returns the original findings and `None`.
+    /// Product wiring MUST call this before issuing tokens; issued reason
+    /// hashes become `hmac:<hex>` over `BREAK_GLASS_HASH_DOMAIN || reason`.
     #[must_use]
-    pub fn apply(&self, findings: &[Finding], reason: &str) -> (Vec<Finding>, Option<BypassRecord>) {
-        if !self.enabled {
-            return (findings.to_vec(), None);
-        }
-
-        let blocked: Vec<&Finding> = findings.iter().filter(|f| f.action == Action::Block).collect();
-        if blocked.is_empty() {
-            return (findings.to_vec(), None);
-        }
-
-        let bypassed_flags: Vec<String> = blocked.iter().map(|f| f.flag.clone()).collect();
-        let bypassed_count = blocked.len();
-
-        let passed: Vec<Finding> = findings.iter().filter(|f| f.action != Action::Block).cloned().collect();
-
-        let record = BypassRecord {
-            reason: reason.to_string(),
-            timestamp_nanos: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos()),
-            bypassed_flags,
-            bypassed_count,
-        };
-
-        (passed, Some(record))
+    pub fn with_hash_key(mut self, key: Vec<u8>) -> Self {
+        self.hash_key = Some(key);
+        self
     }
 
-    /// Shortcut: `allow_once(reason)` is equivalent to
-    /// `BreakGlass::enabled().apply(findings, reason)`.
+    /// Issue a one-shot token.
+    ///
+    /// `reason` is truncated to 200 bytes and stored ONLY as its hash: keyed
+    /// HMAC-SHA256 (domain-separated) when the ledger is keyed — the product
+    /// default — or plain SHA-256 in unkeyed test ledgers. The raw reason is
+    /// NEVER stored. `ttl` is clamped to `MAX_TTL` at most (short-lived by
+    /// design); tests may use sub-second TTLs.
     #[must_use]
-    pub fn allow_once(findings: &[Finding], reason: &str) -> (Vec<Finding>, Option<BypassRecord>) {
-        Self::enabled().apply(findings, reason)
+    pub fn issue(&self, scope: BreakGlassScope, reason: &str, ttl: Option<Duration>) -> BreakGlassToken {
+        let ttl = ttl.unwrap_or(self.default_ttl).min(MAX_TTL);
+        let truncated = truncate_reason(reason);
+        let reason_hash = self.hash_key.as_ref().map_or_else(
+            || hash_value(truncated),
+            |key| crate::engine::domain_hash(key, crate::engine::BREAK_GLASS_HASH_DOMAIN, truncated.as_bytes()),
+        );
+        let expires_at = Instant::now() + ttl;
+        let expires_at_nanos =
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos()) + ttl.as_nanos();
+        let token = BreakGlassToken {
+            nonce: crate::vault::random_nonce_256(),
+            scope,
+            reason_hash,
+            ttl_secs: ttl.as_secs(),
+            expires_at_nanos: u64::try_from(expires_at_nanos).unwrap_or(u64::MAX),
+        };
+        let mut inner = self.inner.lock().expect("break-glass lock poisoned");
+        Self::purge_expired_locked(&mut inner);
+        inner.insert(
+            token.nonce.clone(),
+            PendingToken {
+                scope: token.scope.clone(),
+                reason_hash: token.reason_hash.clone(),
+                expires_at,
+            },
+        );
+        token
+    }
+
+    /// Redeem a nonce for `provider` (atomic, exactly-once).
+    ///
+    /// - Unknown / already-consumed → `UnknownNonce` (replay is rejected).
+    /// - Expired → `Expired` (the token is consumed and purged).
+    /// - Scoped to another provider → `ScopeMismatch`; the token is NOT
+    ///   consumed and remains valid for its intended scope.
+    ///
+    /// # Errors
+    ///
+    /// See [`BreakGlassError`].
+    // The lock guard is intentionally held across remove → expiry check →
+    // re-insert: releasing it early would open a window where a concurrent
+    // redeemer could consume the token and let the mismatch path re-insert
+    // it afterwards (breaking exactly-once). clippy::significant_drop_tightening
+    // is therefore deliberately allowed here.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn redeem(&self, nonce: &str, provider: Option<&str>) -> Result<BreakGlassGrant, BreakGlassError> {
+        let mut inner = self.inner.lock().expect("break-glass lock poisoned");
+        // Remove first: concurrent redeemers race on this single removal, so
+        // exactly one winner observes the token (one-shot under concurrency).
+        // (Expired entries are purged on issue/len — NOT here, so an expired
+        // redemption is reported as `Expired`, not `UnknownNonce`.)
+        let Some(pending) = inner.remove(nonce) else {
+            return Err(BreakGlassError::UnknownNonce);
+        };
+        if pending.expires_at <= Instant::now() {
+            return Err(BreakGlassError::Expired); // consumed + dropped
+        }
+        if !pending.scope.covers(provider) {
+            // Wrong provider: put the token back (not consumed for its scope).
+            let scoped_to = pending.scope.provider.clone().unwrap_or_else(|| "global".to_string());
+            inner.insert(nonce.to_string(), pending);
+            return Err(BreakGlassError::ScopeMismatch { scoped_to });
+        }
+        Ok(BreakGlassGrant {
+            reason_hash: pending.reason_hash,
+            scope: pending.scope,
+        })
+    }
+
+    /// Remove and drop every expired pending token. Returns count purged.
+    #[must_use]
+    pub fn purge_expired(&self) -> usize {
+        let mut inner = self.inner.lock().expect("break-glass lock poisoned");
+        Self::purge_expired_locked(&mut inner)
+    }
+
+    fn purge_expired_locked(inner: &mut HashMap<String, PendingToken>) -> usize {
+        let now = Instant::now();
+        let expired: Vec<String> = inner
+            .iter()
+            .filter(|(_, t)| t.expires_at <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let n = expired.len();
+        for k in expired {
+            inner.remove(&k);
+        }
+        n
+    }
+
+    /// Number of pending (unconsumed, unexpired) tokens.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        let mut inner = self.inner.lock().expect("break-glass lock poisoned");
+        Self::purge_expired_locked(&mut inner);
+        inner.len()
+    }
+
+    /// Is the ledger empty?
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::Finding;
-    use crate::rule::{Action, Category, Severity};
 
-    fn make_finding(flag: &str, action: Action) -> Finding {
-        Finding {
-            flag: flag.to_string(),
-            category: Category::Secrets,
-            severity: Severity::High,
-            action,
-            start: 0,
-            end: 5,
-            hashed_value: "sha256:test".to_string(),
+    #[test]
+    fn valid_redemption_returns_grant_with_reason_hash() {
+        let ledger = BreakGlassLedger::new();
+        let token = ledger.issue(BreakGlassScope::global(), "emergency send", None);
+        let grant = ledger.redeem(&token.nonce, Some("openai")).expect("redeem");
+        assert_eq!(grant.reason_hash, token.reason_hash);
+        assert_eq!(grant.scope, BreakGlassScope::global());
+        // Raw reason is never stored anywhere observable.
+        assert!(!format!("{token:?}").contains("emergency send"));
+        assert!(!format!("{grant:?}").contains("emergency send"));
+    }
+
+    #[test]
+    fn absent_nonce_rejected() {
+        let ledger = BreakGlassLedger::new();
+        let err = ledger.redeem(&"a".repeat(64), Some("openai")).unwrap_err();
+        assert_eq!(err, BreakGlassError::UnknownNonce);
+    }
+
+    #[test]
+    fn expired_nonce_rejected() {
+        let ledger = BreakGlassLedger::new_with_ttl(Duration::from_millis(10));
+        let token = ledger.issue(BreakGlassScope::global(), "late", Some(Duration::from_millis(10)));
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(ledger.redeem(&token.nonce, None).unwrap_err(), BreakGlassError::Expired);
+        assert!(ledger.is_empty(), "expired token consumed and purged");
+    }
+
+    #[test]
+    fn replay_rejected_one_shot() {
+        let ledger = BreakGlassLedger::new();
+        let token = ledger.issue(BreakGlassScope::global(), "once", None);
+        assert!(ledger.redeem(&token.nonce, None).is_ok(), "first use succeeds");
+        assert_eq!(
+            ledger.redeem(&token.nonce, None).unwrap_err(),
+            BreakGlassError::UnknownNonce,
+            "second use must fail (one-shot)"
+        );
+    }
+
+    #[test]
+    fn nonce_is_cryptographic_and_unique() {
+        let ledger = BreakGlassLedger::new();
+        let t1 = ledger.issue(BreakGlassScope::global(), "a", None);
+        let t2 = ledger.issue(BreakGlassScope::global(), "b", None);
+        assert_ne!(t1.nonce, t2.nonce);
+        assert_eq!(t1.nonce.len(), 64, "256-bit hex nonce");
+        assert!(t1.nonce.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn two_concurrent_requests_exactly_one_wins() {
+        let ledger = std::sync::Arc::new(BreakGlassLedger::new());
+        let token = ledger.issue(BreakGlassScope::global(), "race", None);
+        let nonce = token.nonce;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        for _ in 0..2 {
+            let ledger = std::sync::Arc::clone(&ledger);
+            let nonce = nonce.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _ = tx.send(ledger.redeem(&nonce, None).is_ok());
+            });
         }
+        drop(tx);
+        let wins: Vec<bool> = rx.iter().collect();
+        assert_eq!(wins.iter().filter(|w| **w).count(), 1, "exactly one redeemer wins");
+        assert_eq!(wins.len(), 2);
     }
 
     #[test]
-    fn disabled_returns_original() {
-        let bg = BreakGlass { enabled: false };
-        let findings = vec![make_finding("t", Action::Block)];
-        let (passed, record) = bg.apply(&findings, "reason");
-        assert_eq!(passed.len(), 1);
-        assert!(record.is_none());
+    fn wrong_provider_rejected_and_token_survives_for_right_scope() {
+        let ledger = BreakGlassLedger::new();
+        let token = ledger.issue(BreakGlassScope::for_provider("openai"), "scoped", None);
+        let err = ledger.redeem(&token.nonce, Some("anthropic")).unwrap_err();
+        assert!(
+            matches!(err, BreakGlassError::ScopeMismatch { .. }),
+            "provider mismatch must be rejected"
+        );
+        assert_eq!(ledger.len(), 1, "token NOT consumed on scope mismatch");
+        // The right provider can still redeem it.
+        assert!(ledger.redeem(&token.nonce, Some("openai")).is_ok());
+        // Global-scope token covers every provider.
+        let global = ledger.issue(BreakGlassScope::global(), "any", None);
+        assert!(ledger.redeem(&global.nonce, Some("anthropic")).is_ok());
     }
 
     #[test]
-    fn enabled_without_block_returns_original() {
-        let bg = BreakGlass::enabled();
-        let findings = vec![make_finding("t", Action::Redact)];
-        let (passed, record) = bg.apply(&findings, "reason");
-        assert_eq!(passed.len(), 1);
-        assert!(record.is_none());
+    fn reason_truncated_and_hashed_never_raw() {
+        let ledger = BreakGlassLedger::new();
+        let long_reason = format!("reason-with-secret sk-live{} and padding", "x".repeat(500));
+        let token = ledger.issue(BreakGlassScope::global(), &long_reason, None);
+        // The stored hash is of the TRUNCATED reason; the raw text (and the
+        // embedded secret-looking material) is nowhere in the token/ledger.
+        assert!(!token.reason_hash.contains("sk-live"));
+        assert!(!format!("{token:?}").contains("sk-live"));
+        let ledger_dbg = format!("{ledger:?}");
+        assert!(!ledger_dbg.contains("sk-live"), "ledger Debug leaks reason");
     }
 
     #[test]
-    fn enabled_with_block_removes_block() {
-        let bg = BreakGlass::enabled();
-        let findings = vec![
-            make_finding("blocked", Action::Block),
-            make_finding("redacted", Action::Redact),
-        ];
-        let (passed, record) = bg.apply(&findings, "testing");
-        assert_eq!(passed.len(), 1);
-        assert_eq!(passed[0].flag, "redacted");
-        let rec = record.unwrap();
-        assert_eq!(rec.reason, "testing");
-        assert_eq!(rec.bypassed_flags, vec!["blocked"]);
-        assert_eq!(rec.bypassed_count, 1);
+    fn ttl_clamped_to_max() {
+        let ledger = BreakGlassLedger::new();
+        let token = ledger.issue(BreakGlassScope::global(), "long", Some(Duration::from_secs(999_999)));
+        assert_eq!(token.ttl_secs, MAX_TTL.as_secs(), "TTL clamped (short-lived)");
+    }
+
+    // ─── R9-16 (F5.2): keyed reason hashes by product default ───────────────
+
+    #[test]
+    fn keyed_ledger_issues_domain_separated_hmac_reason_hashes() {
+        let ledger = BreakGlassLedger::new().with_hash_key(b"installation-key".to_vec());
+        let token = ledger.issue(BreakGlassScope::global(), "emergency send", None);
+        let hash = token.reason_hash.clone();
+        assert!(
+            hash.starts_with("hmac:"),
+            "keyed ledger must emit hmac: reason hashes, got {hash:?}"
+        );
+
+        // Determinism: same key + same reason → identical hash.
+        let again = ledger.issue(BreakGlassScope::for_provider("openai"), "emergency send", None);
+        assert_eq!(token.reason_hash, again.reason_hash, "same key + reason → same hash");
+
+        // Keyed ≠ unkeyed: the keyed digest must NOT equal the plain SHA-256
+        // (offline dictionary recovery of low-entropy reasons is the R9-16 bug).
+        assert_ne!(token.reason_hash, hash_value("emergency send"));
     }
 
     #[test]
-    fn allow_once_static_works() {
-        let findings = vec![make_finding("b", Action::Block)];
-        let (passed, record) = BreakGlass::allow_once(&findings, "dev override");
-        assert!(passed.is_empty());
-        let rec = record.unwrap();
-        assert_eq!(rec.reason, "dev override");
-        assert_eq!(rec.bypassed_flags, vec!["b"]);
+    fn different_installation_keys_yield_different_hashes() {
+        let reason = "emergency send";
+        let a = BreakGlassLedger::new()
+            .with_hash_key(b"key-a".to_vec())
+            .issue(BreakGlassScope::global(), reason, None);
+        let b = BreakGlassLedger::new()
+            .with_hash_key(b"key-b".to_vec())
+            .issue(BreakGlassScope::global(), reason, None);
+        assert_ne!(a.reason_hash, b.reason_hash, "hash must diverge across keys");
     }
 
     #[test]
-    fn multiple_blocks_all_bypassed() {
-        let bg = BreakGlass::enabled();
-        let findings = vec![
-            make_finding("b1", Action::Block),
-            make_finding("b2", Action::Block),
-            make_finding("w", Action::Warn),
-        ];
-        let (passed, record) = bg.apply(&findings, "multiple");
-        assert_eq!(passed.len(), 1);
-        assert_eq!(passed[0].flag, "w");
-        let rec = record.unwrap();
-        assert_eq!(rec.bypassed_count, 2);
-        assert_eq!(rec.bypassed_flags, vec!["b1", "b2"]);
+    fn keyed_reason_hash_domain_differs_from_event_hash_domain() {
+        // F5.2: break-glass hashes use their own domain — the SAME value
+        // under the SAME key must produce different digests than an audit
+        // event hash (no cross-domain correlation).
+        let key = b"installation-key".to_vec();
+        let ledger = BreakGlassLedger::new().with_hash_key(key.clone());
+        let token = ledger.issue(BreakGlassScope::global(), "same-value", None);
+        let event_hash = crate::engine::domain_hash(&key, crate::engine::AUDIT_EVENT_HASH_DOMAIN, b"same-value");
+        assert_ne!(
+            token.reason_hash, event_hash,
+            "break-glass and event domains must differ"
+        );
     }
 }

@@ -34,6 +34,10 @@ impl TestProxy {
     }
 }
 
+/// Deterministic installation key for keyed test contexts (R9-7 allowlist
+/// fingerprints + R9-16 keyed hashes in integration tests).
+pub const TEST_INSTALLATION_KEY: &[u8] = b"proxy-test-installation-key-0123456789";
+
 /// Build a proxy context with the given rules and upstreams.
 #[must_use]
 #[allow(
@@ -62,6 +66,42 @@ pub fn build_test_context(
         engine: Arc::new(std::sync::RwLock::new(Arc::new(engine))),
         redact_options: RedactOptions::default(),
         api: api::ApiContext::new(shared),
+        last_upstream: Arc::new(std::sync::Mutex::new(None)),
+    })
+}
+
+/// Keyed variant (R9-7/R9-16): the installation audit-hash key is wired.
+///
+/// Allowlist FINGERPRINTS evaluate on the hot path — tests that exercise the
+/// allowlist must use this constructor (the product always keys).
+#[must_use]
+#[allow(
+    clippy::inconsistent_struct_constructor,
+    clippy::needless_pass_by_value,
+    clippy::implicit_hasher
+)]
+pub fn build_test_context_keyed(
+    rules: &[Rule],
+    upstreams: HashMap<String, UpstreamConfig>,
+    mode: OperationMode,
+) -> Arc<proxy::ProxyContext> {
+    let engine = cerberus_engine::engine::EngineBuilder::new(rules)
+        .with_payload_secret(TEST_INSTALLATION_KEY.to_vec())
+        .build()
+        .expect("cannot build test engine");
+
+    let config = ProxyConfig {
+        mode,
+        upstreams,
+        ..ProxyConfig::default()
+    };
+    let shared = Arc::new(std::sync::RwLock::new(config));
+
+    Arc::new(proxy::ProxyContext {
+        config: shared.clone(),
+        engine: Arc::new(std::sync::RwLock::new(Arc::new(engine))),
+        redact_options: RedactOptions::default(),
+        api: api::ApiContext::new(shared).with_audit_hash_key(TEST_INSTALLATION_KEY.to_vec()),
         last_upstream: Arc::new(std::sync::Mutex::new(None)),
     })
 }
@@ -95,6 +135,8 @@ pub async fn spawn_test_proxy_with_upstream(
             url: upstream_url.to_string(),
             path_prefix: None,
             auth_header: "authorization".to_string(),
+            mode: None,
+            expected_auth: None,
         },
     );
     let ctx = build_test_context(&[], upstreams, OperationMode::Enforce);

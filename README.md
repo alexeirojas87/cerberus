@@ -26,7 +26,7 @@ AI coding agents send your code, prompts, and context to external LLM APIs. If a
 - **Redact** the sensitive value (replace with a placeholder)
 - **Warn** (log the finding, let it pass — shadow mode)
 
-Raw secret values are **never** stored — only SHA-256 hashes, flags, and counts. Nothing is sent to any third party.
+Raw secret values are **never** stored — only keyed HMAC-SHA256 hashes (per-installation key), flags, and counts. Nothing is sent to any third party.
 
 ## How it works
 
@@ -77,7 +77,7 @@ The engine uses Rust's `regex` crate (RE2-like, linear-time) — no ReDoS.
 
 ### Security guarantees
 
-- **Zero leak**: raw secrets never written to disk, logs, telemetry, or notifications — only SHA-256 hashes
+- **Zero leak**: raw secrets never written to disk, logs, telemetry, or notifications — only keyed HMAC-SHA256 hashes
 - **Fail-closed**: if the engine crashes, requests are rejected (not leaked)
 - **No ReDoS**: linear-time regex engine, all patterns fuzzed
 - **Break-glass audit**: `cerberus allow-once` bypasses blocks with a recorded reason
@@ -322,7 +322,7 @@ Client/Agent ──► Cerberus Proxy ──► LLM Provider
 1. **Agent** sends an HTTP request to `http://127.0.0.1:8787`
 2. **Cerberus proxy** decodes the body (JSON / text), extracts the prompt
 3. **Detection engine** scans with the loaded rule pack — each rule has a regex pattern, category, severity, and action
-4. **Findings** are produced with the matched flag + SHA-256 hash of the value (never the raw value)
+4. **Findings** are produced with the matched flag + keyed HMAC-SHA256 hash of the value (never the raw value)
 5. **Policy** decides what to do per finding: block (403), redact (replace the token in the body), warn (log only)
 6. **Audit store** persists the event: flag, hash, action, timestamp — raw values discarded
 7. **Forward** the (possibly redacted) request to the upstream provider

@@ -1,0 +1,104 @@
+name: version-bump-v2 (R9-3 PR-based bump)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review 9 remediation — F8.1 / R9-3: the version bump enters through a PR.
+#
+# Replaces the frozen `release.yml` bump-job pattern that COMMITTED AND PUSHED
+# directly to the protected default branch (the structural cause of R9-3: the
+# push could never satisfy the branch protection, blocking every release).
+#
+#   1. A human triggers this workflow (workflow_dispatch) with the new version.
+#   2. The job bumps Cargo.toml + Cargo.lock via tools/release/bump_version.sh,
+#      commits on a `release/bump-v<version>` branch, and OPENS A PR.
+#   3. A human merges the PR (all required checks must pass).
+#   4. Only the MERGED commit may be tagged; the tag workflow enforces this
+#      fail-closed (tools/release/verify_tag_merge.sh).
+#
+# This workflow never pushes to the default branch. The pull-requests: write
+# permission is required only for creating the PR from the bump branch.
+#
+# ── G0/F8 CONTAINMENT ─────────────────────────────────────────────────────────
+# INERT: every job guarded by `if: ${{ false }}` under the NEW
+# `review9_f8_pending` guard. Flip live only after the F8 gate PASS Evidence
+# Pack + owner sign-off (evidence/f8/r9-release-and-tap.md).
+# ─────────────────────────────────────────────────────────────────────────────
+
+"on":
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version to bump to, strict semver (e.g. 0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CERBERUS_DEFAULT_BRANCH: main
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  open-version-bump-pr:
+    name: bump version on a branch + open PR (never writes to default branch)
+    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
+    # F10: least-privilege elevation at JOB scope (workflow level stays
+    # contents: read). contents: write is needed to push ONLY release/bump-v*
+    # (refspec in the commit step below; never the default branch);
+    # pull-requests: write is required by `gh pr create` for the bump PR.
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate input version
+        run: |
+          printf '%s' "${{ inputs.version }}" \
+            | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+            || { echo "FAIL: version must be strict MAJOR.MINOR.PATCH semver" >&2; exit 1; }
+
+      - name: Checkout the DEFAULT branch (not a mutable write)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CERBERUS_DEFAULT_BRANCH }}
+          fetch-depth: 0
+
+      # F11 (Req C5): cold registry — fetch dependencies ONLINE first so the
+      # script's `cargo metadata --offline` lockfile refresh can resolve.
+      - name: Fetch dependencies (cold-registry pre-fetch for offline refresh)
+        run: cargo fetch
+
+      - name: Bump version (Cargo.toml + Cargo.lock)
+        run: |
+          ./tools/release/bump_version.sh "${{ inputs.version }}"
+
+      - name: Commit on release/bump-v<version> branch
+        run: |
+          VERSION="${{ inputs.version }}"
+          BRANCH="release/bump-v${VERSION}"
+          git config user.name "cerberus-release-bot"
+          git config user.email "release@cerberus.dev"
+          git checkout -B "$BRANCH"
+          git add crates/cerberus/Cargo.toml Cargo.lock
+          git commit -m "chore(release): bump version to ${VERSION}"
+          git push origin "$BRANCH"
+
+      - name: Open the version-bump PR (human merges — no direct default-branch write)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ inputs.version }}"
+          BRANCH="release/bump-v${VERSION}"
+          gh pr create \
+            --base "$CERBERUS_DEFAULT_BRANCH" \
+            --head "$BRANCH" \
+            --title "chore(release): bump version to ${VERSION}" \
+            --body "Automated version bump for release ${VERSION}.
+
+          Per R9-3: version bumps go through a reviewed PR on \`${CERBERUS_DEFAULT_BRANCH}\`.
+          After this PR is merged, tag the merged commit \`v${VERSION}\` to trigger
+          \`release-v2.yml\`. The tag workflow verifies the tag commit is reachable
+          from \`${CERBERUS_DEFAULT_BRANCH}\` merged history and fails closed otherwise."

@@ -101,7 +101,8 @@ pub struct Rule {
     /// (e.g. `"trim"`).
     #[serde(default, rename = "hashNormalization")]
     pub hash_normalization: Option<String>,
-    /// Keywords that add context (kept for compatibility; not evaluated yet).
+    /// Required context keywords. A match is retained when at least one
+    /// keyword occurs in the case-insensitive scan context.
     #[serde(default, rename = "contextKeywords")]
     pub context_keywords: Vec<String>,
     /// Minimum accepted match length in bytes.

@@ -26,12 +26,17 @@ case "$ARCH" in
 esac
 
 if [ "$VERSION" = "latest" ]; then
-  # In a real release, fetch latest from GitHub API
-  VERSION="0.1.0"
+  # Resolve latest from the GitHub API (R9-15: pinned fallbacks rot — fail loud).
+  VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    | sed -n 's/.*"tag_name":[[:space:]]*"v\([0-9][^"]*\)".*/\1/p' || true)"
+  [ -n "$VERSION" ] || { echo "Error: could not resolve the latest release version" >&2; exit 1; }
 fi
 
 BINARY="cerberus-${VERSION}-${OS}-${ARCH}.tar.gz"
-URL="https://github.com/${REPO}/releases/download/v${VERSION}/${BINARY}"
+# CERBERUS_RELEASE_URL allows pointing at a non-GitHub mirror (or a local file
+# server for install-gate testing): default is the canonical GitHub releases URL.
+URL_PREFIX="${CERBERUS_RELEASE_URL:-https://github.com/${REPO}/releases/download}"
+URL="${URL_PREFIX}/v${VERSION}/${BINARY}"
 
 echo "✦ Installing Cerberus v${VERSION} (${OS}/${ARCH})..."
 echo "  Downloading from ${URL}"

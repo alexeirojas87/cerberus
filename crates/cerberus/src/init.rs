@@ -33,6 +33,25 @@ const KNOWN_AGENTS: &[(&str, &str, &[&str])] = &[
     ("Continue (Cursor)", "CONTINUE_BASE_URL", &["continue", "cursor"]),
 ];
 
+/// Resolve an agent query (display name, first word, or env var) against
+/// the known-agents table (F6.B: `cerberus agents wire/unwire <agent>`).
+#[must_use]
+pub(crate) fn agent_by_name(query: &str) -> Option<(&'static str, &'static str)> {
+    let q = query.trim().to_ascii_lowercase();
+    KNOWN_AGENTS
+        .iter()
+        .find(|(name, env_var, aliases)| {
+            name.to_ascii_lowercase() == q
+                || env_var.eq_ignore_ascii_case(&q)
+                || name
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|n| n.to_ascii_lowercase() == q)
+                || aliases.iter().any(|a| a.eq_ignore_ascii_case(&q))
+        })
+        .map(|(name, env_var, _)| (*name, *env_var))
+}
+
 /// Run `cerberus init`.
 ///
 /// # Errors
@@ -64,9 +83,29 @@ pub(crate) fn run_init(config_dir: &str) -> Result<String, String> {
 
     writeln!(report, "\nSummary: {configured}/{} agents configured", agents.len()).ok();
 
-    let yaml = init_config_yaml();
+    // R9-5 (F6): the DEFAULT install must not boot a closed control plane —
+    // `init` generates a strong random admin token and persists it in
+    // config.yaml (file written 0600) so the default init → start flow is
+    // authenticated AND usable. The token is NOT printed to stdout/logs
+    // (bootstrap channel = the 0600 config file; paste it into the
+    // dashboard login card from there).
+    let admin_token = generate_admin_token();
+    let yaml = init_config_yaml(&admin_token);
     let config_path = cfg_path.join("config.yaml");
-    std::fs::write(&config_path, yaml).map_err(|e| format!("cannot write config: {e}"))?;
+    write_config_0600(&config_path, &yaml).map_err(|e| format!("cannot write config: {e}"))?;
+    // F6.A attempt 2 (P2-1): the mode in the report is stat-ed from the file,
+    // so the output tells the truth (the old text claimed "mode 0600" even
+    // when a re-init left a pre-existing 0644 file untouched).
+    writeln!(
+        report,
+        "\n🔐 Control plane: a random admin token was generated and written to {} ({}, R9-5). \
+         View it with `grep admin_token {}` and paste it into the dashboard login card; it is never \
+         served by the API or printed here. Without it every data /api/* route responds 401.",
+        config_path.display(),
+        actual_mode_note(&config_path),
+        config_path.display()
+    )
+    .ok();
 
     if !agents.iter().any(|a| a.configured) {
         report.push_str("\n💡 Tip: manually set your agent's environment variable:\n");
@@ -92,9 +131,59 @@ pub(crate) fn run_init(config_dir: &str) -> Result<String, String> {
 /// openai/anthropic → `cerberus start` boots without `CERBERUS_UPSTREAM_URL`.
 /// The operator can edit `URLs`/`path_prefix` in `config.yaml` without
 /// touching code.
-#[must_use]
-const fn init_config_yaml() -> &'static str {
-    "listen: 127.0.0.1:8787\nmode: enforce\nfail_policy: closed\nupstreams:\n  anthropic:\n    url: https://api.anthropic.com\n  openai:\n    url: https://api.openai.com\n"
+///
+/// R9-5 (F6): `admin_token` is included — a fresh install boots with an
+/// AUTHENTICATED control plane instead of the R9-5 open-by-default state.
+fn init_config_yaml(admin_token: &str) -> String {
+    format!(
+        "listen: 127.0.0.1:8787\nmode: enforce\nfail_policy: closed\nadmin_token: {admin_token}\nupstreams:\n  anthropic:\n    url: https://api.anthropic.com\n  openai:\n    url: https://api.openai.com\n"
+    )
+}
+
+/// Generate a strong random admin token: 32 CSPRNG bytes, 64 lowercase hex
+/// (≥ [`cerberus_proxy::api::ADMIN_TOKEN_MIN_BYTES`], comfortably above the
+/// non-loopback strong-token requirement).
+fn generate_admin_token() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("CSPRNG unavailable");
+    let mut out = String::with_capacity(64);
+    for b in bytes {
+        out.push(HEX[usize::from(b >> 4)] as char);
+        out.push(HEX[usize::from(b & 0x0f)] as char);
+    }
+    out
+}
+
+/// Write config.yaml with restrictive permissions (it carries the admin
+/// token). F6.A attempt 2 (P2-1): delegates to the shared atomic helper —
+/// the file is REPLACED via a tmp created 0600 + rename (F5 F-1 discipline,
+/// no umask window), so a re-init over an existing non-0600 config REPAIRS
+/// the mode instead of preserving it (the old in-place create/truncate
+/// applied 0600 only at creation). Every error is handled (init fails
+/// loudly instead of leaving a world-readable credential file).
+fn write_config_0600(path: &Path, content: &str) -> std::io::Result<()> {
+    cerberus_proxy::api::write_config_file_0600(path, content)
+}
+
+/// Truthful permission note for the init report (F6.A attempt 2, P2-1): the
+/// mode claim is DERIVED from the file itself (stat), not asserted — on unix
+/// it reports the actual octal mode (the helper guarantees 0600); when the
+/// platform has no unix mode or the stat fails, no numeric claim is made.
+fn actual_mode_note(path: &Path) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).map_or_else(
+            |_| "permissions applied".to_string(),
+            |m| format!("mode {:04o}", m.permissions().mode() & 0o777),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        "permissions applied".to_string()
+    }
 }
 
 /// Detect installed agents on the system.
@@ -190,7 +279,13 @@ pub(crate) fn scan_text(text: &str) -> String {
         Ok(r) => r,
         Err(e) => return format!("error loading rules: {e}"),
     };
-    let engine = match EngineBuilder::new(&rules).build() {
+    // R9-16 (F5.2): dry-run hashes are keyed too — env/file key when present
+    // (consistent with the daemon's audit hashes), else an ephemeral
+    // per-process CSPRNG key. NEVER unkeyed; the read-only resolution never
+    // writes the key file from a diagnostic command.
+    let (audit_key, key_source) =
+        crate::audit_key::resolve_existing_or_ephemeral_key(&crate::audit_key::default_config_dir());
+    let engine = match EngineBuilder::new(&rules).with_payload_secret(audit_key).build() {
         Ok(e) => e,
         Err(e) => return format!("engine build error: {e}"),
     };
@@ -208,6 +303,17 @@ pub(crate) fn scan_text(text: &str) -> String {
             report,
             "  [{:>8}] {} (pos {}..{}) hash={}",
             f.action, f.flag, f.start, f.end, f.hashed_value
+        )
+        .ok();
+    }
+    // F5 F-3: an EPHEMERAL dry-run key makes the hashes per-process and NOT
+    // comparable across runs — the output must disclose that (loudness, not
+    // silence). A normal boot (key file present) never reaches this state.
+    if matches!(key_source, crate::audit_key::KeySource::Ephemeral) {
+        writeln!(
+            report,
+            "\n⚠ note: no persisted audit key found — these hashes use an EPHEMERAL per-process \
+             key and are not comparable across runs (dry-run display only)"
         )
         .ok();
     }
@@ -337,8 +443,15 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos())
         ));
-        let yaml = init_config_yaml();
-        let parsed = cerberus_proxy::config::ProxyConfig::parse(yaml).expect("default yaml parses");
+        // R9-5 (F6): the init YAML carries a strong admin token.
+        let token = generate_admin_token();
+        assert!(
+            token.len() >= cerberus_proxy::api::ADMIN_TOKEN_MIN_BYTES,
+            "strong token"
+        );
+        assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+        let yaml = init_config_yaml(&token);
+        let parsed = cerberus_proxy::config::ProxyConfig::parse(&yaml).expect("default yaml parses");
         assert!(parsed.upstreams.contains_key("openai"), "openai default required");
         assert!(parsed.upstreams.contains_key("anthropic"), "anthropic default required");
         assert_eq!(
@@ -357,6 +470,50 @@ mod tests {
             written.contains("https://api.openai.com"),
             "the written config must preserve the upstreams: {written}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F6.A attempt 2 (P2-1 regression): re-running init over an existing
+    /// non-0600 config.yaml must ENFORCE 0600 on the rewritten file (the
+    /// rotated token must never live in a world-readable file) and the
+    /// report's mode claim must match the real file.
+    #[test]
+    fn reinit_over_non_0600_config_enforces_0600_and_tells_the_truth() {
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus_f6a2_reinit_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let config_path = dir.join("config.yaml");
+        std::fs::write(&config_path, "listen: 127.0.0.1:8787\nadmin_token: stale\n").expect("seed config");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).expect("chmod 644");
+        }
+
+        // `report` is asserted in the unix block below (mode-truth check); on
+        // non-unix targets that use is cfg'd out (clippy/rustc -D warnings).
+        #[cfg_attr(not(unix), allow(unused_variables))]
+        let report = run_init(dir.to_str().expect("utf8")).expect("re-init");
+
+        let yaml = std::fs::read_to_string(&config_path).expect("rewritten config");
+        assert!(yaml.contains("admin_token"), "a fresh token must be present: {yaml}");
+        assert!(!yaml.contains("stale"), "the old token must be rotated away: {yaml}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&config_path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "re-init must repair the mode to 0600, got {mode:o}");
+            // The report tells the truth: it claims 0600 and the file IS 0600.
+            assert!(
+                report.contains("mode 0600"),
+                "the report must state the real mode: {report}"
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -356,9 +356,11 @@ dependencies = [
  "cerberus-packs",
  "cerberus-proxy",
  "cerberus-store",
+ "chrono",
  "clap",
  "dirs",
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "hex",
  "notify-rust",
  "reqwest",
@@ -368,7 +370,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -380,11 +381,14 @@ name = "cerberus-engine"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "getrandom 0.2.17",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -396,6 +400,8 @@ dependencies = [
  "cerberus-packs",
  "cerberus-proxy",
  "regex",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

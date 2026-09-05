@@ -15,7 +15,12 @@ cd "$REPO_ROOT"
 
 ART="${1:-}"
 VERSION="${2:-}"
-ARCH="${3:-amd64}"
+ARCH="${3:-}"
+# Accept the documented `--arch amd64|arm64` flag as the 3rd argument too
+# (the usage string advertised it but the script only took a positional arg).
+if [ "${2:-}" = "--arch" ]; then ARCH="${3:-}"; VERSION=""; fi
+if [ "${3:-}" = "--arch" ] && [ -n "$4" ]; then ARCH="${4}"; fi
+[ -n "$ARCH" ] || ARCH="amd64"
 [ -n "$ART" ] && [ -f "$ART" ] || { echo "usage: $0 <cerberus-*.tar.gz> [VERSION] [--arch amd64|arm64]" >&2; exit 1; }
 [ -n "$VERSION" ] || VERSION="$(sed -nE 's/^version = "([^"]+)"/\1/p' crates/cerberus/Cargo.toml | head -1)"
 

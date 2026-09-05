@@ -610,6 +610,147 @@ impl PackManager {
         Ok(())
     }
 
+    /// Enable or disable a pack by name (Appendix B B.3: `packs
+    /// enable/disable <pack>`): flips the `active` flag of the pack's latest
+    /// installed version in the manifest, persists the manifest, and rebuilds
+    /// the live engine. Disabling is additive-safe: the pack JSON stays on
+    /// disk (history, `active: false`), so a later `enable` re-activates it
+    /// without re-installing.
+    ///
+    /// This is NOT the uninstall path: no JSON is deleted and the activation
+    /// sequence is left intact for `rollback`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pack is not installed, or the rebuild or
+    /// manifest persistence fails.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn set_active(&self, pack_name: &str, active: bool) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        let mut manifest = state.manifest.clone();
+        let Some(versions) = manifest.versions_by_pack.get(pack_name) else {
+            return Err(format!("pack '{pack_name}' is not installed"));
+        };
+        // Target key: enabling activates the latest on-disk version;
+        // disabling deactivates the currently active one. Already in the
+        // requested state → idempotent no-op success.
+        let key = if active {
+            let latest = versions.installed.clone();
+            if latest.is_empty() || manifest.active.get(&versioned_key(pack_name, &latest)).copied() == Some(true) {
+                return Ok(());
+            }
+            versioned_key(pack_name, &latest)
+        } else {
+            let current = versions.active.clone();
+            if current.is_empty() {
+                return Ok(());
+            }
+            versioned_key(pack_name, &current)
+        };
+        if active && self.effective_trust_root().is_none() {
+            // Enabling (re)activates rules — same Pro trust-root policy as
+            // install/rollback. Disabling only reduces detection and stays
+            // available in every tier.
+            return Err("pack enable requires a trust root (Pro tier or CERBERUS_PACK_TRUST_ROOT)".to_string());
+        }
+        manifest.active.insert(key.clone(), active);
+        if let Some(vm) = manifest.versions_by_pack.get_mut(pack_name) {
+            vm.active = if active {
+                parse_versioned_key(&key).1
+            } else {
+                String::new()
+            };
+        }
+
+        let (engine, installed) = match rebuild_active_set(
+            &mut manifest,
+            &self.pack_dir,
+            &self.base_rules,
+            self.effective_trust_root().as_deref(),
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                return Err(format!(
+                    "pack {} rebuild failed: {e}",
+                    if active { "enable" } else { "disable" }
+                ))
+            }
+        };
+        Self::persist_manifest(&self.pack_dir, &manifest)?;
+        state.installed = installed;
+        state.manifest = manifest;
+        *self.active_engine.lock().await = engine;
+        tracing::info!("pack {}: {pack_name}", if active { "enabled" } else { "disabled" });
+        Ok(())
+    }
+
+    /// Re-verify every installed pack's signature against the effective
+    /// trust root and rebuild the live engine from the verified manifest
+    /// (Appendix B B.3: `packs update` — F6 contract is verify + hot-reload;
+    /// fetching newer versions from a registry is the F7 auto-update unit).
+    ///
+    /// Returns one `(pack@version, ok)` entry per installed version; a
+    /// failed verification deactivates that version in the manifest (the
+    /// same policy as boot-time tamper handling) before the rebuild.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the post-verification rebuild fails.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn verify_installed(&self) -> Result<Vec<(String, bool)>, String> {
+        let mut state = self.state.lock().await;
+        let mut manifest = state.manifest.clone();
+        let root = self.effective_trust_root();
+        let mut results: Vec<(String, bool)> = Vec::new();
+        for (key, installed) in &state.installed {
+            // F7 round-2 (R2-2): `state.installed` is keyed by NAME (both
+            // writers + `rebuild_active_set` agree); the version comes from
+            // the manifest's ACTIVE pointer — the same source the rebuild
+            // loads from. Parsing the key as `name@ver` produced a version
+            // that never exists on disk ("") and made every healthy pack
+            // report "0/N verified; DEACTIVATED".
+            let name = key.clone();
+            let active_ver = manifest.versions_by_pack.get(&name).map(|v| v.active.clone());
+            let ok = match (&root, &installed.signature_hex, &installed.signer_public_key_hex) {
+                (Some(expected), Some(_sig), Some(_signer)) => active_ver.as_deref().is_none_or(
+                    // No active version in the manifest (or disk file
+                    // missing): nothing to verify — unverified. The DISK
+                    // bytes are the same source `rebuild_active_set` uses,
+                    // so the operator report matches the rebuild outcome.
+                    |ver| {
+                        load_signed_from_dir(&self.pack_dir, &name, ver)
+                            .is_some_and(|signed| signed.verify_with_trusted_root(expected).is_ok())
+                    },
+                ),
+                // No trust root / unsigned pack: without a root there is
+                // nothing to verify AGAINST — the pack is inactive anyway
+                // (boot gate), report it as unverified rather than "ok".
+                _ => false,
+            };
+            if !ok {
+                // Only deactivate when a real active version exists; a
+                // name missing from the manifest gets no garbage
+                // `name@` manifest entry (round-2 finding).
+                if let Some(ver) = active_ver {
+                    deactivate_pack(&mut manifest, &name, &ver);
+                }
+            }
+            results.push((key.clone(), ok));
+        }
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let (engine, installed) =
+            match rebuild_active_set(&mut manifest, &self.pack_dir, &self.base_rules, root.as_deref()) {
+                Ok(x) => x,
+                Err(e) => return Err(format!("packs update rebuild failed: {e}")),
+            };
+        Self::persist_manifest(&self.pack_dir, &manifest)?;
+        state.installed = installed;
+        state.manifest = manifest;
+        *self.active_engine.lock().await = engine;
+        Ok(results)
+    }
+
     /// Get the active engine.
     #[must_use]
     pub fn engine(&self) -> Arc<Mutex<CompiledEngine>> {
@@ -886,9 +1027,7 @@ fn rebuild_active_set(
         let pack = match signed.extract_with_root(root) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(
-                    "packs: active pack {name}@{ver} FAILED signature verification on boot; deactivating: {e}"
-                );
+                tracing::warn!("packs: active pack {name}@{ver} FAILED signature verification; deactivating: {e}");
                 deactivate_pack(manifest, &name, &ver);
                 changed = true;
                 continue;
@@ -1036,6 +1175,55 @@ mod tests {
         assert_eq!(packs.len(), 1);
         assert_eq!(packs[0].metadata.name, "test-pack");
         assert!(packs[0].active);
+    }
+
+    /// F7 round-2 (R2-2): `verify_installed` had ZERO coverage, which is how
+    /// the name@ver keying bug (every healthy pack reporting "0/1 verified;
+    /// DEACTIVATED") survived a green 864-test suite. This pins the honest
+    /// contract: healthy disk bytes verify TRUE and stay active; out-of-band
+    /// disk tampering verifies FALSE, deactivates, and persists.
+    #[tokio::test]
+    async fn verify_installed_reports_disk_state_honestly() {
+        let tmp = TempDir::new().unwrap();
+        let initial = EngineBuilder::new(&[]).build().unwrap();
+        let mgr = PackManager::new(tmp.path(), initial).unwrap();
+
+        let (signed, root) = sign_pack(&sample_pack());
+        mgr.install_with_root(signed, &root).await.unwrap();
+
+        // Healthy disk bytes: TRUE (this exact call reported "0/1 verified;
+        // DEACTIVATED" under the round-2 keying bug).
+        let results = mgr.verify_installed().await.unwrap();
+        assert_eq!(results.len(), 1, "one installed pack: {results:?}");
+        assert!(results[0].1, "healthy pack must verify against disk: {results:?}");
+        assert!(mgr.list_packs().await[0].active, "healthy pack stays active");
+
+        // Out-of-band disk tampering: flip one hex char of the signature on
+        // DISK (the in-memory state still holds the original bytes — the
+        // round-1 P2 divergence this test pins shut).
+        let disk_path = tmp
+            .path()
+            .join(versioned_file_name("test-pack", &sample_pack().metadata.version));
+        let disk = std::fs::read_to_string(&disk_path).expect("pack file on disk");
+        let tampered = disk.replacen("\"signature_hex\":\"", "\"signature_hex\":\"f", 1);
+        assert_ne!(disk, tampered, "signature field found on disk");
+        std::fs::write(&disk_path, tampered).expect("write tampered pack");
+
+        let results = mgr.verify_installed().await.unwrap();
+        assert!(!results[0].1, "tampered disk bytes must NOT verify: {results:?}");
+        // The rebuild drops the deactivated pack from the installed map, so
+        // the honest post-condition is: NO pack is active anymore.
+        assert!(
+            mgr.list_packs().await.iter().all(|p| !p.active),
+            "no pack may stay active after failed verification"
+        );
+
+        // Deactivation persists (a fresh manager reopens to the same state).
+        let reopened = open_with_trust_root(tmp.path(), &root);
+        assert!(
+            reopened.list_packs().await.iter().all(|p| !p.active),
+            "deactivation persisted across reopen"
+        );
     }
 
     #[tokio::test]

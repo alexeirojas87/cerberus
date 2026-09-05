@@ -845,7 +845,7 @@ mod tests {
     use tokio_rustls::TlsConnector;
 
     use crate::config::{FailPolicy, OperationMode};
-    use crate::test_utils::{build_test_context, make_test_rule};
+    use crate::test_utils::{build_test_context, build_test_context_keyed, make_test_rule};
 
     fn ca_paths(dir: &Path) -> CaPaths {
         CaPaths {
@@ -1357,6 +1357,14 @@ mod tests {
         let events = audit.lock().await;
         assert_eq!(events.len(), 1, "shadow finding must be audited");
         assert!(events[0].no_raw_values(&[secret]));
+        // Fix P2-2 (attempt 2): the recorded action is the WOULD-BE action
+        // while the body passed intact — the `shadow` flag disambiguates.
+        assert!(
+            events[0].flags.iter().any(|flag| flag == "shadow"),
+            "shadow event must carry the flag: {:?}",
+            (&events[0].action_taken, &events[0].flags)
+        );
+        assert_eq!(events[0].action_taken, "redact", "the would-be action is recorded");
         drop(events);
 
         upstream_task.await.unwrap();
@@ -1370,9 +1378,10 @@ mod tests {
         let secret = "INVALID-JSON-SECRET-12345678";
         let invalid_body = format!(r#"{{"prompt":"{secret}""#);
 
-        for fail_policy in [FailPolicy::Closed, FailPolicy::Open] {
+        for fail_policy in [FailPolicy::Closed, FailPolicy::ClosedOnCritical, FailPolicy::Open] {
             let case_name = match fail_policy {
                 FailPolicy::Closed => "closed",
+                FailPolicy::ClosedOnCritical => "closed-on-critical",
                 FailPolicy::Open => "open",
             };
             let paths = ca_paths(&temp.path().join(case_name));
@@ -1395,7 +1404,10 @@ mod tests {
                 "proxy response leaked invalid input: {response_text}"
             );
             match fail_policy {
-                FailPolicy::Closed => {
+                // R9-12: an undecodable body has no findings → criticality
+                // indeterminate → `closed-on-critical` fails closed, exactly
+                // like `Closed`.
+                FailPolicy::Closed | FailPolicy::ClosedOnCritical => {
                     assert!(response_text.starts_with("HTTP/1.1 502"), "{response_text}");
                     assert!(captured_rx.try_recv().is_err(), "closed policy forwarded invalid JSON");
                     upstream_task.abort();
@@ -1430,22 +1442,29 @@ mod tests {
         let redact_secret = "REDACT-SECRET-12345678";
         let body = format!(r#"{{"prompt":"{block_secret} {redact_secret}"}}"#);
 
-        for fail_policy in [FailPolicy::Closed, FailPolicy::Open] {
+        for fail_policy in [FailPolicy::Closed, FailPolicy::ClosedOnCritical, FailPolicy::Open] {
             let case_name = match fail_policy {
                 FailPolicy::Closed => "redact-closed",
+                FailPolicy::ClosedOnCritical => "redact-closed-on-critical",
                 FailPolicy::Open => "redact-open",
             };
             let paths = ca_paths(&temp.path().join(case_name));
             generate_local_ca(&paths).unwrap();
-            let (upstream_addr, mut captured_rx, upstream_task) = spawn_capturing_upstream().await;
+            let (upstream_addr, captured_rx, upstream_task) = spawn_capturing_upstream().await;
             let block_rule = make_test_rule("secret.block", &["BLOCK-SECRET-[0-9]{8}"]);
             let mut redact_rule = make_test_rule("secret.redact", &["REDACT-SECRET-[0-9]{8}"]);
             redact_rule.action = Action::Redact;
-            let ctx = build_test_context(&[block_rule, redact_rule], HashMap::new(), OperationMode::Enforce);
+            let ctx = build_test_context_keyed(&[block_rule, redact_rule], HashMap::new(), OperationMode::Enforce);
             {
                 let mut config = ctx.config.write().unwrap();
                 config.fail_policy = fail_policy;
-                config.policy.allowlist = vec![block_secret.to_string()];
+                // R9-7: the allowlist carries the HMAC FINGERPRINT of the
+                // allowed value (the context is wired with the test
+                // installation key); the raw value is never persisted.
+                config.policy.allowlist = vec![crate::allowlist::fingerprint(
+                    crate::test_utils::TEST_INSTALLATION_KEY,
+                    block_secret,
+                )];
             }
             let audit = ctx.api.events.clone();
             let mut cfg =
@@ -1457,37 +1476,189 @@ mod tests {
 
             let response = send_intercepted_request(addr, host, &paths, "/v1/chat", &body).await;
             let response_text = String::from_utf8_lossy(&response);
-            assert!(!response_text.contains(block_secret));
-            assert!(!response_text.contains(redact_secret));
-            match fail_policy {
-                FailPolicy::Closed => {
-                    assert!(response_text.starts_with("HTTP/1.1 502"), "{response_text}");
-                    assert!(
-                        captured_rx.try_recv().is_err(),
-                        "closed policy forwarded after redaction failure"
-                    );
-                    upstream_task.abort();
-                    let _ = upstream_task.await;
-                }
-                FailPolicy::Open => {
-                    assert!(response_text.starts_with("HTTP/1.1 200"), "{response_text}");
-                    let captured = captured_rx.await.unwrap();
-                    let body_start = captured.windows(4).position(|window| window == b"\r\n\r\n").unwrap() + 4;
-                    assert_eq!(
-                        &captured[body_start..],
-                        body.as_bytes(),
-                        "open policy must forward the original body after redaction failure"
-                    );
-                    upstream_task.await.unwrap();
-                }
-            }
+            // R9-21 attempt-1 semantics: the operator allowlist is
+            // authoritative end to end on EVERY surface (the F3.1/F3.2
+            // multipart model extended to JSON). The leaf scans apply it,
+            // so the allowlisted BLOCK-SECRET never reaches the redaction
+            // as a block finding and there is no redaction failure to
+            // fail-open/fail-closed over: the redaction SUCCEEDS for all
+            // three policies — the allowlisted value passes untouched and
+            // the REDACT-SECRET is redacted. The old Closed→502 outcome
+            // was an artifact of the unfiltered leaf scan (it saw a block
+            // rule match the operator had explicitly allowlisted).
+            assert!(
+                response_text.starts_with("HTTP/1.1 200"),
+                "redaction succeeds for all policies once the allowlisted value is inert: {response_text}"
+            );
+            assert!(!response_text.contains(redact_secret), "{response_text}");
+            let captured = captured_rx.await.unwrap();
+            let body_start = captured.windows(4).position(|window| window == b"\r\n\r\n").unwrap() + 4;
+            let captured_body = &captured[body_start..];
+            // The allowlisted value passes (the operator's explicit intent)
+            // and the non-allowlisted one is redacted.
+            assert!(
+                captured_body
+                    .windows(block_secret.len())
+                    .any(|w| w == block_secret.as_bytes()),
+                "the allowlisted value must pass untouched (operator intent): {captured_body:?}"
+            );
+            assert!(
+                !captured_body
+                    .windows(redact_secret.len())
+                    .any(|w| w == redact_secret.as_bytes()),
+                "the non-allowlisted secret must be redacted: {captured_body:?}"
+            );
+            assert!(
+                captured_body
+                    .windows(b"[REDACTED:secret.redact]".len())
+                    .any(|w| w == b"[REDACTED:secret.redact]"),
+                "the redact finding was applied: {captured_body:?}"
+            );
+            upstream_task.await.unwrap();
             let events = audit.lock().await;
-            assert!(events
-                .iter()
-                .all(|event| event.no_raw_values(&[block_secret, redact_secret])));
+            assert!(events.iter().all(|event| event.no_raw_values(&[redact_secret])));
+            // The allowlisted value passing is NOT a leak (operator intent);
+            // the non-allowlisted secret must never appear raw in events.
             drop(events);
             handle.shutdown(Duration::from_secs(2)).await.unwrap();
         }
+    }
+
+    /// ── FIX P1-2 (attempt 2): per-upstream `mode` must be LIVE on the MITM
+    /// path. The CONNECT hostname (`api.mode-route.test`) is resolved to the
+    /// upstream keyed `openai` whose `url` host is that hostname, so a
+    /// per-upstream `enforce` BLOCKS under a global `shadow` — enforce can
+    /// never silently shadow. The control tunnel to an unmapped host
+    /// inherits the global mode (documented fallback). ──
+    #[tokio::test]
+    async fn connect_tls_per_upstream_mode_resolves_by_url_host_and_never_silently_shadows() {
+        use cerberus_engine::rule::Action;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mapped_host = "api.mode-route.test";
+        let unmapped_host = "api.unmapped.test";
+        let secret = "MODESECRET-12345678";
+
+        // Global SHADOW + upstream "openai" (url host = mapped_host) with
+        // per-upstream ENFORCE — the exact forbidden state from the finding:
+        // before the fix the MITM request silently forwarded unredacted.
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "openai".to_string(),
+            crate::config::UpstreamConfig {
+                url: format!("https://{mapped_host}"),
+                path_prefix: None,
+                auth_header: "authorization".to_string(),
+                mode: Some(OperationMode::Enforce),
+                expected_auth: None,
+            },
+        );
+        let mut rule = make_test_rule("secret.mode", &[r"MODESECRET-[0-9]{8}"]);
+        rule.action = Action::Block;
+        let ctx = build_test_context(&[rule], upstreams, OperationMode::Shadow);
+
+        // The mapped host forwards to a capturing mock so the blocked
+        // direction can prove NOTHING reached the upstream; the unmapped
+        // host uses the same mock for the shadow control probe below.
+        let (upstream_addr, mut captured_rx, upstream_task) = spawn_capturing_upstream().await;
+        let paths = ca_paths(&temp.path().join("ca"));
+        generate_local_ca(&paths).unwrap();
+        let mut cfg = ForwardProxyConfig::for_test(
+            "127.0.0.1:0".parse().unwrap(),
+            &[mapped_host.to_string(), unmapped_host.to_string()],
+            paths.clone(),
+        )
+        .unwrap();
+        cfg.upstream_overrides
+            .insert(mapped_host.to_string(), format!("http://{upstream_addr}"));
+        cfg.upstream_overrides
+            .insert(unmapped_host.to_string(), format!("http://{upstream_addr}"));
+        let (addr, handle) = spawn_forward_proxy(cfg, ctx).await.unwrap();
+
+        // 1) Mapped host: per-upstream ENFORCE overrides the global SHADOW.
+        let body = format!(r#"{{"prompt":"{secret}"}}"#);
+        let response = send_intercepted_request(addr, mapped_host, &paths, "/v1/chat", &body).await;
+        let response_text = String::from_utf8_lossy(&response);
+        assert!(
+            response_text.starts_with("HTTP/1.1 403"),
+            "per-upstream enforce must apply on the MITM path (got): {response_text}"
+        );
+        assert!(
+            captured_rx.try_recv().is_err(),
+            "enforce blocked the request: nothing may reach the upstream"
+        );
+
+        // 2) Control: an unmapped host (no upstream entry — `openai` is keyed
+        //    by name and its url host is the mapped host) inherits the global
+        //    SHADOW and passes intact — the documented fallback, not a silent
+        //    mode shadow.
+        let response = send_intercepted_request(addr, unmapped_host, &paths, "/v1/chat", &body).await;
+        let response_text = String::from_utf8_lossy(&response);
+        assert!(
+            response_text.starts_with("HTTP/1.1 200"),
+            "unmapped host inherits the global shadow (got): {response_text}"
+        );
+        let captured = captured_rx.await.unwrap();
+        let body_start = captured.windows(4).position(|window| window == b"\r\n\r\n").unwrap() + 4;
+        assert_eq!(
+            &captured[body_start..],
+            body.as_bytes(),
+            "global shadow must forward the body intact"
+        );
+        upstream_task.await.unwrap();
+        handle.shutdown(Duration::from_secs(2)).await.unwrap();
+    }
+
+    /// ── FIX P1-2 (reverse direction): a per-upstream `shadow` on the MITM
+    /// path never blocks, even under a global `enforce`. ──
+    #[tokio::test]
+    async fn connect_tls_per_upstream_shadow_mode_never_blocks_on_mitm_path() {
+        use cerberus_engine::rule::Action;
+
+        let temp = tempfile::tempdir().unwrap();
+        let host = "api.shadow-mode.test";
+        let secret = "MITMSHADOW-123456";
+
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "shadowed-provider".to_string(),
+            crate::config::UpstreamConfig {
+                url: format!("https://{host}"),
+                path_prefix: None,
+                auth_header: "authorization".to_string(),
+                mode: Some(OperationMode::Shadow),
+                expected_auth: None,
+            },
+        );
+        let mut rule = make_test_rule("secret.mitmshadow", &[r"MITMSHADOW-[0-9]{6}"]);
+        rule.action = Action::Block;
+        let ctx = build_test_context(&[rule], upstreams, OperationMode::Enforce);
+
+        let (upstream_addr, captured_rx, upstream_task) = spawn_capturing_upstream().await;
+        let paths = ca_paths(&temp.path().join("ca"));
+        generate_local_ca(&paths).unwrap();
+        let mut cfg =
+            ForwardProxyConfig::for_test("127.0.0.1:0".parse().unwrap(), &[host.to_string()], paths.clone()).unwrap();
+        cfg.upstream_overrides
+            .insert(host.to_string(), format!("http://{upstream_addr}"));
+        let (addr, handle) = spawn_forward_proxy(cfg, ctx).await.unwrap();
+
+        let body = format!(r#"{{"prompt":"{secret}"}}"#);
+        let response = send_intercepted_request(addr, host, &paths, "/v1/chat", &body).await;
+        let response_text = String::from_utf8_lossy(&response);
+        assert!(
+            response_text.starts_with("HTTP/1.1 200"),
+            "per-upstream shadow must never block on the MITM path (got): {response_text}"
+        );
+        let captured = captured_rx.await.unwrap();
+        let body_start = captured.windows(4).position(|window| window == b"\r\n\r\n").unwrap() + 4;
+        assert_eq!(
+            &captured[body_start..],
+            body.as_bytes(),
+            "shadow forwards the body intact through the tunnel"
+        );
+        upstream_task.await.unwrap();
+        handle.shutdown(Duration::from_secs(2)).await.unwrap();
     }
 
     #[tokio::test]

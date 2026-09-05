@@ -1,0 +1,10 @@
+The OpenAI documentation placeholder is openai sk-EXAMPLE000000000000000000000000.
+Authorization: Bearer YOUR_TOKEN_HERE
+The GitHub documentation placeholder is ghp_example_token_do_not_use_in_production.
+The Slack documentation placeholder is slack token xoxb-EXAMPLE0000000000000000000000.
+The sample email user@example.com is intentionally allowed.
+The formatted card fixture 4111 1111 1111 1111 is intentionally allowed.
+The payment number 1234567812345678 has an invalid Luhn checksum.
+The order id is 1234567890.
+The build timestamp is 20260827123456.
+The repeated digit sequence is 0000000000000.

@@ -1,0 +1,10 @@
+The Stripe production credential is stripe key sk_live_123456789012345678901234 for the billing worker.
+The Google integration uses google api_key AIza12345678901234567890123456789012345 for its service account.
+DATABASE_URL=postgresql://cerberus.example.invalid/app
+sk-Abcdefghijklmnopqrstuvwxyz123456
+AKIA1234567890ABCDEF
+44 20 7946 0958
+415-555-2671
+(212) 555-1234
+E.164 882161234567890
++86 138 0013 8002

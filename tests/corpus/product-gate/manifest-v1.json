@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "corpus_version": "cerberus-default-pack-pr-v4",
+  "cases": [
+    {
+      "id": "api-keys",
+      "path": "tests/corpus/positives/01-api-keys.txt",
+      "expected": [
+        {
+          "flag": "secret.openai_api_key",
+          "value": "sk-Kd8sN2m9xR4pL7vN3qW5tY1bH6fC0dEjKlMnOpQrStUvWxYz"
+        },
+        {
+          "flag": "entropy.high_entropy_secret",
+          "value": "sk-Kd8sN2m9xR4pL7vN3qW5tY1bH6fC0dEjKlMnOpQrStUvWxYz"
+        },
+        {
+          "flag": "secret.anthropic_api_key",
+          "value": "sk-ant-api03Nm9xR4pL7vN3qW5tY1bH6fC0dEjKlMnOpQrStUvWxYzABCDEFGH"
+        },
+        {
+          "flag": "secret.github_token",
+          "value": "ghp_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z"
+        },
+        {
+          "flag": "secret.slack_token",
+          "value": "xoxb-000000000000000000000000000000"
+        },
+        {
+          "flag": "secret.generic_bearer_token",
+          "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.RkdWm0tP7pN1Qk2nL3mO4pP5qQ6rR7sS8tT9uU0vV"
+        },
+        {
+          "flag": "entropy.high_entropy_secret",
+          "value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.RkdWm0tP7pN1Qk2nL3mO4pP5qQ6rR7sS8tT9uU0vV"
+        }
+      ]
+    },
+    {
+      "id": "emails",
+      "path": "tests/corpus/positives/02-emails.txt",
+      "expected": [
+        {
+          "flag": "pii.email_address",
+          "value": "alex.smith@corp-email.com"
+        },
+        {
+          "flag": "pii.email_address",
+          "value": "finance@startup.io"
+        },
+        {
+          "flag": "pii.email_address",
+          "value": "security@banking-group.co.uk"
+        },
+        {
+          "flag": "pii.email_address",
+          "value": "jane.doe+spam@gmail.com"
+        },
+        {
+          "flag": "pii.email_address",
+          "value": "john.miller@alumni.stanford.edu"
+        },
+        {
+          "flag": "pii.email_address",
+          "value": "pagerduty@company-name.example.com"
+        }
+      ]
+    },
+    {
+      "id": "credit-cards",
+      "path": "tests/corpus/positives/03-credit-cards.txt",
+      "expected": [
+        {
+          "flag": "pii.credit_card",
+          "value": "4111111111111111"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "5500000000000004"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "340000000000009"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4000056655665556"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "5555555555554444"
+        }
+      ]
+    },
+    {
+      "id": "phone-numbers",
+      "path": "tests/corpus/positives/04-phone-numbers.txt",
+      "expected": [
+        {
+          "flag": "pii.phone_number",
+          "value": "+1 555 123 4567"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "+44 20 7946 0958"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "+52 55 1234 5678"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "+1 800 555 0199"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "+61 2 9876 5432"
+        }
+      ]
+    },
+    {
+      "id": "private-keys",
+      "path": "tests/corpus/positives/05-pem-keys.txt",
+      "expected": [
+        {
+          "flag": "secret.pem_private_key",
+          "value": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0OhmukK+eN3fVNiOqNl5LJfA7BkY\nyO7p8Rz6sQxW9jK2mLn3R4tUvXyZ5AbCdEfGhIjKlMn\n-----END RSA PRIVATE KEY-----"
+        },
+        {
+          "flag": "secret.pem_private_key",
+          "value": "-----BEGIN EC PRIVATE KEY-----\nMHQCAQEEIIm3V8oRz6sQxW9jK2mLn3R4tUvXyZ5AbC\ndEfGhIjKlMnOpQrStUvWxYzABCDEFGHIJ\n-----END EC PRIVATE KEY-----"
+        },
+        {
+          "flag": "secret.pem_private_key",
+          "value": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn\nNhAAAAAwEAAQAAAQEA0OhmukK+eN3fVNiOqNl5LJfA7BkYyO7p8Rz6sQxW9jK2mLn3\n-----END OPENSSH PRIVATE KEY-----"
+        },
+        {
+          "flag": "secret.pem_private_key",
+          "value": "-----BEGIN DSA PRIVATE KEY-----\nMIIBvAIBAAKBgQDwOhmukK+eN3fVNiOqNl5LJfA7BkYyO7p8\nRz6sQxW9jK2mLn3R4tUvXyZ5AbCdEfGhIjKlMnOpQrStUvW\n-----END DSA PRIVATE KEY-----"
+        },
+        {
+          "flag": "secret.id_rsa_ssh_key",
+          "value": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn\nNhAAAAAwEAAQAAAQEA0OhmukK+eN3fVNiOqNl5LJfA7BkYyO7p8Rz6sQxW9jK2mLn3\n-----END OPENSSH PRIVATE KEY-----"
+        }
+      ]
+    },
+    {
+      "id": "entropy",
+      "path": "tests/corpus/positives/06-high-entropy.txt",
+      "expected": [
+        {
+          "flag": "entropy.high_entropy_secret",
+          "value": "J8sK2m9xR4pL7vN3qW5tY1bH6fC0dEjKlMnOpQrStUvWxYzABCDEFGH"
+        },
+        {
+          "flag": "entropy.high_entropy_secret",
+          "value": "Kd8sN2m9xR4pL7vN3qW5tY1bH6fC0dEjKlMnOpQrStUvWxYz"
+        },
+        {
+          "flag": "entropy.high_entropy_secret",
+          "value": "L7vN3qW5tY1bH6fC0dEjKlMnOpQrStUvWxYzABCDEFGHIJKLMNOPQRSTUV"
+        },
+        {
+          "flag": "entropy.high_entropy_secret",
+          "value": "Nm9xR4pL7vN3qW5tY1bH6fC0dEjKlMnOpQrStUvWxYzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        },
+        {
+          "flag": "entropy.high_entropy_secret",
+          "value": "Y1bH6fC0dEjKlMnOpQrStUvWxYzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        },
+        {
+          "flag": "entropy.high_entropy_secret",
+          "value": "X7yZ1qW3rT5vB9nM2kL8pC4hJ6fD0sA2mN4oP6qR8sT0uV2wX4yZ6aB8cD0eF2gH"
+        }
+      ]
+    },
+    {
+      "id": "additional-default-rules",
+      "path": "tests/corpus/product-gate/01-default-pack-additional.txt",
+      "expected": [
+        {
+          "flag": "secret.stripe_key",
+          "value": "sk_live_123456789012345678901234"
+        },
+        {
+          "flag": "secret.google_api_key",
+          "value": "AIza12345678901234567890123456789012345"
+        },
+        {
+          "flag": "secret.env_block",
+          "value": "DATABASE_URL=postgresql://cerberus.example.invalid/app\n"
+        },
+        {
+          "flag": "secret.openai_api_key",
+          "value": "sk-Abcdefghijklmnopqrstuvwxyz123456"
+        },
+        {
+          "flag": "secret.aws_access_key_id",
+          "value": "AKIA1234567890ABCDEF"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "44 20 7946 0958"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "415-555-2671"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "(212) 555-1234"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "882161234567890"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "+86 138 0013 8002"
+        }
+      ]
+    },
+    {
+      "id": "negative-code",
+      "path": "tests/corpus/negatives/01-code-snippets.txt",
+      "expected": []
+    },
+    {
+      "id": "negative-readme",
+      "path": "tests/corpus/negatives/02-readme-files.txt",
+      "expected": []
+    },
+    {
+      "id": "negative-prose",
+      "path": "tests/corpus/negatives/03-regular-text.txt",
+      "expected": []
+    },
+    {
+      "id": "negative-short",
+      "path": "tests/corpus/negatives/04-short-strings.txt",
+      "expected": []
+    },
+    {
+      "id": "negative-constraints",
+      "path": "tests/corpus/product-gate/02-constraints-and-validators-negative.txt",
+      "expected": []
+    },
+    {
+      "id": "attempt5-separated-pans",
+      "path": "tests/corpus/positives/07-separated-pans.txt",
+      "expected": [
+        {
+          "flag": "pii.credit_card",
+          "value": "4000.0566.5566.5556"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4000/0566/5566/5556"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4000  0566  5566  5556"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4000 0566 5566 5556"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4000.0566.5566.5556"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4111111111111111"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4111 1111-1111.1111"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4000.0566-5566 5556"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4111\u00a0 1111 1111\u00a01111"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4111111111111111"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4111111111111111"
+        },
+        {
+          "flag": "pii.credit_card",
+          "value": "4111111111111111"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "8005550199"
+        },
+        {
+          "flag": "pii.phone_number",
+          "value": "5551234567"
+        }
+      ]
+    },
+    {
+      "id": "negative-attempt5",
+      "path": "tests/corpus/negatives/05-attempt5-adversarial.txt",
+      "expected": []
+    }
+  ]
+}
