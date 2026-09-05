@@ -409,3 +409,102 @@ Untouched this round, re-anchored for continuity (attempt-1 verifier §7 values 
 ### Builder verdict (attempt 2)
 
 BUILT — returns to VERIFY. The attempt-1 P0 chain (dead-end before `gh release create`) is repaired and the repaired dataflow is executed end-to-end locally, green, twice, with both failure directions proven to bite. Containment lift is still NOT part of this attempt: the owner flips the workflows live only after an independently reviewed PASS Evidence Pack and sign-off, per §8B.
+
+---
+
+## Verification attempt 2 — re-verification
+
+- Reviewer: INDEPENDENT adversarial VERIFY (did not build; Gauntlet §8B)
+- Candidate: commit `c37c071` on branch `r9-remediation` (parent `5a4aa92` — the attempt-1 FAIL report)
+- Re-verification worktree: `/var/folders/l8/v1pj_5ms6xb73t26kn85l7h80000gn/T/opencode/f8-verify2` (detached at c37c071; removed after this report)
+- Required reading done: attempt-1 battery + FIX attempt 2 section (this file), `git diff 5a4aa92..c37c071` (5 files, +726/−33 — exactly the 5 declared files, no scope creep), `evidence/review9/f8-attempt1-verification.md` (the P0 diagnosis being closed)
+- **Final verdict: PASS** — F8-V-1 (P0) CLOSED, all four sub-diagnoses fixed and the repaired dataflow executed end-to-end BY THIS REVIEWER; 2 P2 findings recorded (no blocker); 0 P0/P1.
+
+### 1. Commands run (verbatim, with exit codes)
+
+| # | Command (cwd = worktree unless noted) | Exit | Result |
+|---|---|---|---|
+| 1 | `git worktree add --detach …/f8-verify2 c37c071` | 0 | worktree created, HEAD c37c071 |
+| 2 | `git diff --stat 5a4aa92..c37c071` | 0 | 5 files: release-v2.yml (+208), evidence pack (+175), cerberus.spec (7), publish_tap_pr.sh (23), simulate_release_assembly.sh (NEW +346) |
+| 3 | `bash tools/release/simulate_release_assembly.sh` (run 1) | **0** | **SIM-PASS — reaches the exact `gh release create` asset list; asset count 17; real cargo release build executed (47.89s, sha `2a47ace3…`)** |
+| 4 | `bash tools/release/simulate_release_assembly.sh` (run 2) | 0 | idempotent GREEN, same 17-asset list |
+| 5 | `SIM_KEEP=1 bash tools/release/simulate_release_assembly.sh` | 0 | GREEN; sim dir preserved for forensics |
+| 6 | `bash tools/release/simulate_release_assembly.sh --negative` (×2) | 0 | both tamper shapes fail closed: `FAIL: staged asset 'cerberus-0.1.2-1.x86_64.rpm' is NOT listed in SHA256SUMS` and `FAIL: staged asset 'UNLISTED-fixture.txt' is NOT listed in SHA256SUMS` (inner exits 1 — wrapper 0 = demanded failure achieved) |
+| 7 | `shasum -a 256 -c SHA256SUMS` in the kept sim `dist/` (INDEPENDENT of the sim's own gate) | 0 | **16/16 OK** — incl. `cerberus.rb` + 3 winget yamls: shas in the canonical sums equal the actual files |
+| 8 | `grep InstallerSha256 …installer.yaml` vs `shasum -a 256 …windows-x86_64.zip` | 0 | `InstallerSha256: 9cfa14691f8cade1a3441c9a3014e9f07c97f1f3534961b2c1cfa2184e9d7faa` == actual zip sha (REAL, not placeholder) |
+| 9 | rpmspec proof: `sed {{VERSION}}/{{ARCH}}` → `rpmspec -q --qf '%{RELEASE}' --define 'dist .fc40' <spec>` | 0 | `%{RELEASE}` = **1** on a dist-tagged host → CI rpm name = `cerberus-0.1.2-1.x86_64.rpm` (F8-V-3 pin independently re-proven) |
+| 10 | ATTACK b — throwaway copy of the sim with the **windows** fragment dropped from the canonical `cat`, run `--_inner` | **1** | `FAIL: cerberus-0.1.2-windows-x86_64.zip missing from SHA256SUMS` — a different-fragment drop fails closed |
+| 11 | ATTACK c — identical duplicate of the deb line appended to `SHA256SUMS-packages` | **0** | **gate PASSES, asset list = 18 with `dist/cerberus_0.1.2_amd64.deb` twice** — identical dupes are NOT caught (finding F8-V2b-1 below) |
+| 12 | ATTACK c2 — sha-CONFLICTING duplicate (same name, altered sha) | **1** | `FAIL: sha mismatch for cerberus_0.1.2_amd64.deb` — direction A catches conflicting dupes |
+| 13 | ATTACK e — byte tampered into the staged deb after sums assembly | **1** | `FAIL: sha mismatch for cerberus_0.1.2_amd64.deb` — direction-A recomputation bites |
+| 14 | `./tools/release/verify_tag_merge.sh v0.1.2` on tag→753f9a9 (real origin/main, throwaway clone, origin/main fetched from GitHub = `753f9a9`, version 0.1.2) | 0 | PASS (semver/Cargo.toml/lock/ancestry) |
+| 15 | tag→`c37c071` (unmerged), `verify_tag_merge.sh v0.1.2` | **1** | `FAIL: … NOT reachable from main merged history; refusing to release (R9-3)` |
+| 16 | `verify_tag_merge.sh v9.9.9` | **1** | `FAIL: tag v9.9.9 != crates/cerberus/Cargo.toml version 0.1.2` |
+| 17 | install.sh NEGATIVE: local HTTP 8821 + isolated HOME + `CERBERUS_SHA256=deadbeef…` | **1** | `Error: checksum mismatch. Expected deadbeef…, got 2a47ace3…` |
+| 18 | install.sh POSITIVE: `CERBERUS_SHA256=2a47ace3…` | 0 | `✓ SHA-256 checksum verified` → installed → `cerberus --version` = `cerberus 0.1.2` (exit 0) |
+| 19 | brew clean-install, ISOLATED prefix: `git clone --depth=1 https://github.com/Homebrew/brew /Users/alexeirojas/f8brew-verify2/homebrew` + HOMEBREW_PREFIX/REPOSITORY/CELLAR/CACHE bound there | 0 | Homebrew ≥4.3.0 (shallow clone) |
+| 20 | `brew tap-new f8a2/local` + `fill_brew_formula.sh --version 0.1.2 --platforms <canonical sums> --out <tap>/Formula/cerberus.rb` (url patched to `file://` of the REAL artifact) | 0 | formula with REAL macos sha `2a47ace31810cb35…`; `ruby -c` OK |
+| 21 | `brew install --build-from-source f8a2/local/cerberus` | 0 | poured; **brew verified the real sha256** |
+| 22 | `$P/bin/cerberus --version` / `brew test f8a2/local/cerberus` / `$P/bin/cerberus test "my api key is sk-abc123"` | 0/0/0 | `cerberus 0.1.2`; brew test exit 0; `✓ No sensitive data detected.` |
+| 23 | `brew uninstall --force cerberus`; `rm -rf` isolated prefix | 0 | prefix clean; **machine `/opt/homebrew` untouched (cerberus 0.1.1 intact, verified)** |
+| 24 | `TAP_PR_TOKEN='F8A2FAKE-token-…' ./tools/release/publish_tap_pr.sh --version 0.1.2 --sums <canonical sums> --tap-repo f8-nonexistent-verify-xyz/homebrew-cerberus` | **1** | `FAIL: could not clone tap repo…`; **fake-token occurrences in full output: 0; `x-access-token` occurrences: 0** (error URL is bare `https://github.com/…`) |
+| 25 | `publish_tap_pr.sh --version 0.1.2 --sums <canonical sums> --dry-run` | 0 | `DRY-RUN OK: formula valid, shas sourced from … No network calls made.` |
+| 26 | leak greps over 3 v2 workflows + release scripts: `set -x|printenv|env \|` and `echo.*secret vars` | 0/0 | only comment hits (`publish_tap_pr.sh:81` mentions `set -x` in prose; macos-notarize DRY-RUN echoes escaped `\$VARS` literals); `GPG_*` echo pipes to gpg stdin unchanged from attempt 1 (GitHub-masks, standard) |
+| 27 | `actionlint -no-color .github/workflows/*.yml` (v1.7.12) | 1 | **10 findings — 6× `review9_f8_pending` if:false (release-v2 L54/L72/L241/L350, version-bump L48, notify-tap L37), 2× frozen if:false (release.yml L22, notify-tap.yml L15), 2× frozen `"on":[]` (release.yml L14, notify-tap.yml L7). ZERO new findings from the attempt-2 edits** |
+| 28 | `cargo fmt --check` | 0 | clean |
+| 29 | `cargo clippy --workspace --all-targets -- -D warnings` (un-piped, rc checked) | 0 | Finished dev profile |
+| 30 | `rtk cargo test --workspace --all-targets` | 0 | **865 passed (29 suites, 55.38s), 0 failed** |
+| 31 | `rtk cargo test -p cerberus-packs --test production_pack_pr` | 0 | **19 passed** |
+| 32 | `git diff 5a4aa92..c37c071 -- .github/workflows/release.yml .github/workflows/notify-tap.yml \| wc -c` | 0 bytes | **frozen workflows byte-untouched**; `"on": []` present in both |
+| 33 | guard grep `review9_f8_pending` | 0 | **6/6 jobs** guarded at the exact claimed lines (release-v2 L54/L72/L241/L350, version-bump-v2 L48, notify-tap-v2 L37) |
+| 34 | `git diff --check` (staged + unstaged) | 0 | clean |
+| 35 | `shasum -a 256` on the 4 touched files | 0 | **4/4 match the pack's attempt-2 frozen table byte-for-byte** (release-v2 `54529817…`, spec `dca9db40…`, tap script `cb9bfb03…`, sim `a71fa808…`); 10 untouched files re-hash identical to the attempt-1 verifier §7 table (F8-V-2 re-anchoring claim TRUE) |
+| 36 | `worktree remove` (after this report) | 0 | worktree removed |
+
+### 2. The decisive check — sim executed BY THE REVIEWER
+
+Positive GREEN ×2 + SIM_KEEP forensics run (all exit 0, idempotent, asset count 17, `SIM-PASS: release assembly dataflow reaches gh release create with no dead-end`). Negative ×2: both tamper shapes failed closed (exit 1 each). The sim's own real-cargo-build artifact sha (`2a47ace3…`) flows through fragments → canonical sums → formula (`sha256 macos-aarch64 : 2a47ace3…`) → both-directions gate → asset list, exactly as the workflow prescribes.
+
+### 3. Sim ↔ workflow fidelity (side-by-side)
+
+Verified block-for-block against `release-v2.yml`: staging `find dl -type f ! -name 'SHA256SUMS-*' -exec mv {} dist/ \;` (L408 ≡ sim L91), canonical 5-fragment `cat` in the SAME order (L410-416 ≡ L92-98), REQUIRED array + zero-sha refusal (L422-435 ≡ L103-116), direction A recompute (L437-442 ≡ L120-125), fold (`(cd dist && sha256sum cerberus.rb Cerberus.Cerberus.*.yaml) >> SHA256SUMS`, L474 ≡ L141-144), both-directions gate incl. end-anchored direction B `grep -q " ${name}\$"` (L481-496 ≡ L149-161), asset list driven from the verified sums (L508-513 ≡ L166-173). Documented local adaptations (equivalent, disclosed in the sim): absolute paths for the generator scripts (they `cd "$REPO_ROOT"` internally; in CI cwd IS the repo root so the workflow's relative paths resolve identically), and a broader sed (`s#  .*/#  #`) for sig lines because sim sigs live at absolute paths (workflow's `s#  dist/#  #` is correct for CI's `dist/`-relative sigs; same effect). The Windows `Set-Content -NoNewline` + `dist/` prefix quirk is replayed and normalized (fragment ends with a real `0x0a`, bare name) — byte-verified in the kept sim dir.
+
+New stale-sha vector checked and DEFUSED: on macOS the artifact is re-packaged AFTER signing and `macos-notarize.sh:118-122` **regenerates dist/SHA256SUMS** before the fragment step reads it; on Windows the pwsh step hashes AFTER `Compress-Archive` (release-v2.yml:178-179). No stale sha can enter a fragment.
+
+### 4. F8-V-1 (P0) closure — each sub-diagnosis verified closed in release-v2.yml
+
+| Sub-diagnosis (attempt 1) | Fix verified at | Independently proven by |
+|---|---|---|
+| 1. deb/rpm shas never in any SHA256SUMS → EXPECTED loop exit 1 before publish | `Package sums fragment` **L302-328** (fail-closed L314-318, bare names L319-326), canonical cat includes `dl/packages/SHA256SUMS-packages` **L415**, upload includes it **L344** | sim fragment shows 4 package lines incl. deb + rpm; REQUIRED check + direction A PASS; neg1 (rpm line dropped) fails closed |
+| 2. four `SHA256SUMS` collide under merge-multiple (last writer wins) | unique fragments `SHA256SUMS-<os>-<arch>` **L213-227** (normalization incl. Windows quirk), upload glob `dist/SHA256SUMS-*` **L235**, 5 distinct-dir downloads **L365-394**, explicit canonical `cat` **L410-416**; `grep merge-multiple release-v2.yml` = 2 COMMENT hits only | sim replays the quirk; all 8 platform lines + 4 package lines present in the 12-line canonical — zero lines lost |
+| 3. `dist/*.rpm` upload glob matches nothing (rpms live in `dist/rpm/x86_64/`) | upload paths **L342-343** `dist/rpm/x86_64/*.rpm` + `*.sig`; srpms → `dist/srpm` L276 (not released, MVP) | sim stages rpm from `rpm/x86_64/`; rpm + rpm.sig reach the staged set and the asset list |
+| 4. asset `find cerberus-*` omits the deb (underscore), its sig, `cerberus.rb`, winget manifests | winget flat-in-dist `--out-dir dist` **L456-464**, fold **L471-476**, FINAL both-directions gate **L478-497** (direction A recompute; direction B end-anchored), `gh release create` asset list driven FROM the verified sums **L499-520** | sim asset list = SHA256SUMS + 4 tarballs/zips + sigs + deb(+sig) + rpm(+sig) + cerberus.rb + 3 winget yamls; `shasum -c` 16/16 OK; unlisted-asset negative fails closed |
+
+**F8-V-1: CLOSED.** The attempt-1 P0 chain can no longer silently recur: the rpm-drop replay (neg1) fails the gate exactly like the original P0 demands, and the exact `gh release create` asset list is reached from the verified manifest.
+
+### 5. Findings
+
+| ID | Severity | Finding |
+|---|---|---|
+| F8-V2-1 | P2 | **Sim fixture over-generates detached sigs for macos-aarch64 and windows-x86_64.** Real CI produces none there (macOS = codesign+staple embedded; Windows = Authenticode embedded; only Linux emits detached sigs), so a real release will list ~15 assets, not the sim's 17. No dataflow impact (all mechanisms identical; the both-directions gate is 1:1 and count-agnostic, so it handles any sig count); the pack's "17 assets" transcript must be read as the fixture model's list, not the literal CI manifest. Cosmetic fidelity note for the next sim revision. |
+| F8-V2-2 | P2 | **The both-directions gate does NOT catch IDENTICAL duplicate lines inside a fragment** (empirically proven: exit 0, 18-asset list with the deb twice). A sha-CONFLICTING duplicate IS caught by direction A (exit 1, proven). Reachability under the committed steps: none — every fragment step is an explicit fixed list (no loop can emit a dupe). If it ever manifested, `gh release create` would receive the duplicated asset twice → GitHub API 422 → exit 1 **after the release object is created** (partial assets, visibly failed run — not a silent bad release). Suggested future hardening (not applied, per no-edit rule): a `sort \| uniq -d` check on the canonical sums inside the gate. |
+| — | note | REQUIRED-name check remains substring-based (`awk index`), disclosed by the builder: a `.rpm.sig` line can satisfy the bare-rpm REQUIRED probe (observed in neg1 — defense-in-depth layering as documented); the end-anchored direction-B gate is the real refusal. Works as designed. |
+| — | note | If a pwsh future version wrote a BOM into `dist\SHA256SUMS`, direction A would fail-closed (sha mismatch), never silently. windows-latest pwsh 7 default is utf8NoBOM. No action. |
+| — | note | `gh release create` creates the release object before uploading assets; an upload failure mid-list leaves a partial release + exit 1. Inherent to the GitHub release flow (pre-existing behavior class), minimized here by the 1:1 gate; not a regression. |
+
+### 6. Per-criterion verdicts (attempt-2 scope)
+
+| Criterion | Verdict |
+|---|---|
+| F8-V-1 (P0) closed: canonical assembly, no merge-multiple, fixed globs, both-directions gate, publish list = verified manifest | **PASS** — all 4 fixes at file:line; dataflow executed end-to-end by this reviewer (×2 green), failures replayed (×2, both bite) |
+| F8-V-2 (P2) frozen-hash table anchored | **PASS** — 4/4 touched files match the committed table; 10 untouched files re-hash identical to attempt-1 §7 |
+| F8-V-3 (P2) rpm Release pinned | **PASS** — `Release: 1` literal (spec L8 region); `%{RELEASE}` = `1` under `--define dist .fc40` re-proven independently; static guard inside the sim |
+| F8-V-4 (P2) token handling | **PASS** — token never in a URL (extraheader mechanism), `set +x` guard real (script never enables xtrace), `GIT_TERMINAL_PROMPT=0` + `credential.helper=` cleared, `unset AUTH_HEADER` before gh, `GH_TOKEN` for the PR call; negative: exit 1, 0 token occurrences, 0 `x-access-token` occurrences |
+| Regression: brew clean-install / install.sh / verify_tag battery / actionlint | **PASS** — all re-proven green (§1 rows 14-27) |
+| Gates: fmt / clippy / 865-0 / pack 19 / frozen 0-byte / guards 6/6 / diff --check | **PASS** (§1 rows 28-34) |
+| Hash check (4 touched files) | **PASS** — byte-exact match with the pack's frozen table |
+| Containment integrity | **PASS** — frozen workflows byte-untouched; 6/6 new-job `review9_f8_pending` guards; no `uses:`/`workflow_call` bypass in the diff |
+
+### 7. Final verdict
+
+**PASS.** The attempt-1 P0 (F8-V-1) is genuinely closed: the canonical-SHA256SUMS assembly dataflow — five named fragments, explicit `cat`, no merge-multiple, corrected upload globs, both-directions fail-closed gate, publish list driven from the verified manifest — was executed end-to-end by this independent reviewer against real fixtures (twice, idempotent), its failure modes were replayed and bite in both directions, and the winget/formula shas in the canonical sums are real (independently recomputed 16/16). Two P2 findings are recorded above (sim sig-fixture fidelity; identical-duplicate lines pass the gate but fail visibly at publish and are unreachable under the committed steps). Containment remains intact; the live GitHub Actions run stays honestly deferred to post-lift. The F8 gate may proceed to owner sign-off per §8B.
