@@ -33,7 +33,6 @@ name: version-bump-v2 (R9-3 PR-based bump)
 
 permissions:
   contents: read
-  pull-requests: write
 
 env:
   CERBERUS_DEFAULT_BRANCH: main
@@ -46,6 +45,13 @@ jobs:
   open-version-bump-pr:
     name: bump version on a branch + open PR (never writes to default branch)
     if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
+    # F10: least-privilege elevation at JOB scope (workflow level stays
+    # contents: read). contents: write is needed to push ONLY release/bump-v*
+    # (refspec in the commit step below; never the default branch);
+    # pull-requests: write is required by `gh pr create` for the bump PR.
+    permissions:
+      contents: write
+      pull-requests: write
     runs-on: ubuntu-latest
     steps:
       - name: Validate input version
@@ -59,6 +65,11 @@ jobs:
         with:
           ref: ${{ env.CERBERUS_DEFAULT_BRANCH }}
           fetch-depth: 0
+
+      # F11 (Req C5): cold registry — fetch dependencies ONLINE first so the
+      # script's `cargo metadata --offline` lockfile refresh can resolve.
+      - name: Fetch dependencies (cold-registry pre-fetch for offline refresh)
+        run: cargo fetch
 
       - name: Bump version (Cargo.toml + Cargo.lock)
         run: |
