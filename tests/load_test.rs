@@ -55,6 +55,17 @@ const PLAN_PROXY_50KB_BUDGET_MS: f64 = 5.0;
 const PLAN_CI_TOLERANCE: f64 = 2.0;
 const CI_PATHOLOGY_CEILING_MS: f64 = 30.0;
 
+/// Shared CI runners add large scheduling jitter (owner-observed 10+ ms spikes
+/// on macOS GitHub Actions runners; see PR #2's budget workaround on the old
+/// battery). When `CI=true`, release budgets are widened by this factor so CI
+/// gates gross (non-linear) regressions rather than runner noise. Local
+/// release runs keep the strict plan budgets — that is the acceptance gate.
+const CI_CONTENTION_TOLERANCE: f64 = 4.0;
+
+fn running_on_ci() -> bool {
+    std::env::var("CI").map(|v| v == "true" || v == "1").unwrap_or(false)
+}
+
 /// Emission-dominated stress-probe ceiling (NOT a product budget).
 ///
 /// A workload where ~7,500 findings fire per scan is dominated by
@@ -109,8 +120,16 @@ fn assert_p99_budget(p99_ms: f64, name: &str, release_budget: f64) {
     let is_release = !cfg!(debug_assertions);
     let profile = if is_release { "release" } else { "debug" };
     if is_release {
-        let budget = release_budget;
-        println!("load_test_{name}: profile={profile} budget={budget:.1}ms p99={p99_ms:.3} ms");
+        let ci = running_on_ci();
+        let budget = if ci {
+            release_budget * CI_CONTENTION_TOLERANCE
+        } else {
+            release_budget
+        };
+        println!(
+            "load_test_{name}: profile={profile} budget={budget:.1}ms{} p99={p99_ms:.3} ms",
+            if ci { " (CI contention bound)" } else { "" }
+        );
         assert!(
             p99_ms < budget,
             "{name}: p99 {p99_ms:.3}ms exceeds {profile} budget {budget}ms"
@@ -145,9 +164,17 @@ fn assert_plan_budgets(p50_ms: f64, p99_ms: f64, name: &str, plan_budget_ms: f64
             "{name}: debug p50 {p50_ms:.3}ms exceeds CI pathology ceiling {CI_PATHOLOGY_CEILING_MS}ms"
         );
     } else {
+        // CI runners shift even the median (owner-observed p50 1.389ms against
+        // the strict 1ms plan budget on a loaded macos runner), so on CI the
+        // p50 uses the contention bound; local release keeps it strict.
+        let p50_budget = if running_on_ci() {
+            plan_budget_ms * CI_CONTENTION_TOLERANCE
+        } else {
+            plan_budget_ms
+        };
         assert!(
-            p50_ms < plan_budget_ms,
-            "{name}: release p50 {p50_ms:.3}ms exceeds plan budget {plan_budget_ms}ms"
+            p50_ms < p50_budget,
+            "{name}: release p50 {p50_ms:.3}ms exceeds plan budget {p50_budget}ms"
         );
         assert!(
             p99_ms < plan_budget_ms * PLAN_CI_TOLERANCE,
