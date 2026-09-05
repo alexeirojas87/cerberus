@@ -305,7 +305,7 @@ impl Vault {
     /// minimal in-place splice of `json_escape(secret)` at the token spans,
     /// so the response stays valid JSON and untouched regions keep
     /// byte-identity (key order, number formatting, whitespace — a full
-    /// reserialize was rejected: serde_json lacks `preserve_order`). A parse
+    /// reserialize was rejected: `serde_json` lacks `preserve_order`). A parse
     /// failure keeps the raw substitution path verbatim and never burns
     /// entries (the JSON path is not entered at all).
     ///
@@ -556,7 +556,7 @@ impl Vault {
 /// JSON-escape a secret for in-place splicing into a JSON string leaf (F4):
 /// `"` and `\` are backslash-escaped, control bytes < 0x20 use the short
 /// `\n`/`\r`/`\t`/`\b`/`\f` forms or `\u00XX`; everything else (including
-/// UTF-8) passes through byte-identical. Mirrors serde_json's string
+/// UTF-8) passes through byte-identical. Mirrors `serde_json`'s string
 /// escaping, so the spliced bytes stay valid JSON. The token itself is
 /// escape-free ASCII and is never an input here.
 fn json_escape_str(s: &str) -> String {
@@ -858,8 +858,7 @@ mod tests {
         let token = vault.store("flag.f4", secret);
         let body = format!("{{\"answer\": \"{token}\"}}");
         let out = vault.unredact(body.as_bytes());
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&out).expect("response must stay valid JSON");
+        let parsed: serde_json::Value = serde_json::from_slice(&out).expect("response must stay valid JSON");
         assert_eq!(
             parsed["answer"].as_str(),
             Some(secret),
@@ -877,8 +876,7 @@ mod tests {
         let token = vault.store("flag.f4key", secret);
         let body = format!("{{\"{token}\": 1}}");
         let out = vault.unredact(body.as_bytes());
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&out).expect("key splice must stay valid JSON");
+        let parsed: serde_json::Value = serde_json::from_slice(&out).expect("key splice must stay valid JSON");
         let obj = parsed.as_object().expect("object shape preserved");
         assert_eq!(obj.len(), 1, "no extra keys");
         assert!(obj.contains_key(secret), "token in KEY position restored");
@@ -895,8 +893,7 @@ mod tests {
         let t2 = vault.store("f.plain", plain);
         let body = format!("{{\"a\": \"{t1}\", \"b\": \"{t2}\", \"c\": \"{t1}\"}}");
         let out = vault.unredact(body.as_bytes());
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&out).expect("valid JSON after splice");
+        let parsed: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON after splice");
         assert_eq!(parsed["a"].as_str(), Some(escaped));
         assert_eq!(parsed["b"].as_str(), Some(plain));
         assert_eq!(parsed["c"].as_str(), Some(escaped), "repeated token restored");
@@ -910,11 +907,7 @@ mod tests {
         let vault = Vault::new();
         let _ = vault.store("flag.x", SECRET);
         let body = br#"{"msg": "line\nbreak", "q": "\"quoted\"", "n": 1.10}"#;
-        assert_eq!(
-            vault.unredact(body),
-            body.to_vec(),
-            "token-free JSON byte-identical"
-        );
+        assert_eq!(vault.unredact(body), body.to_vec(), "token-free JSON byte-identical");
         let unknown = format!("{{\"k\": \"[VAULT:{}]\"}}", "0".repeat(32));
         let out = vault.unredact(unknown.as_bytes());
         assert_eq!(out, unknown.as_bytes(), "unknown token untouched");
@@ -942,8 +935,7 @@ mod tests {
         let token = vault.store("flag.once", SECRET);
         let body = format!("{{\"k\": \"{token}\"}}");
         let first = vault.unredact(body.as_bytes());
-        let first_parsed: serde_json::Value =
-            serde_json::from_slice(&first).expect("first response valid JSON");
+        let first_parsed: serde_json::Value = serde_json::from_slice(&first).expect("first response valid JSON");
         assert_eq!(first_parsed["k"].as_str(), Some(SECRET), "first redeem restores");
         let second = String::from_utf8(vault.unredact(body.as_bytes())).expect("utf8");
         assert!(
