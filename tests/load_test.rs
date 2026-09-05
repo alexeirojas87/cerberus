@@ -60,7 +60,8 @@ const CI_PATHOLOGY_CEILING_MS: f64 = 30.0;
 /// battery). When `CI=true`, release budgets are widened by this factor so CI
 /// gates gross (non-linear) regressions rather than runner noise. Local
 /// release runs keep the strict plan budgets — that is the acceptance gate.
-const CI_CONTENTION_TOLERANCE: f64 = 4.0;
+/// Worst CI multiplier observed across runs: 4.6x; 8x leaves headroom.
+const CI_CONTENTION_TOLERANCE: f64 = 8.0;
 
 fn running_on_ci() -> bool {
     std::env::var("CI").map(|v| v == "true" || v == "1").unwrap_or(false)
@@ -544,13 +545,14 @@ fn load_test_attempt7_mixed_pan_recovery_budgets() {
     }
     let (p50, p99) = benchmark_scan(&engine, &mixed_recovery, 200);
     println!("load_test_attempt7_mixed_pan_recovery_100kb: p50={p50:.3}ms p99={p99:.3}ms findings={cards}");
+    let budget = EMISSION_CLASS_100KB_BUDGET_MS * if running_on_ci() { CI_CONTENTION_TOLERANCE } else { 1.0 };
     assert!(
-        p50 < 8.0,
-        "100KB mixed-PAN recovery p50 {p50:.3}ms exceeds the 8ms emission-class budget"
+        p50 < budget,
+        "100KB mixed-PAN recovery p50 {p50:.3}ms exceeds the {budget}ms emission-class budget"
     );
     assert!(
-        p99 < 8.0,
-        "100KB mixed-PAN recovery p99 {p99:.3}ms exceeds the 8ms emission-class budget"
+        p99 < budget,
+        "100KB mixed-PAN recovery p99 {p99:.3}ms exceeds the {budget}ms emission-class budget"
     );
 }
 
