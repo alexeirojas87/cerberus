@@ -184,6 +184,33 @@ fn cli_allow_once_posts_break_glass() {
     drop(handle);
 }
 
+/// ── F2 (r9-remediation): the allow-once output must pin the EXACT
+/// redeemable header (`break-glass:` prefix — the data plane redeems ONLY
+/// that prefix via the ledger, proxy.rs:89) AND say that the
+/// `X-Cerberus-Admin-Token` header is required. The legacy bare-nonce form
+/// (replayable Legacy arm) must never be printed.
+#[test]
+fn cli_allow_once_prints_exact_break_glass_header_and_admin_note() {
+    let (addr, handle, hits) = spawn_mock_control_plane();
+    let home = temp_dir("allow-once-f2");
+    install_mock_home(&home, addr);
+    let (stdout, _, _) = run_cli(&home, &hits, &["allow-once", "--reason", "f2 header pin"]);
+    assert!(
+        stdout.contains("X-Cerberus-Bypass: break-glass:n-123"),
+        "printed header must be the redeemable break-glass form: {stdout}"
+    );
+    assert!(
+        stdout.contains("X-Cerberus-Admin-Token"),
+        "the admin-token requirement must be explicit: {stdout}"
+    );
+    assert!(
+        !stdout.contains("X-Cerberus-Bypass: n-123"),
+        "legacy bare nonce must NOT be printed: {stdout}"
+    );
+    std::fs::remove_dir_all(&home).ok();
+    drop(handle);
+}
+
 /// ── B.2: providers / add-provider / remove-provider → /api/upstreams ────
 #[test]
 fn cli_provider_crud_hits_upstreams_routes() {
