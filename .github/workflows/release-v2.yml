@@ -23,12 +23,15 @@ name: release-v2 (R9-3 architecture)
 #      commit 161387a (chronic macos-13 Intel runner unavailability blocked
 #      releases; the plan requires macOS, not Intel specifically).
 #
-# ── G0/F8 CONTAINMENT ─────────────────────────────────────────────────────────
-# INERT: every job is guarded by `if: ${{ false }}` under the NEW
-# `review9_f8_pending` guard (distinct from the frozen workflows' guards).
-# It becomes live ONLY after the F8 gate has an independently reviewed PASS
-# Evidence Pack and the owner removes the guard lines, per
-# evidence/f8/r9-release-and-tap.md. Do not remove the guard before then.
+# ─────────────────────────────────────────────────────────────────────────────
+# ── G0/F8 CONTAINMENT LIFTED (2026-09-05, owner-authorized) ──────────────────
+# Conditions met and documented in evidence/f8/r9-release-and-tap.md (attempt-2
+# independently verified PASS) + evidence/f8/containment-lift.md:
+#   - F8 phase gate CLOSED with owner sign-off: commit 0ee508a (2026-09-03)
+#   - F9 phase gate CLOSED with owner sign-off (GA-READY): commit 7ccfc81 (2026-09-05)
+#   - External-review workflow fixes merged to main (PRs #9-#12: checkout-first
+#     packaging job, native ARM runner, job-scope bump permissions, etc.)
+# The frozen legacy workflows (release.yml / notify-tap.yml) remain inert.
 # ─────────────────────────────────────────────────────────────────────────────
 
 "on":
@@ -51,7 +54,6 @@ jobs:
   # ── R9-3 fail-closed verification of the tag ───────────────────────────────
   verify-tag:
     name: verify tag semver == Cargo.toml == lock && merged into default
-    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -69,7 +71,6 @@ jobs:
   # ── Build + mandatory signing per target (R9-15: no unsigned fallback) ─────
   build:
     name: build + sign (${{ matrix.artifact_os }}/${{ matrix.artifact_arch }})
-    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
     needs: verify-tag
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -240,7 +241,6 @@ jobs:
   # ── deb/rpm really built (R9-15) ───────────────────────────────────────────
   linux-packages:
     name: build deb + rpm (linux/x86_64) with detached signatures
-    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -356,7 +356,6 @@ jobs:
   # ── Publish: merged SHA256SUMS, formula, release. No pushes to any branch ──
   release:
     name: publish GitHub release (SHA256SUMS mandatory)
-    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
     needs: [build, linux-packages]
     runs-on: ubuntu-latest
     permissions:

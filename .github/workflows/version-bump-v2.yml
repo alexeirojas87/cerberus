@@ -17,11 +17,13 @@ name: version-bump-v2 (R9-3 PR-based bump)
 # This workflow never pushes to the default branch. The pull-requests: write
 # permission is required only for creating the PR from the bump branch.
 #
-# ── G0/F8 CONTAINMENT ─────────────────────────────────────────────────────────
-# INERT: every job guarded by `if: ${{ false }}` under the NEW
-# `review9_f8_pending` guard. Flip live only after the F8 gate PASS Evidence
-# Pack + owner sign-off (evidence/f8/r9-release-and-tap.md).
-# ─────────────────────────────────────────────────────────────────────────────
+# ── G0/F8 CONTAINMENT LIFTED (2026-09-05, owner-authorized) ──────────────────
+# Conditions met and documented in evidence/f8/r9-release-and-tap.md (attempt-2
+# independently verified PASS) + evidence/f8/containment-lift.md:
+#   - F8 phase gate CLOSED with owner sign-off: commit 0ee508a (2026-09-03)
+#   - F9 phase gate CLOSED with owner sign-off (GA-READY): commit 7ccfc81 (2026-09-05)
+#   - External-review workflow fixes merged to main (PRs #9-#12)
+# The frozen legacy workflows (release.yml / notify-tap.yml) remain inert.
 
 "on":
   workflow_dispatch:
@@ -44,7 +46,6 @@ defaults:
 jobs:
   open-version-bump-pr:
     name: bump version on a branch + open PR (never writes to default branch)
-    if: ${{ false }} # review9_f8_pending — remove after F8 gate PASS + owner sign-off
     # F10: least-privilege elevation at JOB scope (workflow level stays
     # contents: read). contents: write is needed to push ONLY release/bump-v*
     # (refspec in the commit step below; never the default branch);
