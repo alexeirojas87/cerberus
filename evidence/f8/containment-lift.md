@@ -38,4 +38,8 @@ and doubles as the planned release rehearsal.
 - `actionlint -no-color .github/workflows/*.yml`: the only remaining findings are the two
   documented intentional containment patterns of the FROZEN legacy workflows
   (`review9_*_freeze` guards ×2, `"on": []` ×2); the three v2 workflows are clean.
-- No other file touched (single-purpose commit).
+- The PR also carries CI-conformance fixes for the load-test battery discovered during
+  the lift's CI runs (all pre-existing register tests, never CI-exposed before PR #8):
+  the F1.3 throughput micro-gate and the empty-engine ceiling now use the documented
+  `CI_CONTENTION_TOLERANCE` bound on CI, like every other timing gate. Local strict
+  budgets unchanged.
